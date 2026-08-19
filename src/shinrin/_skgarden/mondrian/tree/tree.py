@@ -629,6 +629,14 @@ class BaseMondrianTree(BaseDecisionTree):
         if not hasattr(self, "first_"):
             self.first_ = True
 
+        # Skip rebuilding if tree was converted from ONNX/sklearn
+        # Only skip if _onnx_converted is True (set by from_model)
+        if getattr(self, '_onnx_converted', False):
+            if hasattr(self, 'tree_') and hasattr(self.tree_, 'n_node_samples'):
+                if self.tree_.n_node_samples.sum() > 0:
+                    # Tree was already built (converted), skip rebuilding
+                    return self
+
         if is_classifier:
             check_classification_targets(y)
 
@@ -704,6 +712,65 @@ class MondrianTreeRegressor(BaseMondrianTree, RegressorMixin):
             min_samples_split=min_samples_split,
             random_state=random_state)
 
+    @classmethod
+    def from_model(cls, model, X, y):
+        """Create a MondrianTreeRegressor from a fitted sklearn or ONNX model.
+
+        This classmethod converts a fitted gradient boosting or random forest
+        model (provided as a sklearn estimator or ONNX model) into a
+        MondrianTreeRegressor. The conversion preserves the original model's
+        predictions while rebuilding Mondrian-specific statistics (bounds,
+        tau values, node samples) needed for incremental training via
+        partial_fit.
+
+        Parameters
+        ----------
+        model : sklearn estimator or ONNX ModelProto
+            A fitted sklearn tree/forest estimator (with ``tree_`` or
+            ``estimators_`` attribute) or an ONNX model proto.
+        X : array-like of shape (n_samples, n_features)
+            Training data used to compute Mondrian statistics. Should have at
+            least 300 samples for meaningful statistics.
+        y : array-like of shape (n_samples,)
+            Target values.
+
+        Returns
+        -------
+        MondrianTreeRegressor
+            A fitted Mondrian tree that produces the same predictions as the
+            original model and supports partial_fit.
+
+        Raises
+        ------
+        ValueError
+            If the model is not a valid tree model.
+        ImportError
+            If onnx is required but not installed.
+
+        Warnings
+        --------
+        UserWarning
+            Issued if the training dataset has fewer than 300 samples.
+
+        Examples
+        --------
+        >>> from sklearn.ensemble import GradientBoostingRegressor
+        >>> from shinrin import MondrianTreeRegressor
+        >>> from shinrin.onnx import to_onnx
+        >>>
+        >>> sklearn_model = GradientBoostingRegressor(n_estimators=1, max_depth=3)
+        >>> sklearn_model.fit(X_train, y_train)
+        >>> onnx_model = to_onnx(sklearn_model, X_train)
+        >>>
+        >>> # Convert to Mondrian tree (one-step)
+        >>> tree = MondrianTreeRegressor.from_model(onnx_model, X_train, y_train)
+        >>> tree.predict(X_test)  # same predictions as sklearn_model
+        >>> tree.partial_fit(X_new, y_new)  # continue training
+        """
+        from shinrin.onnx_import import from_model
+
+        return from_model(model, X, y, cls)
+
     def partial_fit(self, X, y):
         """
         Incremental building of Mondrian Tree Regressors.
@@ -734,6 +801,65 @@ class MondrianTreeClassifier(BaseMondrianTree, ClassifierMixin):
             max_depth=max_depth,
             min_samples_split=min_samples_split,
             random_state=random_state)
+
+    @classmethod
+    def from_model(cls, model, X, y):
+        """Create a MondrianTreeClassifier from a fitted sklearn or ONNX model.
+
+        This classmethod converts a fitted gradient boosting or random forest
+        classifier (provided as a sklearn estimator or ONNX model) into a
+        MondrianTreeClassifier. The conversion preserves the original model's
+        predictions while rebuilding Mondrian-specific statistics (bounds,
+        tau values, node samples) needed for incremental training via
+        partial_fit.
+
+        Parameters
+        ----------
+        model : sklearn estimator or ONNX ModelProto
+            A fitted sklearn tree/forest estimator (with ``tree_`` or
+            ``estimators_`` attribute) or an ONNX model proto.
+        X : array-like of shape (n_samples, n_features)
+            Training data used to compute Mondrian statistics. Should have at
+            least 300 samples for meaningful statistics.
+        y : array-like of shape (n_samples,)
+            Target class labels.
+
+        Returns
+        -------
+        MondrianTreeClassifier
+            A fitted Mondrian tree that produces the same predictions as the
+            original model and supports partial_fit.
+
+        Raises
+        ------
+        ValueError
+            If the model is not a valid tree model.
+        ImportError
+            If onnx is required but not installed.
+
+        Warnings
+        --------
+        UserWarning
+            Issued if the training dataset has fewer than 300 samples.
+
+        Examples
+        --------
+        >>> from sklearn.ensemble import GradientBoostingClassifier
+        >>> from shinrin import MondrianTreeClassifier
+        >>> from shinrin.onnx import to_onnx
+        >>>
+        >>> sklearn_model = GradientBoostingClassifier(n_estimators=1, max_depth=3)
+        >>> sklearn_model.fit(X_train, y_train)
+        >>> onnx_model = to_onnx(sklearn_model, X_train)
+        >>>
+        >>> # Convert to Mondrian tree (one-step)
+        >>> tree = MondrianTreeClassifier.from_model(onnx_model, X_train, y_train)
+        >>> tree.predict_proba(X_test)  # same predictions as sklearn_model
+        >>> tree.partial_fit(X_new, y_new)  # continue training
+        """
+        from shinrin.onnx_import import from_model
+
+        return from_model(model, X, y, cls)
 
     def predict_proba(self, X, check_input=True):
         """

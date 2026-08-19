@@ -1037,6 +1037,11 @@ class ForestClassifier(ClassifierMixin, BaseForest, metaclass=ABCMeta):
         # Assign chunk of trees to jobs
         n_jobs, _, _ = _partition_estimators(self.n_estimators, self.n_jobs)
 
+        # If first_ is True, the forest was imported from sklearn/ONNX
+        # and trees are unsendable, so disable parallelism
+        if getattr(self, 'first_', False):
+            n_jobs = 1
+
         # avoid storing the output of every estimator by summing them here
         all_proba = [np.zeros((X.shape[0], j), dtype=np.float64)
                      for j in np.atleast_1d(self.n_classes_)]
@@ -1137,6 +1142,11 @@ class ForestRegressor(RegressorMixin, BaseForest, metaclass=ABCMeta):
 
         # Assign chunk of trees to jobs
         n_jobs, _, _ = _partition_estimators(self.n_estimators, self.n_jobs)
+
+        # If first_ is True, the forest was imported from sklearn/ONNX
+        # and trees are unsendable, so disable parallelism
+        if getattr(self, 'first_', False):
+            n_jobs = 1
 
         # avoid storing the output of every estimator by summing them here
         if self.n_outputs_ > 1:
