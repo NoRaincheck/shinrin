@@ -1,7 +1,7 @@
 [project]
 name = "shinrin"
 version = "0.1.0"
-description = "Add your description here"
+description = "Shinrin (Forest) - An ML library for decision tree and related extensions"
 readme = "README.md"
 authors = [
     { name = "NoRaincheck", email = "2498638+NoRaincheck@users.noreply.github.com" }
