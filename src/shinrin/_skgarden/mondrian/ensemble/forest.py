@@ -55,6 +55,113 @@ class BaseMondrian(object):
 
         Returns
         -------
+        shap_values : array
+            The last column/axis contains the base value (root prediction).
+            For regression, shape is (n_samples, n_features + 1).
+            For classification with K classes, shape is
+            (n_samples, n_features + 1, K).
+        """
+        X = self._validate_X_predict(X)
+        n_samples = X.shape[0]
+        n_features = self.n_features_
+
+        ensemble_shap = None
+        base_values = None
+        is_classification = None
+
+        for est in self.estimators_:
+            tree_contribs = est.pred_contribs(X)
+            # tree_contribs shape: (n_samples, n_features + 1) for reg
+            # or (n_samples, n_features + 1, K) for clf
+            if isinstance(est, ClassifierMixin):
+                if is_classification is None:
+                    is_classification = True
+                n_classes = tree_contribs.shape[-1]
+                if ensemble_shap is None:
+                    ensemble_shap = np.zeros((n_samples, n_features, n_classes))
+                    base_values = np.zeros((n_samples, n_classes))
+                ensemble_shap += tree_contribs[:, :-1, :]
+                base_values += tree_contribs[:, -1, :]
+            else:
+                if is_classification is None:
+                    is_classification = False
+                if ensemble_shap is None:
+                    ensemble_shap = np.zeros((n_samples, n_features + 1))
+                    base_values = np.zeros((n_samples,))
+                ensemble_shap += tree_contribs
+                base_values += tree_contribs[:, -1]
+
+        ensemble_shap /= len(self.estimators_)
+        base_values /= len(self.estimators_)
+
+        if is_classification:
+            # ensemble_shap: (n_samples, n_features, n_classes)
+            # base_values: (n_samples, n_classes)
+            # Result: (n_samples, n_features + 1, n_classes)
+            return np.concatenate(
+                [ensemble_shap, base_values[:, np.newaxis, :]], axis=1
+            )
+        else:
+            return np.column_stack([ensemble_shap[:, :-1], base_values])
+
+    def pred_anomaly(self, X, n_train=None):
+        """Compute Isolation Forest anomaly scores.
+
+        Each sample receives an anomaly score based on its average path length
+        through the forest. Scores range from 0 to 1, where:
+            - ~0.5: normal sample (path length ~ average)
+            - ~1.0: highly anomalous (short path length)
+            - ~0.0: very deep path (unlikely under isolation model)
+
+        The score is computed as:
+            s(x, n) = 2^(-E[h(x)] / c(n))
+
+        where h(x) is the path length from root to leaf and c(n) is the
+        average path length of an unsuccessful search in a binary search tree
+        with n nodes.
+
+        Parameters
+        ----------
+        X : array-like, shape = (n_samples, n_features)
+            Input samples.
+
+        n_train : int, optional
+            Number of training samples used to build the forest. If not
+            provided, inferred from the first tree's n_node_samples.
+            Using the correct n_train is important for proper normalization.
+
+        Returns
+        -------
+        anomaly_scores : array-like, shape = (n_samples,)
+            Anomaly scores for each sample. Higher values indicate more
+            anomalous samples.
+        """
+        X = self._validate_X_predict(X)
+        total_anomaly = np.zeros(X.shape[0])
+        for est in self.estimators_:
+            total_anomaly += est._compute_anomaly(X)
+
+        avg_anomaly = total_anomaly / len(self.estimators_)
+
+        # Normalize by c(n) - use training sample count for proper normalization
+        if n_train is None:
+            n_train = len(self.estimators_[0].tree_.n_node_samples)
+        c_n = _c_n(n_train)
+        if c_n == 0:
+            return np.zeros(X.shape[0])
+        return np.power(2, -avg_anomaly / c_n)
+        """Return TreeSHAP values including the base value.
+
+        This method returns SHAP values averaged across all trees such that
+        the sum of SHAP values plus the base value equals the model prediction.
+
+        Parameters
+        ----------
+        X : array-like, shape = (n_samples, n_features)
+            The input samples.
+
+        Returns
+        -------
         shap_values : array of shape = (n_samples, n_features + 1)
             The last column contains the base value (root prediction).
             For regression, shape is (n_samples, n_features + 1).
@@ -83,45 +190,6 @@ class BaseMondrian(object):
         base_values /= len(self.estimators_)
 
         return np.column_stack([ensemble_shap, base_values])
-
-    def pred_anomaly(self, X):
-        """Compute Isolation Forest anomaly scores.
-
-        Each sample receives an anomaly score based on its average path length
-        through the forest. Scores range from 0 to 1, where:
-            - ~0.5: normal sample (path length ~ average)
-            - ~1.0: highly anomalous (short path length)
-            - ~0.0: very deep path (unlikely under isolation model)
-
-        The score is computed as:
-            s(x, n) = 2^(-E[h(x)] / c(n))
-
-        where h(x) is the path length from root to leaf and c(n) is the
-        average path length of an unsuccessful search in a binary search tree
-        with n nodes.
-
-        Parameters
-        ----------
-        X : array-like, shape = (n_samples, n_features)
-            Input samples.
-
-        Returns
-        -------
-        anomaly_scores : array-like, shape = (n_samples,)
-            Anomaly scores for each sample. Higher values indicate more
-            anomalous samples.
-        """
-        X = self._validate_X_predict(X)
-        total_anomaly = np.zeros(X.shape[0])
-        for est in self.estimators_:
-            total_anomaly += est._compute_anomaly(X)
-
-        avg_anomaly = total_anomaly / len(self.estimators_)
-
-        # Normalize by c(n)
-        n = len(self.estimators_[0].tree_.n_node_samples)
-        c_n = _c_n(n)
-        return np.power(2, -avg_anomaly / c_n)
 
     def weighted_decision_path(self, X):
         """
@@ -311,14 +379,14 @@ class MondrianForestRegressor(ForestRegressor, BaseMondrian):
         Returns the predicted mean and std.
 
         The prediction is a GMM drawn from
-        ``\sum_{i=1}^T w_i N(m_i, \sigma_i)`` where ``w_i = {1 \over T}``.
+        ``\\sum_{i=1}^T w_i N(m_i, \\sigma_i)`` where ``w_i = {1 \\over T}``.
 
-        The mean ``E[Y | X]`` reduces to ``{\sum_{i=1}^T m_i \over T}``
+        The mean ``E[Y | X]`` reduces to ``{\\sum_{i=1}^T m_i \\over T}``
 
         The variance ``Var[Y | X]`` is given by
         ``Var[Y | X] = E[Y^2 | X] - E[Y | X]^2``
-        ``= \frac{\sum_{i=1}^T E[Y^2_i| X]}{T} - E[Y | X]^2``
-        $$= \\frac{\sum_{i=1}^T (Var[Y_i | X] + E[Y_i | X]^2)}{T} - E[Y| X]^2$$
+        ``= \\frac{\\sum_{i=1}^T E[Y^2_i| X]}{T} - E[Y | X]^2``
+        $$= \\frac{\\sum_{i=1}^T (Var[Y_i | X] + E[Y_i | X]^2)}{T} - E[Y| X]^2$$
 
         Parameters
         ----------
@@ -385,9 +453,10 @@ class MondrianForestRegressor(ForestRegressor, BaseMondrian):
         if return_anomaly:
             ensemble_anomaly /= len(self.estimators_)
             # Normalize by c(n) = average path length of unsuccessful BST search
-            n = len(self.estimators_[0].tree_.n_node_samples)
-            c_n = _c_n(n)
-            anomaly_scores = np.power(2, -ensemble_anomaly / c_n)
+            # Use training sample count for proper normalization
+            n_train = len(self.estimators_[0].tree_.n_node_samples)
+            c_n = _c_n(n_train)
+            anomaly_scores = np.power(2, -ensemble_anomaly / c_n) if c_n > 0 else np.zeros(X.shape[0])
 
         if return_shap:
             ensemble_shap /= len(self.estimators_)
@@ -407,48 +476,6 @@ class MondrianForestRegressor(ForestRegressor, BaseMondrian):
             results.append(ensemble_shap)
 
         return tuple(results)
-
-    def pred_anomaly(self, X):
-        """Compute Isolation Forest anomaly scores.
-
-        Each sample receives an anomaly score based on its average path length
-        through the forest. Scores range from 0 to 1, where:
-            - ~0.5: normal sample (path length ~ average)
-            - ~1.0: highly anomalous (short path length)
-            - ~0.0: very deep path (unlikely under isolation model)
-
-        The score is computed as:
-            s(x, n) = 2^(-E[h(x)] / c(n))
-
-        where h(x) is the path length from root to leaf and c(n) is the
-        average path length of an unsuccessful search in a binary search tree
-        with n nodes.
-
-        Parameters
-        ----------
-        X : array-like, shape = (n_samples, n_features)
-            Input samples.
-
-        Returns
-        -------
-        anomaly_scores : array-like, shape = (n_samples,)
-            Anomaly scores for each sample. Higher values indicate more
-            anomalous samples.
-        """
-        X = check_array(X)
-        if not hasattr(self, "estimators_"):
-            raise NotFittedError("The model has to be fit before prediction.")
-
-        total_anomaly = np.zeros(X.shape[0])
-        for est in self.estimators_:
-            total_anomaly += est._compute_anomaly(X)
-
-        avg_anomaly = total_anomaly / len(self.estimators_)
-
-        # Normalize by c(n)
-        n = len(self.estimators_[0].tree_.n_node_samples)
-        c_n = _c_n(n)
-        return np.power(2, -avg_anomaly / c_n)
 
     def partial_fit(self, X, y):
         """
@@ -481,7 +508,7 @@ class MondrianForestClassifier(ForestClassifier, BaseMondrian):
     A MondrianForestClassifier is an ensemble of MondrianTreeClassifiers.
 
     The probability ``p_j`` of class ``j`` is given by the average
-    across all trees: ``\sum_{i}^{N_{est}} \frac{p_{j}^i}{N_{est}}``
+    across all trees: ``\\sum_{i}^{N_{est}} \\frac{p_{j}^i}{N_{est}}``
 
     Parameters
     ----------
@@ -599,7 +626,8 @@ class MondrianForestClassifier(ForestClassifier, BaseMondrian):
             results.append(self.pred_anomaly(X))
 
         if return_shap:
-            ensemble_shap = np.zeros((X.shape[0], self.n_features_))
+            n_classes = self.n_classes_
+            ensemble_shap = np.zeros((X.shape[0], self.n_features_, n_classes))
             for est in self.estimators_:
                 ensemble_shap += est._compute_shap(X)
             ensemble_shap /= len(self.estimators_)

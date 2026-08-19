@@ -81,13 +81,20 @@ class TestTreePredContribs:
         pred_from_shap = contribs[:, :-1].sum(axis=1) + contribs[:, -1]
         assert np.allclose(pred, pred_from_shap, atol=1e-3)
 
+    def test_tree_classifier_return_std_raises(self, X_train, y_train_clf, X_test):
+        tree = MondrianTreeClassifier(random_state=42)
+        tree.fit(X_train, y_train_clf)
+        with pytest.raises(ValueError, match="return_std is not supported"):
+            tree.predict(X_test, return_std=True)
+
     def test_tree_shap_shape_classification(
         self, X_train, y_train_clf, X_test
     ):
         tree = MondrianTreeClassifier(random_state=42)
         tree.fit(X_train, y_train_clf)
         pred, shap = tree.predict(X_test, return_shap=True)
-        assert shap.shape == (10, 4)
+        # Classification returns per-class SHAP: (n_samples, n_features, n_classes)
+        assert shap.shape == (10, 4, 3)
 
     def test_tree_pred_contribs_shape_classification(
         self, X_train, y_train_clf, X_test
@@ -224,9 +231,12 @@ class TestForestPredContribs:
         forest = MondrianForestClassifier(n_estimators=10, random_state=42)
         forest.fit(X_train, y_train_clf)
         pred, shap = forest.predict(X_test, return_shap=True)
-        assert shap.shape == (10, 4)
+        # Classification returns per-class SHAP: (n_samples, n_features, n_classes)
+        assert shap.shape == (10, 4, 3)
         contribs = forest.pred_contribs(X_test)
-        assert contribs.shape == (10, 5)
+        # pred_contribs returns (n_samples, n_features + 1, n_classes)
+        assert contribs.ndim == 3
+        assert contribs.shape == (10, 5, 3)
 
 
 class TestPredictWithMultipleKwargs:

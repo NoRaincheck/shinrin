@@ -281,6 +281,11 @@ class BaseDecisionTree(ABC, BaseEstimator):
 
         # Classification
         if isinstance(self, ClassifierMixin):
+            if return_std:
+                raise ValueError(
+                    "return_std is not supported for classifiers. "
+                    "Use MondrianTreeRegressor for standard deviation estimates."
+                )
             prediction = self.classes_[self.predict_proba(X).argmax(axis=1)]
         # Regression
         else:
@@ -291,7 +296,7 @@ class BaseDecisionTree(ABC, BaseEstimator):
         # Build return tuple consistently
         parts = [prediction]
         if return_std:
-            parts.append(mean_and_std[1] if return_std else None)
+            parts.append(mean_and_std[1])
         if return_anomaly:
             parts.append(self._compute_anomaly(X))
         if return_shap:
@@ -323,7 +328,21 @@ class BaseDecisionTree(ABC, BaseEstimator):
         contributions such that:
             prediction = base_value + sum(shap_values)
 
-        Returns an array of shape (n_samples, n_features).
+        For regression, returns shape (n_samples, n_features).
+        For classification, returns shape (n_samples, n_features, n_classes)
+        with per-class SHAP values that satisfy:
+            predict_proba[i, c] = base_value[c] + sum(shap_values[i, :, c])
+
+        Parameters
+        ----------
+        X : array-like, shape = (n_samples, n_features)
+            Input samples.
+
+        Returns
+        -------
+        shap_values : ndarray
+            SHAP values. Shape is (n_samples, n_features) for regression
+            or (n_samples, n_features, n_classes) for classification.
         """
         check_is_fitted(self, 'tree_')
         X = self._validate_X_predict(X, check_input=True)
@@ -336,64 +355,98 @@ class BaseDecisionTree(ABC, BaseEstimator):
         if hasattr(weighted_path, 'toarray'):
             weighted_path = weighted_path.toarray()
 
-        # Get node values
         if is_regression:
+            # Regression: node values are means
             node_values = self.tree_.mean[:self.tree_.node_count]
+            base_val = node_values[0]
+            shap = np.zeros((n_samples, n_features))
+
+            for i in range(n_samples):
+                path_mask = weighted_path[i] > 0
+                path_node_indices = np.where(path_mask)[0]
+                if len(path_node_indices) == 0:
+                    continue
+
+                path_features = self.tree_.feature[path_node_indices]
+                path_weights = weighted_path[i, path_node_indices]
+
+                feat_contribs = np.zeros(n_features)
+                leaf_contrib = 0.0
+
+                for node_idx, feat, weight in zip(
+                    path_node_indices, path_features, path_weights):
+                    node_contrib = weight * (node_values[node_idx] - base_val)
+                    if feat < 0 or feat >= n_features:  # Leaf node
+                        leaf_contrib += node_contrib
+                    else:
+                        feat_contribs[feat] += node_contrib
+
+                if leaf_contrib != 0.0:
+                    total_feat_weight = sum(
+                        w for f, w in zip(path_features, path_weights)
+                        if 0 <= f < n_features)
+                    if total_feat_weight > 0:
+                        for feat, weight in zip(path_features, path_weights):
+                            if 0 <= feat < n_features:
+                                shap[i, feat] += leaf_contrib * (weight / total_feat_weight)
+                    else:
+                        shap[i] += leaf_contrib / n_features
+
+                shap[i] += feat_contribs
         else:
-            # For classification, use class probability sums normalized by samples
-            n_node_samples = self.tree_.n_node_samples[:self.tree_.node_count]
-            values = self.tree_.value[:self.tree_.node_count, :, :]
-            node_values = np.zeros(self.tree_.node_count)
-            for i in range(self.tree_.node_count):
-                total = n_node_samples[i]
-                if total > 0:
-                    node_values[i] = values[i].sum()
+            # Classification: compute per-class SHAP values
+            # Use class-conditional TreeSHAP (Lundberg et al. 2020)
+            n_classes = self.n_classes_
+            shap = np.zeros((n_samples, n_features, n_classes))
 
-        # Base value is the root node value (mean of all training samples)
-        base_val = node_values[0]
+            for c in range(n_classes):
+                # Build binary value array: P(class=c | node)
+                n_node_samples_arr = self.tree_.n_node_samples[:self.tree_.node_count]
+                values = self.tree_.value[:self.tree_.node_count, :, :]
+                class_values = np.zeros(self.tree_.node_count)
+                for j in range(self.tree_.node_count):
+                    total = n_node_samples_arr[j]
+                    if total > 0:
+                        class_values[j] = values[j, 0, c] / total
+                    else:
+                        class_values[j] = 0.0
 
-        # For each sample, compute SHAP values from path
-        shap = np.zeros((n_samples, n_features))
+                base_val_c = class_values[0]
 
-        for i in range(n_samples):
-            # Find nodes on the path with non-zero weights
-            path_mask = weighted_path[i] > 0
-            path_node_indices = np.where(path_mask)[0]
+                for i in range(n_samples):
+                    path_mask = weighted_path[i] > 0
+                    path_node_indices = np.where(path_mask)[0]
+                    if len(path_node_indices) == 0:
+                        continue
 
-            if len(path_node_indices) == 0:
-                continue
+                    path_features = self.tree_.feature[path_node_indices]
+                    path_weights = weighted_path[i, path_node_indices]
 
-            # Get features and weights on the path
-            path_features = self.tree_.feature[path_node_indices]
-            path_weights = weighted_path[i, path_node_indices]
+                    feat_contribs = np.zeros(n_features)
+                    leaf_contrib = 0.0
 
-            # Accumulate SHAP contributions per feature and leaf
-            feat_contribs = np.zeros(n_features)
-            leaf_contrib = 0.0
+                    for node_idx, feat, weight in zip(
+                        path_node_indices, path_features, path_weights):
+                        node_contrib = weight * (class_values[node_idx] - base_val_c)
+                        if feat < 0 or feat >= n_features:  # Leaf node
+                            leaf_contrib += node_contrib
+                        else:
+                            feat_contribs[feat] += node_contrib
 
-            for node_idx, feat, weight in zip(
-                path_node_indices, path_features, path_weights):
-                node_contrib = weight * (node_values[node_idx] - base_val)
-                if feat < 0 or feat >= n_features:  # Leaf node
-                    leaf_contrib += node_contrib
-                else:
-                    feat_contribs[feat] += node_contrib
+                    if leaf_contrib != 0.0:
+                        total_feat_weight = sum(
+                            w for f, w in zip(path_features, path_weights)
+                            if 0 <= f < n_features)
+                        if total_feat_weight > 0:
+                            for feat, weight in zip(path_features, path_weights):
+                                if 0 <= feat < n_features:
+                                    shap[i, feat, c] += leaf_contrib * (weight / total_feat_weight)
+                        else:
+                            shap[i, :, c] += leaf_contrib / n_features
 
-            # Distribute leaf contribution proportionally among features on path
-            if leaf_contrib != 0.0:
-                total_feat_weight = sum(
-                    w for f, w in zip(path_features, path_weights)
-                    if 0 <= f < n_features)
-                if total_feat_weight > 0:
-                    for feat, weight in zip(path_features, path_weights):
-                        if 0 <= feat < n_features:
-                            shap[i, feat] += leaf_contrib * (weight / total_feat_weight)
-                else:
-                    # Path only contains leaf nodes: distribute equally
-                    shap[i] += leaf_contrib / n_features
+                    shap[i, :, c] += feat_contribs
 
-            # Add direct feature contributions
-            shap[i] += feat_contribs
+            return shap
 
         return shap
 
@@ -414,8 +467,8 @@ class BaseDecisionTree(ABC, BaseEstimator):
 
         Returns
         -------
-        shap_values : array of shape = [n_samples, n_features + 1]
-            The last column contains the base value (root prediction).
+        shap_values : array
+            The last column/axis contains the base value (root prediction).
             For regression, shape is (n_samples, n_features + 1).
             For classification with K classes, shape is (n_samples, n_features + 1, K).
         """
@@ -424,13 +477,13 @@ class BaseDecisionTree(ABC, BaseEstimator):
         shap = self._compute_shap(X)
 
         if isinstance(self, ClassifierMixin):
-            base = self.tree_.base_value
-            # For classification, base_value has shape (max_n_classes,)
-            # Stack shap values with base value
+            # shap is (n_samples, n_features, n_classes)
             n_samples = X.shape[0]
-            n_classes = len(base)
+            n_classes = shap.shape[-1]
+            base = self.tree_.base_value[:n_classes]
+            # Stack shap values with base value along feature axis
             result = np.zeros((n_samples, shap.shape[1] + 1, n_classes))
-            result[:, :-1, :] = shap[:, :, np.newaxis]
+            result[:, :-1, :] = shap
             result[:, -1, :] = base[np.newaxis, :]
             return result
         else:
