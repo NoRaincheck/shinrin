@@ -33,6 +33,8 @@ __all__ = [
     "RandomForestRegressor",
     "Rule",
     "SkopeRules",
+    "TreeExplainer",
+    "explanation",
     "replace_feature_name",
 ]
 
@@ -79,6 +81,8 @@ _IMPORT_MAP: dict[str, tuple[str, str]] = {
     "Rule": ("shinrin._skrules.rule", "Rule"),
     "replace_feature_name": ("shinrin._skrules.rule", "replace_feature_name"),
     "SkopeRules": ("shinrin._skrules.skope_rules", "SkopeRules"),
+    "TreeExplainer": ("shinrin.shap", "TreeExplainer"),
+    "explanation": ("shinrin.shap", "explanation"),
 }
 
 # Cache for resolved imports
