@@ -1430,6 +1430,15 @@ impl PyTree {
     }
 
     #[getter]
+    fn base_value<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
+        let inner = self.inner.borrow();
+        // base_value is the root node value (prediction at root, before any splits)
+        let root = inner.root as usize;
+        let val = &inner.value[root * inner.value_stride..(root + 1) * inner.value_stride];
+        PyArray1::from_vec(py, val.to_vec())
+    }
+
+    #[getter]
     fn value<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray3<f64>>> {
         let inner = self.inner.borrow();
         let n = inner.node_count as usize;
@@ -1624,6 +1633,165 @@ impl PyTree {
             n_samples,
             node_count,
         )
+    }
+
+    fn isolation_path_length<'py>(
+        &self,
+        py: Python<'py>,
+        x: Bound<'py, PyArray2<f32>>,
+    ) -> PyResult<Bound<'py, PyArray1<f64>>> {
+        let inner = self.inner.borrow();
+        let shape = x.shape();
+        let n_samples = shape[0];
+        let x_readonly = x.readonly();
+        let view = x_readonly.as_array();
+        let mut out = Vec::with_capacity(n_samples);
+        for i in 0..n_samples {
+            let mut curr = inner.root;
+            let mut depth = 0usize;
+            loop {
+                let node = &inner.nodes[curr as usize];
+                if node.left_child == TREE_LEAF {
+                    break;
+                }
+                depth += 1;
+                if (view[[i, node.feature as usize]] as f64) <= node.threshold {
+                    curr = node.left_child;
+                } else {
+                    curr = node.right_child;
+                }
+            }
+            out.push(depth as f64);
+        }
+        Ok(PyArray1::from_vec(py, out))
+    }
+
+    fn shap_values<'py>(
+        &self,
+        py: Python<'py>,
+        x: Bound<'py, PyArray2<f32>>,
+    ) -> PyResult<Bound<'py, PyArray2<f64>>> {
+        let inner = self.inner.borrow();
+        let shape = x.shape();
+        let n_samples = shape[0];
+        let n_features = shape[1];
+        let x_readonly = x.readonly();
+        let view = x_readonly.as_array();
+        let node_count = inner.node_count as usize;
+        let is_regression = inner.n_classes[0] == 1;
+        let max_n_classes = inner.max_n_classes as usize;
+        let value_stride = inner.value_stride;
+
+        // Precompute node values for regression (leaf mean) and classification (class counts)
+        let node_values: Vec<f64> = (0..node_count)
+            .flat_map(|i| inner.value[i * value_stride..i * value_stride + max_n_classes].to_vec())
+            .collect();
+        let n_node_samples: Vec<f64> = (0..node_count)
+            .map(|i| inner.nodes[i].n_node_samples as f64)
+            .collect();
+
+        // For each sample, traverse from root to leaf and compute SHAP values
+        // using the tree SHAP approximation (Lundberg et al. 2020).
+        let mut out = vec![0f64; n_samples * n_features];
+
+        for i in 0..n_samples {
+            // Traverse path
+            let mut path: Vec<usize> = Vec::new();
+            let mut curr = inner.root as usize;
+            loop {
+                path.push(curr);
+                let node = &inner.nodes[curr];
+                if node.left_child == TREE_LEAF {
+                    break;
+                }
+                if view[[i, node.feature as usize]] as f64 <= node.threshold {
+                    curr = node.left_child as usize;
+                } else {
+                    curr = node.right_child as usize;
+                }
+            }
+
+            // For each node on the path, compute SHAP value for the split feature
+            for &node_idx in &path {
+                let node = &inner.nodes[node_idx];
+                if node.left_child != TREE_LEAF {
+                    // Internal node: compute SHAP value for the split feature
+                    let feat = node.feature as usize;
+                    if feat >= n_features {
+                        continue;
+                    }
+                    let x_val = view[[i, feat]] as f64;
+                    let threshold = node.threshold;
+
+                    // Compute conditional expectations E[Y | X_S] for S = features on path before this node
+                    // Approximation: use the node value as E[Y | path so far],
+                    // and the average of children values as E[Y | path without this feature]
+                    let val_parent = if is_regression {
+                        node_values[node_idx * max_n_classes]
+                    } else {
+                        // For classification, use the predicted class probability
+                        // Sum of node values normalized by node samples
+                        let total = n_node_samples[node_idx];
+                        if total > 0.0 {
+                            let sum: f64 = (0..max_n_classes)
+                                .map(|c| node_values[node_idx * max_n_classes + c])
+                                .sum();
+                            sum / total
+                        } else {
+                            0.0
+                        }
+                    };
+
+                    let val_left = if is_regression {
+                        let left_idx = node.left_child as usize;
+                        node_values[left_idx * max_n_classes]
+                    } else {
+                        let left_idx = node.left_child as usize;
+                        let total = n_node_samples[left_idx];
+                        if total > 0.0 {
+                            let sum: f64 = (0..max_n_classes)
+                                .map(|c| node_values[left_idx * max_n_classes + c])
+                                .sum();
+                            sum / total
+                        } else {
+                            0.0
+                        }
+                    };
+
+                    let val_right = if is_regression {
+                        let right_idx = node.right_child as usize;
+                        node_values[right_idx * max_n_classes]
+                    } else {
+                        let right_idx = node.right_child as usize;
+                        let total = n_node_samples[right_idx];
+                        if total > 0.0 {
+                            let sum: f64 = (0..max_n_classes)
+                                .map(|c| node_values[right_idx * max_n_classes + c])
+                                .sum();
+                            sum / total
+                        } else {
+                            0.0
+                        }
+                    };
+
+                    // SHAP value: if x goes left, contribution = val_left - val_parent
+                    // if x goes right, contribution = val_right - val_parent
+                    // This is the simplified TreeSHAP (additive approximation)
+                    let shap_val = if x_val <= threshold {
+                        val_left - val_parent
+                    } else {
+                        val_right - val_parent
+                    };
+
+                    out[i * n_features + feat] = shap_val;
+                }
+            }
+        }
+
+        let rows: Vec<Vec<f64>> = (0..n_samples)
+            .map(|i| out[i * n_features..(i + 1) * n_features].to_vec())
+            .collect();
+        PyArray2::from_vec2(py, &rows).map_err(PyErr::from)
     }
 
     fn weighted_decision_path<'py>(

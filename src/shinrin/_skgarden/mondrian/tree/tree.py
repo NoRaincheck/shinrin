@@ -232,7 +232,8 @@ class BaseDecisionTree(ABC, BaseEstimator):
 
         return X
 
-    def predict(self, X, check_input=True, return_std=False):
+    def predict(self, X, check_input=True, return_std=False,
+                return_anomaly=False, return_shap=False):
         """Predict class or regression value for X.
 
         For a classification model, the predicted class for each sample in X is
@@ -250,28 +251,193 @@ class BaseDecisionTree(ABC, BaseEstimator):
             Allow to bypass several input checking.
             Don't use this parameter unless you know what you do.
 
-        return_std : boolean, (default=True)
+        return_std : boolean, (default=False)
             Whether or not to return the standard deviation.
+
+        return_anomaly : boolean, (default=False)
+            If True, return the Isolation Forest anomaly score for each sample.
+            The anomaly score is computed as the average path length across
+            all trees in the forest, normalized by the average path length of
+            random trees built on the same dataset.
+
+        return_shap : boolean, (default=False)
+            If True, return TreeSHAP values for each sample.
+            The SHAP values explain the contribution of each feature to the
+            prediction relative to the base value (root prediction).
 
         Returns
         -------
         y : array of shape = [n_samples] or [n_samples, n_outputs]
             The predicted classes, or the predict values.
+        anomaly_scores : array of shape = [n_samples], optional
+            Returned if ``return_anomaly=True``. Higher values indicate more
+            anomalous samples.
+        shap_values : array of shape = [n_samples, n_features], optional
+            Returned if ``return_shap=True``. Each value represents the
+            contribution of the corresponding feature to the prediction.
         """
         check_is_fitted(self, 'tree_')
         X = self._validate_X_predict(X, check_input)
 
         # Classification
         if isinstance(self, ClassifierMixin):
-            return self.classes_[self.predict_proba(X).argmax(axis=1)]
-
+            prediction = self.classes_[self.predict_proba(X).argmax(axis=1)]
         # Regression
         else:
             mean_and_std = self.tree_.predict(
                 X, return_std=return_std, is_regression=True)
-            if return_std:
-                return mean_and_std
-            return mean_and_std[0]
+            prediction = mean_and_std[0]
+
+        # Build return tuple consistently
+        parts = [prediction]
+        if return_std:
+            parts.append(mean_and_std[1] if return_std else None)
+        if return_anomaly:
+            parts.append(self._compute_anomaly(X))
+        if return_shap:
+            parts.append(self._compute_shap(X))
+
+        # Filter out None values
+        parts = [p for p in parts if p is not None]
+
+        if len(parts) == 1:
+            return parts[0]
+        return tuple(parts)
+
+    def _compute_anomaly(self, X):
+        """Compute per-sample Isolation Forest anomaly scores for a single tree.
+
+        Returns the raw average path length for each sample. The forest-level
+        normalization (dividing by c(n) and applying 2^(-x/c(n))) is done at
+        the forest level in ``pred_anomaly``.
+        """
+        check_is_fitted(self, 'tree_')
+        X = self._validate_X_predict(X, check_input=True)
+        return self.tree_.isolation_path_length(X)
+
+    def _compute_shap(self, X):
+        """Compute TreeSHAP values for each sample using path-based decomposition.
+
+        For Mondrian trees, predictions use weighted averaging across all nodes
+        on the path. This method decomposes the prediction into feature
+        contributions such that:
+            prediction = base_value + sum(shap_values)
+
+        Returns an array of shape (n_samples, n_features).
+        """
+        check_is_fitted(self, 'tree_')
+        X = self._validate_X_predict(X, check_input=True)
+        n_samples = X.shape[0]
+        n_features = X.shape[1]
+        is_regression = not isinstance(self, ClassifierMixin)
+
+        # Get weighted decision path: (n_samples, n_nodes) with weights
+        weighted_path = self.weighted_decision_path(X)
+        if hasattr(weighted_path, 'toarray'):
+            weighted_path = weighted_path.toarray()
+
+        # Get node values
+        if is_regression:
+            node_values = self.tree_.mean[:self.tree_.node_count]
+        else:
+            # For classification, use class probability sums normalized by samples
+            n_node_samples = self.tree_.n_node_samples[:self.tree_.node_count]
+            values = self.tree_.value[:self.tree_.node_count, :, :]
+            node_values = np.zeros(self.tree_.node_count)
+            for i in range(self.tree_.node_count):
+                total = n_node_samples[i]
+                if total > 0:
+                    node_values[i] = values[i].sum()
+
+        # Base value is the root node value (mean of all training samples)
+        base_val = node_values[0]
+
+        # For each sample, compute SHAP values from path
+        shap = np.zeros((n_samples, n_features))
+
+        for i in range(n_samples):
+            # Find nodes on the path with non-zero weights
+            path_mask = weighted_path[i] > 0
+            path_node_indices = np.where(path_mask)[0]
+
+            if len(path_node_indices) == 0:
+                continue
+
+            # Get features and weights on the path
+            path_features = self.tree_.feature[path_node_indices]
+            path_weights = weighted_path[i, path_node_indices]
+
+            # Accumulate SHAP contributions per feature and leaf
+            feat_contribs = np.zeros(n_features)
+            leaf_contrib = 0.0
+
+            for node_idx, feat, weight in zip(
+                path_node_indices, path_features, path_weights):
+                node_contrib = weight * (node_values[node_idx] - base_val)
+                if feat < 0 or feat >= n_features:  # Leaf node
+                    leaf_contrib += node_contrib
+                else:
+                    feat_contribs[feat] += node_contrib
+
+            # Distribute leaf contribution proportionally among features on path
+            if leaf_contrib != 0.0:
+                total_feat_weight = sum(
+                    w for f, w in zip(path_features, path_weights)
+                    if 0 <= f < n_features)
+                if total_feat_weight > 0:
+                    for feat, weight in zip(path_features, path_weights):
+                        if 0 <= feat < n_features:
+                            shap[i, feat] += leaf_contrib * (weight / total_feat_weight)
+                else:
+                    # Path only contains leaf nodes: distribute equally
+                    shap[i] += leaf_contrib / n_features
+
+            # Add direct feature contributions
+            shap[i] += feat_contribs
+
+        return shap
+
+    def pred_contribs(self, X, check_input=True):
+        """Return TreeSHAP values including the base value.
+
+        This method returns SHAP values such that the sum of SHAP values
+        plus the base value equals the model prediction:
+            prediction = base_value + sum(shap_values)
+
+        Parameters
+        ----------
+        X : array-like, shape = [n_samples, n_features]
+            The input samples.
+
+        check_input : boolean, (default=True)
+            Allow to bypass several input checking.
+
+        Returns
+        -------
+        shap_values : array of shape = [n_samples, n_features + 1]
+            The last column contains the base value (root prediction).
+            For regression, shape is (n_samples, n_features + 1).
+            For classification with K classes, shape is (n_samples, n_features + 1, K).
+        """
+        check_is_fitted(self, 'tree_')
+        X = self._validate_X_predict(X, check_input)
+        shap = self._compute_shap(X)
+
+        if isinstance(self, ClassifierMixin):
+            base = self.tree_.base_value
+            # For classification, base_value has shape (max_n_classes,)
+            # Stack shap values with base value
+            n_samples = X.shape[0]
+            n_classes = len(base)
+            result = np.zeros((n_samples, shap.shape[1] + 1, n_classes))
+            result[:, :-1, :] = shap[:, :, np.newaxis]
+            result[:, -1, :] = base[np.newaxis, :]
+            return result
+        else:
+            base = self.tree_.base_value
+            # Broadcast base value to match number of samples
+            base_expanded = np.broadcast_to(base, (X.shape[0],) + base.shape)
+            return np.concatenate([shap, base_expanded], axis=1)
 
     def apply(self, X, check_input=True):
         """
