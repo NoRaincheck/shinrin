@@ -1,0 +1,38 @@
+[project]
+name = "shinrin"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "NoRaincheck", email = "2498638+NoRaincheck@users.noreply.github.com" }
+]
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=2.2.6",
+    "scikit-learn>=1.7",
+    "pandas>=2.2",
+    "scipy>=1.14",
+    "joblib>=1.4",
+]
+
+[build-system]
+requires = ["maturin>=1.8,<2.0"]
+build-backend = "maturin"
+
+[tool.maturin]
+python-source = "src"
+module-name = "shinrin._native"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "ruff>=0.16.3",
+    "ty>=0.0.72",
+]
+
+[tool.ruff]
+extend-exclude = [
+    "src/shinrin/_skgarden",
+    "src/shinrin/_skrules",
+    "tests/vendored",
+]

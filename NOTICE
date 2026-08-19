@@ -1,0 +1,25 @@
+NOTICE
+
+shinrin vendors portions of the following BSD-3-Clause licensed projects and
+also ships a Rust port of one of them. Their copyright and license notices are
+reproduced below and in the LICENSE files kept alongside the vendored code.
+
+1. scikit-garden (BSD-3-Clause)
+   https://github.com/scikit-garden/scikit-garden
+
+   Vendored (adapted) into `src/shinrin/_skgarden/`, including the Mondrian
+   forest / tree modules. The Mondrian Cython extension (`mondrian/tree/*.pyx`)
+   has been ported to Rust in `src/lib.rs` (built via maturin/pyo3 as
+   `shinrin._native`) and the Cython shim modules replaced with Python
+   interfaces to that Rust extension.
+
+   Copyright (c) 2016 - scikit-garden developers.
+   License: BSD-3-Clause (see src/shinrin/_skgarden/LICENSE.txt)
+
+2. skope-rules (BSD-3-Clause)
+   https://github.com/scikit-learn-contrib/skope-rules
+
+   Vendored (adapted) into `src/shinrin/_skrules/`.
+
+   Copyright (c) 2017 The skope-rules developers.
+   License: BSD-3-Clause (see src/shinrin/_skrules/LICENSE.txt)
