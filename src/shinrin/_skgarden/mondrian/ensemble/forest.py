@@ -1,12 +1,12 @@
 import numpy as np
 from scipy import sparse
-from sklearn.base import ClassifierMixin
-from sklearn.exceptions import DataConversionWarning
-from sklearn.exceptions import NotFittedError
-from sklearn.preprocessing import LabelEncoder
-from sklearn.utils import check_random_state
-from sklearn.utils.validation import check_array
-from sklearn.utils.validation import check_X_y
+from shinrin._compat.sklearn_base import ClassifierMixin
+from shinrin._compat.sklearn_exceptions import DataConversionWarning
+from shinrin._compat.sklearn_exceptions import NotFittedError
+from shinrin._compat.sklearn_preprocessing import LabelEncoder
+from shinrin._compat.sklearn_utils import check_random_state
+from shinrin._compat.sklearn_utils_validation import check_array
+from shinrin._compat.sklearn_utils_validation import check_X_y
 from joblib import delayed, Parallel
 
 from warnings import warn

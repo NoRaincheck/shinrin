@@ -1,27 +1,27 @@
 import numpy as np
 from warnings import catch_warnings
 
-from sklearn.ensemble import RandomForestRegressor as _sk_RandomForestRegressor
-from sklearn.ensemble import ExtraTreesRegressor as _sk_ExtraTreesRegressor
-from sklearn.ensemble import BaseEnsemble
+from shinrin._compat.sklearn_ensemble import RandomForestRegressor as _sk_RandomForestRegressor
+from shinrin._compat.sklearn_ensemble import ExtraTreesRegressor as _sk_ExtraTreesRegressor
+from shinrin._compat.sklearn_ensemble import BaseEnsemble
 
 DTYPE = np.float32
 DOUBLE = np.float64
 
-from sklearn.base import ClassifierMixin
-from sklearn.base import RegressorMixin
-from sklearn.base import MultiOutputMixin
+from shinrin._compat.sklearn_base import ClassifierMixin
+from shinrin._compat.sklearn_base import RegressorMixin
+from shinrin._compat.sklearn_base import MultiOutputMixin
 
-from sklearn.metrics import r2_score
+from shinrin._compat.sklearn_metrics import r2_score
 
-from sklearn.utils import check_random_state
-from sklearn.utils import check_array
-from sklearn.utils.class_weight import compute_sample_weight
-from sklearn.utils.multiclass import check_classification_targets
-from sklearn.utils.validation import check_is_fitted
-from sklearn.utils.validation import _check_sample_weight
+from shinrin._compat.sklearn_utils import check_random_state
+from shinrin._compat.sklearn_utils import check_array
+from shinrin._compat.sklearn_utils_class_weight import compute_sample_weight
+from shinrin._compat.sklearn_utils_multiclass import check_classification_targets
+from shinrin._compat.sklearn_utils_validation import check_is_fitted
+from shinrin._compat.sklearn_utils_validation import _check_sample_weight
 
-from sklearn.exceptions import DataConversionWarning
+from shinrin._compat.sklearn_exceptions import DataConversionWarning
 
 from abc import ABCMeta
 from abc import abstractmethod

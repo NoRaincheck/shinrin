@@ -9,10 +9,20 @@ authors = [
 requires-python = ">=3.10"
 dependencies = [
     "numpy>=2.2.6",
-    "scikit-learn>=1.7",
-    "pandas>=2.2",
     "scipy>=1.14",
     "joblib>=1.4",
+]
+
+[project.optional-dependencies]
+sklearn = [
+    "scikit-learn>=1.7",
+]
+pandas = [
+    "pandas>=2.2",
+]
+full = [
+    "scikit-learn>=1.7",
+    "pandas>=2.2",
 ]
 
 [build-system]
@@ -35,4 +45,5 @@ extend-exclude = [
     "src/shinrin/_skgarden",
     "src/shinrin/_skrules",
     "tests/vendored",
+    "src/shinrin/_compat.py",
 ]

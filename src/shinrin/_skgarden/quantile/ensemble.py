@@ -1,11 +1,11 @@
 from __future__ import division
 import numpy as np
 from numpy import ma
-from sklearn.ensemble import ExtraTreesRegressor
-from sklearn.ensemble import RandomForestRegressor
-from sklearn.utils import check_array
-from sklearn.utils import check_random_state
-from sklearn.utils import check_X_y
+from shinrin._compat.sklearn_ensemble import ExtraTreesRegressor
+from shinrin._compat.sklearn_ensemble import RandomForestRegressor
+from shinrin._compat.sklearn_utils import check_array
+from shinrin._compat.sklearn_utils import check_random_state
+from shinrin._compat.sklearn_utils import check_X_y
 
 from ..forest import ForestRegressor
 

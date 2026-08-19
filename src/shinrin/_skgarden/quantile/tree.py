@@ -1,10 +1,10 @@
 import numpy as np
 
-from sklearn.tree import BaseDecisionTree
-from sklearn.tree import DecisionTreeRegressor
-from sklearn.tree import ExtraTreeRegressor
-from sklearn.utils import check_array
-from sklearn.utils import check_X_y
+from shinrin._compat.sklearn_tree import BaseDecisionTree
+from shinrin._compat.sklearn_tree import DecisionTreeRegressor
+from shinrin._compat.sklearn_tree import ExtraTreeRegressor
+from shinrin._compat.sklearn_utils import check_array
+from shinrin._compat.sklearn_utils import check_X_y
 
 from .utils import weighted_percentile
 

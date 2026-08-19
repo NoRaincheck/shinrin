@@ -1,15 +1,15 @@
 import numpy as np
 from collections import Counter
 from collections.abc import Iterable
-import pandas
 import numbers
 from warnings import warn
 
-from sklearn.base import BaseEstimator
-from sklearn.utils.validation import check_X_y, check_array, check_is_fitted
-from sklearn.utils.multiclass import check_classification_targets
-from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
-from sklearn.ensemble import BaggingClassifier, BaggingRegressor
+from shinrin._compat.sklearn_base import BaseEstimator
+from shinrin._compat.sklearn_utils_validation import check_X_y, check_array, check_is_fitted
+from shinrin._compat.sklearn_utils_multiclass import check_classification_targets
+from shinrin._compat.sklearn_tree import DecisionTreeClassifier, DecisionTreeRegressor
+from shinrin._compat.sklearn_ensemble import BaggingClassifier, BaggingRegressor
+from shinrin._compat import _get_pandas
 
 from .rule import Rule, replace_feature_name
 
@@ -355,7 +355,7 @@ class SkopeRules(BaseEstimator):
                 estimator, np.array(self.feature_names_)[features])
 
             # XXX todo: idem without dataframe
-            X_oob = pandas.DataFrame((X[mask, :])[:, features],
+            X_oob = _get_pandas().DataFrame((X[mask, :])[:, features],
                                      columns=np.array(
                                          self.feature_names_)[features])
 
@@ -456,7 +456,7 @@ class SkopeRules(BaseEstimator):
                              " Please reshape your data."
                              % (X.shape[1], self.n_features_))
 
-        df = pandas.DataFrame(X, columns=self.feature_names_)
+        df = _get_pandas().DataFrame(X, columns=self.feature_names_)
         selected_rules = self.rules_without_feature_names_
 
         scores = np.zeros(X.shape[0])
@@ -497,7 +497,7 @@ class SkopeRules(BaseEstimator):
                              " Please reshape your data."
                              % (X.shape[1], self.n_features_))
 
-        df = pandas.DataFrame(X, columns=self.feature_names_)
+        df = _get_pandas().DataFrame(X, columns=self.feature_names_)
         selected_rules = self.rules_
 
         scores = np.zeros(X.shape[0])
@@ -539,7 +539,7 @@ class SkopeRules(BaseEstimator):
                              " Please reshape your data."
                              % (X.shape[1], self.n_features_))
 
-        df = pandas.DataFrame(X, columns=self.feature_names_)
+        df = _get_pandas().DataFrame(X, columns=self.feature_names_)
         selected_rules = self.rules_without_feature_names_
 
         scores = np.zeros(X.shape[0])
@@ -622,7 +622,7 @@ class SkopeRules(BaseEstimator):
         return rules if len(rules) > 0 else 'True'
 
     def _eval_rule_perf(self, rule, X, y):
-        detected_index = list(X.query(rule).index)
+        detected_index = list(_get_pandas().DataFrame(X).query(rule).index)
         if len(detected_index) <= 1:
             return (0, 0)
         y_detected = y[detected_index]
