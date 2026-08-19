@@ -36,38 +36,9 @@ shap_values = explainer.shap_values(X)
 
 ## Benchmarks
 
-Benchmarks below compare **Shinrin** (Mondrian trees/forests) against **LightGBM** and **SGD** from scikit-learn.
+See [scripts/benchmark/BENCHMARK.md](scripts/benchmark/BENCHMARK.md) for detailed benchmark results comparing Shinrin against LightGBM and scikit-learn SGD.
 
-**Dataset:** 5,000 samples × 20 features (regression) / binary classification
-
-### Regression
-
-| Model | Train Time | Predict Time (1k samples) |
-|---|---|---|
-| Shinrin Tree (depth=8) | 0.021s | 8.9ms/call |
-| Shinrin Forest (n=10) | 0.20s | 89ms/call |
-| LightGBM Tree (8 rounds) | 0.05s | 0.17ms/call |
-| LightGBM Forest (10 rounds) | 0.06s | — |
-| SGDRegressor (100 iters) | 0.003s | 0.04ms/call |
-| SGDRegressor (partial_fit, 100 epochs) | 0.06s | — |
-
-### Classification
-
-| Model | Train Time | Predict Time (1k samples) |
-|---|---|---|
-| Shinrin Tree (depth=8) | 0.021s | 9.6ms/call |
-| Shinrin Forest (n=10) | 0.20s | 95ms/call |
-| LightGBM Tree (8 rounds) | 0.05s | 0.17ms/call |
-| LightGBM Forest (10 rounds) | 0.06s | — |
-| SGDClassifier (100 iters) | 0.006s | 0.06ms/call |
-| SGDClassifier (partial_fit, 100 epochs) | 0.05s | — |
-
-### Notes
-
-- **Training:** Shinrin tree training is competitive with LightGBM for single trees. Forest training is slower due to Python-level tree construction (Rust optimization pending).
-- **Prediction:** LightGBM and SGD are significantly faster at prediction. Shinrin prediction runs in pure Python — Rust-backed prediction is planned.
-- **Partial Fit:** SGD supports online/incremental learning via `partial_fit`. Shinrin does not yet support partial fit — this is a planned feature.
-- **Shinrin strengths:** TreeSHAP explanations, ONNX export, and Mondrian tree-specific algorithms are unique features not available in LightGBM or SGD.
+To run benchmarks yourself: `python scripts/benchmark/benchmark.py`
 
 ## Installation
 
@@ -138,6 +109,10 @@ models = {
 results = full_benchmark(models, X_train, y_train, X_test)
 print_benchmark_report(results)
 ```
+
+## Test Coverage
+
+All vendored tests are included and passing — these are ported from scikit-garden and skope-rules to verify compatibility. Run `pytest --cov=src/shinrin tests/` for a full coverage report.
 
 ## License
 
