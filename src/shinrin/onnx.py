@@ -24,6 +24,7 @@ def _tree_to_onnx(
     label_names=None,
     class_names=None,
     default_tree_id=0,
+    learning_rate=1.0,
 ):
     """Convert a single tree to ONNX tree ensemble node attributes.
 
@@ -66,13 +67,15 @@ def _tree_to_onnx(
     }
 
     if is_regression:
-        # For regression, values are the predicted mean at each node
-        # Reshape to (n_nodes, 1) for single output
-        if node_values.ndim == 3:
-            # (n_nodes, n_outputs, max_n_classes) -> (n_nodes,)
-            reg_values = node_values[:, 0, 0]
-        else:
-            reg_values = node_values.ravel()
+        # For regression, nodes_values contains thresholds for internal nodes
+        # and leaf values for leaf nodes
+        # Scale leaf values by learning_rate for GradientBoosting
+        scaled_values = node_values.ravel() * learning_rate
+        nodes_values = np.where(
+            feature_ids == -2,  # leaf nodes
+            scaled_values,  # scaled leaf values
+            t.threshold  # internal node thresholds
+        ).astype(np.float64)
 
         attributes.update(
             {
@@ -88,7 +91,7 @@ def _tree_to_onnx(
                 "nodes_falsenode_ids": np.where(
                     right_child_ids == -1, -1, right_child_ids
                 ),
-                "nodes_values": reg_values.astype(np.float64),
+                "nodes_values": nodes_values,
                 "post_transform": "none",
             }
         )
@@ -97,10 +100,20 @@ def _tree_to_onnx(
         n_classes = int(t.n_classes[0])
         if n_classes == 2:
             # Binary classification: one value array, transform is sigmoid
+            # Use log-odds (difference between class 1 and class 0 values)
             if node_values.ndim == 3:
-                clf_values = node_values[:, 0, 1] - node_values[:, 0, 0]
+                clf_values = (node_values[:, 0, 1] - node_values[:, 0, 0]) * learning_rate
             else:
-                clf_values = node_values.ravel()
+                clf_values = node_values.ravel() * learning_rate
+            
+            # For classification, nodes_values should be:
+            # - threshold for internal nodes (same as regression)
+            # - log-odds for leaf nodes
+            nodes_values_clf = np.where(
+                feature_ids == -2,  # leaf nodes
+                clf_values,  # scaled leaf log-odds
+                t.threshold  # internal node thresholds
+            ).astype(np.float64)
 
             attributes.update(
                 {
@@ -118,16 +131,25 @@ def _tree_to_onnx(
                     "nodes_falsenode_ids": np.where(
                         right_child_ids == -1, -1, right_child_ids
                     ),
-                    "nodes_values": clf_values.astype(np.float64),
+                    "nodes_values": nodes_values_clf,
                     "post_transform": "sigmoid",
                 }
             )
         else:
             # Multi-class: one value array per class
             if node_values.ndim == 3:
-                clf_values = node_values[:, 0, :n_classes].flatten()
+                clf_values = node_values[:, 0, :n_classes].flatten() * learning_rate
             else:
-                clf_values = node_values.ravel()
+                clf_values = node_values.ravel() * learning_rate
+            
+            # For multi-class, nodes_values should be:
+            # - threshold for internal nodes (use first class value as proxy)
+            # - leaf values for leaf nodes (flattened per-class values)
+            nodes_values_mc = np.where(
+                feature_ids == -2,  # leaf nodes
+                clf_values,  # scaled leaf values (flattened per-class)
+                t.threshold  # internal node thresholds
+            ).astype(np.float64)
 
             attributes.update(
                 {
@@ -145,7 +167,7 @@ def _tree_to_onnx(
                     "nodes_falsenode_ids": np.where(
                         right_child_ids == -1, -1, right_child_ids
                     ),
-                    "nodes_values": clf_values.astype(np.float64),
+                    "nodes_values": nodes_values_mc,
                     "post_transform": "softmax",
                 }
             )
@@ -239,7 +261,11 @@ def to_onnx(
         )
     elif hasattr(estimator, "estimators_"):
         # Forest: use first estimator to determine type
-        first_tree = estimator.estimators_[0]
+        # GradientBoosting has estimators_ as 2D array (n_estimators, n_outputs)
+        # RandomForest has estimators_ as 1D array (n_estimators,) or list
+        estimators_attr = estimator.estimators_
+        is_2d = hasattr(estimators_attr, 'ndim') and estimators_attr.ndim > 1
+        first_tree = estimators_attr[0][0] if is_2d else estimators_attr[0]
         if hasattr(first_tree, "tree_"):
             is_classification = int(first_tree.tree_.n_classes[0]) > 1
             n_classes = (
@@ -264,24 +290,45 @@ def to_onnx(
     )
 
     # Build tree ensemble nodes
+    # Get learning_rate for GradientBoosting (defaults to 1.0 for RandomForest)
+    learning_rate = getattr(estimator, 'learning_rate', 1.0)
+    
     if hasattr(estimator, "tree_"):
         # Single tree
         tree_attrs = _tree_to_onnx(
             estimator,
             feature_names=feature_names,
             class_names=class_names,
+            learning_rate=learning_rate,
         )
         tree_nodes = [tree_attrs]
+        base_values = np.array([0.0], dtype=np.float64)
     else:
         # Forest: one tree ensemble node per estimator
+        # GradientBoosting has estimators_ as 2D array (n_estimators, n_outputs)
+        # RandomForest has estimators_ as 1D array (n_estimators,) or list
+        estimators_attr = estimator.estimators_
+        is_2d = hasattr(estimators_attr, 'ndim') and estimators_attr.ndim > 1
+        if is_2d:
+            # GradientBoosting: iterate over first dimension
+            estimators_iter = [estimators[0] for estimators in estimators_attr]
+            # GradientBoosting: base_values is the initial prediction
+            base_values = np.array([estimator.init_.predict(X[:1])[0]], dtype=np.float64)
+        else:
+            estimators_iter = estimators_attr
+            base_values = np.array([0.0], dtype=np.float64)
         tree_nodes = []
-        for i, tree in enumerate(estimator.estimators_):
+        for i, tree in enumerate(estimators_iter):
             tree_attrs = _tree_to_onnx(
                 tree,
                 feature_names=feature_names,
                 class_names=class_names,
                 default_tree_id=i,
+                learning_rate=learning_rate,
             )
+            # For GradientBoosting, only the first tree has base_values
+            if i == 0:
+                tree_attrs["base_values"] = base_values
             tree_nodes.append(tree_attrs)
 
     # Create output
@@ -326,14 +373,15 @@ def to_onnx(
         tree_node = helper.make_node(
             "TreeEnsemble",
             inputs=[input_name],
-            outputs=["tree_output"],
+            outputs=[output_name],
+            domain="ai.onnx.ml",
             **tree_nodes[0],
         )
         if is_classification and n_classes == 2:
             # Sigmoid output already handled in TreeEnsemble
             output_node = helper.make_node(
                 "Identity",
-                inputs=["tree_output"],
+                inputs=[output_name],
                 outputs=[output_name],
             )
             graph = helper.make_graph(
@@ -360,6 +408,7 @@ def to_onnx(
                     graph,
                     opset_imports=[
                         helper.make_opsetid("", target_opset),
+                        helper.make_opsetid("ai.onnx.ml", 2),
                     ],
                     producer_name=name,
                     ir_version=8,
@@ -376,6 +425,7 @@ def to_onnx(
                     graph,
                     opset_imports=[
                         helper.make_opsetid("", target_opset),
+                        helper.make_opsetid("ai.onnx.ml", 2),
                     ],
                     producer_name=name,
                     ir_version=8,
@@ -391,6 +441,7 @@ def to_onnx(
                 graph,
                 opset_imports=[
                     helper.make_opsetid("", target_opset),
+                    helper.make_opsetid("ai.onnx.ml", 2),
                 ],
                 producer_name=name,
                 ir_version=8,
@@ -404,20 +455,29 @@ def to_onnx(
                 "TreeEnsemble",
                 inputs=[input_name],
                 outputs=[tree_outputs[i]],
+                domain="ai.onnx.ml",
                 **attrs,
             )
             tree_nodes_onnx.append(node)
 
-        # Average predictions across trees
+        # Average/Sum predictions across trees
         if is_classification and n_classes == 2:
-            # For binary classification, average sigmoid outputs
+            # For binary classification, sum sigmoid outputs for GradientBoosting
             if len(tree_outputs) > 1:
-                reduce_node = helper.make_node(
-                    "ReduceMean",
-                    inputs=tree_outputs,
-                    outputs=["forest_output"],
-                    keepdims=1,
-                )
+                if learning_rate != 1.0:
+                    reduce_node = helper.make_node(
+                        "ReduceSum",
+                        inputs=tree_outputs,
+                        outputs=["forest_output"],
+                        keepdims=1,
+                    )
+                else:
+                    reduce_node = helper.make_node(
+                        "ReduceMean",
+                        inputs=tree_outputs,
+                        outputs=["forest_output"],
+                        keepdims=1,
+                    )
                 # Reshape to (n_samples, 2)
                 reshape_node = helper.make_node(
                     "Reshape",
@@ -439,19 +499,28 @@ def to_onnx(
                     graph,
                     opset_imports=[
                         helper.make_opsetid("", target_opset),
+                        helper.make_opsetid("ai.onnx.ml", 2),
                     ],
                     producer_name=name,
                     ir_version=8,
                 )
                 return model
         elif is_classification and n_classes > 2:
-            # For multi-class, average probabilities
-            reduce_node = helper.make_node(
-                "ReduceMean",
-                inputs=tree_outputs,
-                outputs=["forest_output"],
-                keepdims=0,
-            )
+            # For multi-class, sum probabilities for GradientBoosting
+            if learning_rate != 1.0:
+                reduce_node = helper.make_node(
+                    "ReduceSum",
+                    inputs=tree_outputs,
+                    outputs=["forest_output"],
+                    keepdims=0,
+                )
+            else:
+                reduce_node = helper.make_node(
+                    "ReduceMean",
+                    inputs=tree_outputs,
+                    outputs=["forest_output"],
+                    keepdims=0,
+                )
             softmax_node = helper.make_node(
                 "Softmax",
                 inputs=["forest_output"],
@@ -468,19 +537,31 @@ def to_onnx(
                 graph,
                 opset_imports=[
                     helper.make_opsetid("", target_opset),
+                    helper.make_opsetid("ai.onnx.ml", 2),
                 ],
                 producer_name=name,
                 ir_version=8,
             )
             return model
         else:
-            # Regression: average tree outputs
-            reduce_node = helper.make_node(
-                "ReduceMean",
-                inputs=tree_outputs,
-                outputs=[output_name],
-                keepdims=0,
-            )
+            # Regression: sum tree outputs for GradientBoosting (base_values already includes init_pred)
+            # For RandomForest, average tree outputs (base_values is 0)
+            if learning_rate != 1.0:
+                # GradientBoosting: use ReduceSum since base_values is only on first tree
+                reduce_node = helper.make_node(
+                    "ReduceSum",
+                    inputs=tree_outputs,
+                    outputs=[output_name],
+                    keepdims=0,
+                )
+            else:
+                # RandomForest: average tree outputs
+                reduce_node = helper.make_node(
+                    "ReduceMean",
+                    inputs=tree_outputs,
+                    outputs=[output_name],
+                    keepdims=0,
+                )
             graph = helper.make_graph(
                 tree_nodes_onnx + [reduce_node],
                 f"{name}_graph",
@@ -491,6 +572,7 @@ def to_onnx(
                 graph,
                 opset_imports=[
                     helper.make_opsetid("", target_opset),
+                    helper.make_opsetid("ai.onnx.ml", 2),
                 ],
                 producer_name=name,
                 ir_version=8,
@@ -502,13 +584,12 @@ def to_onnx(
         graph,
         opset_imports=[
             helper.make_opsetid("", target_opset),
+            helper.make_opsetid("ai.onnx.ml", 2),
         ],
         producer_name=name,
         ir_version=8,
     )
-    model.metadata_props.append(
-        helper.make_string_key_value_pair("shinrin_version", "0.1.0"),
-    )
+    helper.set_model_props(model, {"shinrin_version": "0.1.0"})
     return model
 
 

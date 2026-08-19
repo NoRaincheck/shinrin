@@ -2061,6 +2061,99 @@ impl PyTree {
         let _ = py;
         Ok(())
     }
+
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (left_child, right_child, feature, threshold, n_node_samples, value, tau, lower_bounds, upper_bounds))]
+    fn populate_from_arrays(
+        &self,
+        left_child: Bound<'_, PyArray1<isize>>,
+        right_child: Bound<'_, PyArray1<isize>>,
+        feature: Bound<'_, PyArray1<isize>>,
+        threshold: Bound<'_, PyArray1<f64>>,
+        n_node_samples: Bound<'_, PyArray1<isize>>,
+        value: Bound<'_, PyArray1<f64>>,
+        tau: Bound<'_, PyArray1<f32>>,
+        lower_bounds: Bound<'_, PyArray2<f32>>,
+        upper_bounds: Bound<'_, PyArray2<f32>>,
+    ) -> PyResult<()> {
+        let mut inner = self.inner.borrow_mut();
+
+        let n_nodes = left_child.len();
+
+        // Resize the tree to hold all nodes
+        if !inner.resize_c(n_nodes as i64) {
+            return Err(PyMemoryError::new_err("failed to resize tree"));
+        }
+
+        // Read arrays
+        let lc = left_child.readonly().as_slice()?.to_vec();
+        let rc = right_child.readonly().as_slice()?.to_vec();
+        let feat = feature.readonly().as_slice()?.to_vec();
+        let thresh = threshold.readonly().as_slice()?.to_vec();
+        let samples = n_node_samples.readonly().as_slice()?.to_vec();
+        let val = value.readonly().as_slice()?.to_vec();
+        let tau_arr = tau.readonly().as_slice()?.to_vec();
+        let lb_readonly = lower_bounds.readonly();
+        let ub_readonly = upper_bounds.readonly();
+        let lb_arr = lb_readonly.as_array();
+        let ub_arr = ub_readonly.as_array();
+        let n_features = inner.n_features;
+        let lb_rows = lb_arr.shape()[0];
+        let lb_cols = lb_arr.shape()[1];
+        // Copy 2D arrays into owned vectors to avoid lifetime issues
+        let lb: Vec<Vec<f32>> = (0..lb_rows)
+            .map(|i| (0..lb_cols).map(|j| lb_arr[[i, j]]).collect())
+            .collect();
+        let ub: Vec<Vec<f32>> = (0..lb_rows)
+            .map(|i| (0..lb_cols).map(|j| ub_arr[[i, j]]).collect())
+            .collect();
+
+        // Set root
+        inner.root = 0;
+        inner.node_count = n_nodes as i64;
+
+        // Populate nodes
+        for i in 0..n_nodes {
+            let lb_vec: Vec<f32> = if i < lb_rows {
+                (0..n_features).map(|f| {
+                    if f < lb_cols { lb[i][f] } else { 0.0 }
+                }).collect()
+            } else {
+                vec![0.0; n_features]
+            };
+            let ub_vec: Vec<f32> = if i < lb_rows {
+                (0..n_features).map(|f| {
+                    if f < lb_cols { ub[i][f] } else { 0.0 }
+                }).collect()
+            } else {
+                vec![0.0; n_features]
+            };
+            let val_offset = i * inner.value_stride;
+            let val_end = val_offset + inner.value_stride;
+            let node = Node {
+                left_child: lc[i] as i64,
+                right_child: rc[i] as i64,
+                feature: feat[i] as i64,
+                threshold: thresh[i],
+                tau: tau_arr[i],
+                n_node_samples: samples[i] as i64,
+                weighted_n_node_samples: samples[i] as f64,
+                impurity: 0.0,
+                variance: 0.0,
+                lower_bounds: lb_vec,
+                upper_bounds: ub_vec,
+            };
+
+            // Value is stored in a flat array in inner.value
+            if val_end <= val.len() {
+                inner.value[val_offset..val_end].copy_from_slice(&val[val_offset..val_end]);
+            }
+
+            inner.nodes[i] = node;
+        }
+
+        Ok(())
+    }
 }
 
 // =============================================================================
