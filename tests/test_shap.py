@@ -94,11 +94,8 @@ class TestTreeExplainerSingleTree:
             prediction = tree.predict(X[i : i + 1])[0]
             shap_sum = float(np.sum(shap_vals))
             # Allow some tolerance due to TreeSHAP approximation
-            assert np.isclose(
-                shap_sum, prediction - ev, atol=0.5, rtol=0.1
-            ), (
-                f"Sample {i}: SHAP sum={shap_sum:.4f}, "
-                f"pred-ev={prediction - ev:.4f}"
+            assert np.isclose(shap_sum, prediction - ev, atol=0.5, rtol=0.1), (
+                f"Sample {i}: SHAP sum={shap_sum:.4f}, pred-ev={prediction - ev:.4f}"
             )
 
 
@@ -110,9 +107,7 @@ class TestTreeExplainerForest:
         rng = np.random.RandomState(42)
         X = rng.randn(200, 5).astype(np.float32)
         y = rng.randn(200)
-        forest = MondrianForestRegressor(
-            n_estimators=5, max_depth=4, random_state=0
-        )
+        forest = MondrianForestRegressor(n_estimators=5, max_depth=4, random_state=0)
         forest.fit(X, y)
         return forest, X, y
 
@@ -151,11 +146,8 @@ class TestTreeExplainerForest:
             shap_vals = explainer.shap_values(X[i])
             prediction = forest.predict(X[i : i + 1])[0]
             shap_sum = float(np.sum(shap_vals))
-            assert np.isclose(
-                shap_sum, prediction - ev, atol=1.0, rtol=0.2
-            ), (
-                f"Sample {i}: SHAP sum={shap_sum:.4f}, "
-                f"pred-ev={prediction - ev:.4f}"
+            assert np.isclose(shap_sum, prediction - ev, atol=1.0, rtol=0.2), (
+                f"Sample {i}: SHAP sum={shap_sum:.4f}, pred-ev={prediction - ev:.4f}"
             )
 
 
@@ -205,6 +197,7 @@ class TestTreeExplainerEdgeCases:
 
     def test_unfitted_model_raises(self):
         from shinrin import MondrianTreeRegressor
+
         tree = MondrianTreeRegressor()
         # Should raise because tree_ is not set
         with pytest.raises(ValueError, match="tree_"):

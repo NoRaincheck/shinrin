@@ -34,8 +34,15 @@ __all__ = [
     "Rule",
     "SkopeRules",
     "TreeExplainer",
+    "benchmark_model_size",
+    "benchmark_prediction",
+    "benchmark_training",
     "explanation",
+    "full_benchmark",
+    "print_benchmark_report",
     "replace_feature_name",
+    "save_onnx",
+    "to_onnx",
 ]
 
 # ---------------------------------------------------------------------------
@@ -83,6 +90,13 @@ _IMPORT_MAP: dict[str, tuple[str, str]] = {
     "SkopeRules": ("shinrin._skrules.skope_rules", "SkopeRules"),
     "TreeExplainer": ("shinrin.shap", "TreeExplainer"),
     "explanation": ("shinrin.shap", "explanation"),
+    "to_onnx": ("shinrin.onnx", "to_onnx"),
+    "save_onnx": ("shinrin.onnx", "save_onnx"),
+    "benchmark_training": ("shinrin.benchmark", "benchmark_training"),
+    "benchmark_prediction": ("shinrin.benchmark", "benchmark_prediction"),
+    "benchmark_model_size": ("shinrin.benchmark", "benchmark_model_size"),
+    "full_benchmark": ("shinrin.benchmark", "full_benchmark"),
+    "print_benchmark_report": ("shinrin.benchmark", "print_benchmark_report"),
 }
 
 # Cache for resolved imports

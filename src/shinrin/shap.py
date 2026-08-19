@@ -139,25 +139,48 @@ def _tree_shap_values_single_tree(tree_struct, x, x_missing=None):
                     binary_value[i] = 0.0
 
             shap_c = _tree_shap_regression(
-                children_left, children_right, feature, threshold,
-                binary_value, n_node_samples, x, x_missing,
-                tau, lower_bounds, upper_bounds,
+                children_left,
+                children_right,
+                feature,
+                threshold,
+                binary_value,
+                n_node_samples,
+                x,
+                x_missing,
+                tau,
+                lower_bounds,
+                upper_bounds,
             )
             shap_values[c] = shap_c
         return shap_values
     else:
         return _tree_shap_regression(
-            children_left, children_right, feature, threshold,
+            children_left,
+            children_right,
+            feature,
+            threshold,
             value.ravel() if value.ndim > 1 else value,
-            n_node_samples, x, x_missing,
-            tau, lower_bounds, upper_bounds,
+            n_node_samples,
+            x,
+            x_missing,
+            tau,
+            lower_bounds,
+            upper_bounds,
         )
 
 
 def _tree_shap_regression(
-    children_left, children_right, feature, threshold,
-    value, n_node_samples, x, x_missing,
-    tau, lower_bounds, upper_bounds,
+    children_left,
+    children_right,
+    feature,
+    threshold,
+    value,
+    n_node_samples,
+    x,
+    x_missing,
+    tau,
+    lower_bounds,
+    upper_bounds,
 ):
     """Core TreeSHAP computation for regression trees.
 
@@ -188,7 +211,11 @@ def _tree_shap_regression(
         path_indices.append(curr)
         path_features.append(feature[curr])
         path_thresholds.append(threshold[curr])
-        is_left = (x[feature[curr]] <= threshold[curr]) if x_missing[feature[curr]] == 0 else -1
+        is_left = (
+            (x[feature[curr]] <= threshold[curr])
+            if x_missing[feature[curr]] == 0
+            else -1
+        )
         path_left_flags.append(is_left)
         if is_left == 1:
             curr = children_left[curr]
@@ -210,18 +237,38 @@ def _tree_shap_regression(
 
     # Use the fast TreeSHAP algorithm with precomputed marginal contributions
     phi = _fast_tree_shap(
-        children_left, children_right, feature, threshold,
-        value, n_node_samples, x, x_missing, x_missing,
-        n_features, tau, lower_bounds, upper_bounds,
+        children_left,
+        children_right,
+        feature,
+        threshold,
+        value,
+        n_node_samples,
+        x,
+        x_missing,
+        x_missing,
+        n_features,
+        tau,
+        lower_bounds,
+        upper_bounds,
     )
 
     return phi
 
 
 def _fast_tree_shap(
-    children_left, children_right, feature, threshold,
-    value, n_node_samples, x, x_missing, x_present,
-    n_features, tau, lower_bounds, upper_bounds,
+    children_left,
+    children_right,
+    feature,
+    threshold,
+    value,
+    n_node_samples,
+    x,
+    x_missing,
+    x_present,
+    n_features,
+    tau,
+    lower_bounds,
+    upper_bounds,
 ):
     """Fast exact TreeSHAP using the recursive algorithm.
 
@@ -286,7 +333,11 @@ def _fast_tree_shap(
     curr = 0
     while children_left[curr] != -1:
         path_nodes.append(curr)
-        curr = children_left[curr] if x[feature[curr]] <= threshold[curr] else children_right[curr]
+        curr = (
+            children_left[curr]
+            if x[feature[curr]] <= threshold[curr]
+            else children_right[curr]
+        )
 
     # For each internal node on the path, compute contributions
     for node_idx in path_nodes:
@@ -335,7 +386,9 @@ def _fast_tree_shap(
             n_right = n_node_samples[right_child]
             total = n_left + n_right
             if total > 0:
-                e_unknown = (n_left * _node_val(left_child) + n_right * _node_val(right_child)) / total
+                e_unknown = (
+                    n_left * _node_val(left_child) + n_right * _node_val(right_child)
+                ) / total
             else:
                 e_unknown = (_node_val(left_child) + _node_val(right_child)) / 2
         else:
@@ -385,13 +438,21 @@ def _forest_shap_values(estimator, x, x_missing=None):
 
     # Check if classification
     if hasattr(estimator, "n_classes_"):
-        n_classes = int(np.max(estimator.n_classes_)) if hasattr(estimator.n_classes_, '__len__') else int(estimator.n_classes_)
+        n_classes = (
+            int(np.max(estimator.n_classes_))
+            if hasattr(estimator.n_classes_, "__len__")
+            else int(estimator.n_classes_)
+        )
         if n_classes > 1:
             # For classification, return per-class SHAP values
-            all_shap_class = np.zeros((len(trees), n_classes, n_features), dtype=np.float64)
+            all_shap_class = np.zeros(
+                (len(trees), n_classes, n_features), dtype=np.float64
+            )
             for i, tree in enumerate(trees):
                 tree_struct = _get_tree_structure(tree)
-                all_shap_class[i] = _tree_shap_values_single_tree(tree_struct, x, x_missing)
+                all_shap_class[i] = _tree_shap_values_single_tree(
+                    tree_struct, x, x_missing
+                )
             return all_shap_class.mean(axis=0)
 
     return mean_shap
@@ -451,12 +512,22 @@ class TreeExplainer:
 
         # Determine if regression or classification
         if hasattr(model, "n_classes_"):
-            n_classes = int(np.max(model.n_classes_)) if hasattr(model.n_classes_, '__len__') else int(model.n_classes_)
+            n_classes = (
+                int(np.max(model.n_classes_))
+                if hasattr(model.n_classes_, "__len__")
+                else int(model.n_classes_)
+            )
             self._is_classification = n_classes > 1
             self._n_classes = n_classes
         elif hasattr(model, "tree_"):
-            self._is_classification = int(model.tree_.n_classes[0]) > 1 if len(model.tree_.n_classes) > 0 else False
-            self._n_classes = int(model.tree_.n_classes[0]) if len(model.tree_.n_classes) > 0 else 1
+            self._is_classification = (
+                int(model.tree_.n_classes[0]) > 1
+                if len(model.tree_.n_classes) > 0
+                else False
+            )
+            self._n_classes = (
+                int(model.tree_.n_classes[0]) if len(model.tree_.n_classes) > 0 else 1
+            )
         else:
             self._is_classification = False
             self._n_classes = 1
@@ -488,7 +559,8 @@ class TreeExplainer:
             results = np.zeros((n_samples, n_features), dtype=np.float64)
             for i in range(n_samples):
                 results[i] = _tree_shap_values_single_tree(
-                    self._tree_struct, X[i],
+                    self._tree_struct,
+                    X[i],
                 )
         else:
             results = np.zeros((n_samples, n_features), dtype=np.float64)
@@ -503,7 +575,8 @@ class TreeExplainer:
             )
             for i in range(n_samples):
                 results_class[i] = _forest_shap_values(
-                    self.model, X[i],
+                    self.model,
+                    X[i],
                 )
             return results_class
 
@@ -534,7 +607,9 @@ class TreeExplainer:
                     return root_value / total
                 return np.ones(self._n_classes) / self._n_classes
             else:
-                return float(t.value[0, 0, 0]) if t.value.ndim >= 3 else float(t.value[0])
+                return (
+                    float(t.value[0, 0, 0]) if t.value.ndim >= 3 else float(t.value[0])
+                )
         else:
             # Forest: average of root values
             if self._is_classification:
@@ -549,7 +624,9 @@ class TreeExplainer:
                         root_probs.append(np.ones(self._n_classes) / self._n_classes)
                 return np.mean(root_probs, axis=0)
             else:
-                root_preds = [tree.tree_.value[0, 0, 0] for tree in self.model.estimators_]
+                root_preds = [
+                    tree.tree_.value[0, 0, 0] for tree in self.model.estimators_
+                ]
                 return np.mean(root_preds)
 
     def summary_plot(self, X, max_display=10, ax=None):
@@ -590,12 +667,20 @@ class TreeExplainer:
         if ax is None:
             _fig, ax = plt.subplots(figsize=(10, 6))
 
-        feature_names = self.attributes.get("feature_names", [f"x{i}" for i in range(X.shape[1])])
+        feature_names = self.attributes.get(
+            "feature_names", [f"x{i}" for i in range(X.shape[1])]
+        )
 
         for rank, idx in enumerate(indices):
             colors = shap_values[:, idx]
-            ax.scatter(shap_values[:, idx], np.full(len(shap_values), rank),
-                       c=colors, cmap="RdBu_r", s=10, alpha=0.5)
+            ax.scatter(
+                shap_values[:, idx],
+                np.full(len(shap_values), rank),
+                c=colors,
+                cmap="RdBu_r",
+                s=10,
+                alpha=0.5,
+            )
 
         ax.set_yticks(range(len(indices)))
         ax.set_yticklabels([feature_names[i] for i in indices])
@@ -643,21 +728,27 @@ def explanation(model, X, feature_names=None):
 
     for i in range(len(X)):
         if shap_values.ndim == 3:
-            contributions = {fnames[j]: float(shap_values[i, 0, j]) for j in range(len(fnames))}
+            contributions = {
+                fnames[j]: float(shap_values[i, 0, j]) for j in range(len(fnames))
+            }
             sv = shap_values[i, 0, :]
         else:
-            contributions = {fnames[j]: float(shap_values[i, j]) for j in range(len(fnames))}
+            contributions = {
+                fnames[j]: float(shap_values[i, j]) for j in range(len(fnames))
+            }
             sv = shap_values[i]
 
         # Compute prediction from SHAP values
         prediction = float(expected_value) + float(sv.sum())
 
-        explanations.append({
-            "prediction": prediction,
-            "expected_value": float(expected_value),
-            "shap_values": sv,
-            "features": fnames,
-            "contributions": contributions,
-        })
+        explanations.append(
+            {
+                "prediction": prediction,
+                "expected_value": float(expected_value),
+                "shap_values": sv,
+                "features": fnames,
+                "contributions": contributions,
+            }
+        )
 
     return explanations[0] if len(explanations) == 1 else explanations
