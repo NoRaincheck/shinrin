@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "skills": {
+    "mojo-python-interop": {
+      "source": "modular/skills",
+      "sourceType": "github",
+      "skillPath": "mojo-python-interop/SKILL.md",
+      "computedHash": "0bdffb6ba574327afadafb5265d95217435ffc9e11bff7f8fdf1073b4b2677cd"
+    },
+    "mojo-syntax": {
+      "source": "modular/skills",
+      "sourceType": "github",
+      "skillPath": "mojo-syntax/SKILL.md",
+      "computedHash": "9b12c81b5453be4745b22d53306a493615a4318060efa5e78aa144eb2d984a52"
+    }
+  }
+}
