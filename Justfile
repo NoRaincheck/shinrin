@@ -36,6 +36,16 @@ test-rust:
 test-python:
     uv run pytest tests/
 
+# ---------- Docs ----------
+
+# Build documentation locally
+build-docs:
+    uv run --group docs mkdocs build --strict
+
+# Serve documentation locally
+serve-docs:
+    uv run --group docs mkdocs serve
+
 # ---------- Check ----------
 
 # Run lint and test

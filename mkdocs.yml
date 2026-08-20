@@ -1,0 +1,65 @@
+site_name: Shinrin Docs
+site_description: Shinrin - ML library for decision tree and forest models with Rust bindings
+site_url: https://NoRaincheck.github.io/shinrin
+repo_url: https://github.com/NoRaincheck/shinrin
+repo_name: NoRaincheck/shinrin
+
+theme:
+  name: material
+  palette:
+    primary: green
+    accent: green
+  font:
+    text: Inter
+    code: JetBrains Mono
+  features:
+    - navigation.instant
+    - navigation.instant.progress
+    - navigation.tracking
+    - navigation.sections
+    - navigation.top
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+
+nav:
+  - Home: index.md
+  - Getting Started:
+      - Installation: getting-started/installation.md
+      - Quick Start: getting-started/quick-start.md
+  - Models:
+      - Mondrian Trees: models/mondrian-trees.md
+      - Mondrian Forests: models/mondrian-forests.md
+  - Features:
+      - TreeSHAP Explanations: features/treeshap-explanations.md
+      - ONNX Export: features/onnx-export.md
+      - Benchmarking: features/benchmarking.md
+  - API Reference: api-reference.md
+  - Contributing: contributing.md
+
+markdown_extensions:
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.tasklist:
+      custom_checkbox: true
+  - attr_list
+  - md_in_html
+  - toc:
+      permalink: true
+
+plugins:
+  - search
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/NoRaincheck
+    - icon: simple/pypi
+      link: https://pypi.org/project/shinrin/
