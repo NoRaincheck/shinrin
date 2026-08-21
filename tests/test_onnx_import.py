@@ -23,7 +23,7 @@ except ImportError:
 
 SKLEARN_INSTALLED = True
 try:
-    from sklearn.ensemble import (  # ty: ignore[unresolved-import]
+    from sklearn.ensemble import (
         GradientBoostingRegressor,
         RandomForestClassifier,
         RandomForestRegressor,

@@ -31,6 +31,14 @@ build-mojo:
 test-mojo: build-mojo
     SHINRIN_BACKEND=mojo uv run pytest tests/
 
+# Build the TabM Mojo trainer extension (shinrin._native_tabm)
+build-tabm-mojo:
+    uv run mojo build src/shinrin/_tabm_kernels.mojo --emit shared-lib -o src/shinrin/_native_tabm.so
+
+# Run TabM tests against the Mojo backend
+test-tabm-mojo: build-tabm-mojo
+    SHINRIN_TABM_BACKEND=mojo uv run pytest tests/test_tabm_parity.py tests/test_tabm.py
+
 # Benchmark Rust vs Mojo backends
 bench-backends: build-mojo
     uv run python scripts/benchmarks/bench_backends.py

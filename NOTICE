@@ -23,3 +23,31 @@ reproduced below and in the LICENSE files kept alongside the vendored code.
 
    Copyright (c) 2017 The skope-rules developers.
    License: BSD-3-Clause (see src/shinrin/_skrules/LICENSE.txt)
+3. TabM (Apache-2.0)
+   https://github.com/yandex-research/tabm
+
+   The TabM architecture, parameter initialization scheme and training
+   objective vendored (reimplemented) into `src/shinrin/tabm.py` and
+   `src/shinrin/_tabm/` are derived from yandex-research/tabm.
+
+   Copyright (c) 2024 Yandex Research.
+   License: Apache-2.0 (upstream LICENSE to be added; see
+   https://www.apache.org/licenses/LICENSE-2.0)
+
+4. rtdl-num-embeddings (Apache-2.0)
+   https://github.com/yandex-research/rtdl-num-embeddings
+
+   The piecewise-linear numerical embedding semantics (including the
+   `linear0` clamp rules) implemented in `src/shinrin/_tabm/_transforms.py`
+   follow rtdl-num-embeddings.
+
+   Copyright (c) 2024 Yandex Research.
+   License: Apache-2.0 (upstream LICENSE to be added; see
+   https://www.apache.org/licenses/LICENSE-2.0)
+
+5. tabm-lightning (adapted source reference)
+   https://github.com/chapman73/tabm-lightning
+
+   The sklearn-style estimator interface and preprocessing pipeline of the
+   shinrin TabM implementation were adapted from chapman73/tabm-lightning,
+   which itself wraps the yandex-research/tabm reference above.
