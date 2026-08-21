@@ -36,7 +36,7 @@ if TYPE_CHECKING:
 
 SklearnModel = Any  # fitted sklearn tree/forest estimator
 OnnxModel = "ModelProto"  # onnx.ModelProto
-ModelInput = Union[SklearnModel, OnnxModel]  # noqa: UP007
+ModelInput = Union[SklearnModel, "ModelProto"]
 
 # ---------------------------------------------------------------------------
 # Minimum sample threshold
@@ -649,7 +649,9 @@ def from_model(
     >>> # Continue training with new data
     >>> mondrian_model.partial_fit(X_new, y_new)
     """
-    from shinrin._compat.sklearn_utils_validation import check_X_y
+    from shinrin._compat.sklearn_utils_validation import (  # ty: ignore[unresolved-import]
+        check_X_y,
+    )
 
     X, y = check_X_y(X, y, dtype=np.float64, multi_output=False)
 

@@ -316,7 +316,8 @@ def to_onnx(
             estimators_iter = [estimators[0] for estimators in estimators_attr]
             # GradientBoosting: base_values is the initial prediction
             base_values = np.array(
-                [estimator.init_.predict(X[:1])[0]], dtype=np.float64
+                [estimator.init_.predict(X[:1])[0]],  # ty: ignore[not-subscriptable]
+                dtype=np.float64,
             )
         else:
             estimators_iter = estimators_attr
