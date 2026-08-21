@@ -40,15 +40,11 @@ and mixed-categorical tasks.
 
 ## Results — 5,000 samples x 20 features, 100 epochs
 
-| Task | NumPy fit | Mojo fit | Torch fit† | NumPy score | Mojo score | Torch score† |
+| Task | NumPy fit | Mojo fit | Torch fit | NumPy score | Mojo score | Torch score |
 |---|---|---|---|---|---|---|
-| Regression | 121.9s | 124.8s | **26.8s** | 0.999 | 0.999 | 0.999 |
-| 3-class | 214.9s | 147.9s | **29.1s** | 0.498 | 0.489 | 0.499 |
-| Mixed categorical (binary) | 154.5s | 261.0s | **33.8s** | 0.966 | 0.967 | 1.000 |
-
-† Torch 5k numbers were measured before piecewise-linear embeddings
-were added to the torch reference; expect similar fit times with the
-PLE-enabled setup (the 1k rows above are post-PLE).
+| Regression | 121.9s | 124.8s | **31.8s** | 0.999 | 0.999 | 0.998 |
+| 3-class | 214.9s | 147.9s | **33.7s** | 0.498 | 0.489 | 0.784 |
+| Mixed categorical (binary) | 154.5s | 261.0s | **37.0s** | 0.966 | 0.967 | 1.000 |
 
 ## Notes
 
