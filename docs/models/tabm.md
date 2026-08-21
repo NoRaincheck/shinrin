@@ -58,7 +58,8 @@ model.fit(X, y)
 | `use_quantile` | `bool` | `True` | Quantile transform on numeric features |
 | `use_asinh` | `bool` | `True` | Inverse hyperbolic sine transform |
 | `use_scaler` | `bool` | `True` | Standard scaling |
-| `categorical_indices` | `list` | `None` | Force columns to be treated as categorical |
+| `categorical_indices` | `list[int]` | `None` | Force columns (by integer index) to be treated as categorical |
+| `categorical_cardinality_threshold` | `int` | `32` | Max unique values for automatic categorical detection; `0` disables auto-detection |
 
 ### Attributes
 
@@ -67,7 +68,8 @@ model.fit(X, y)
 | `loss_curve_` | `list[float]` | Loss per epoch/iteration |
 | `n_iter_` | `int` | Iterations run |
 | `validation_scores_` | `list[float]` | Validation loss per epoch (when `early_stopping`) |
-| `bins_` | `list[np.ndarray]` | Fitted quantile bin edges |
+| `preprocessor_` | `_Preprocessor` | Fitted preprocessing state; exposes `categorical_indices_`, `cardinalities_`, `bins_` and value maps |
+| `config_` | `TabMConfig` | Resolved architecture configuration |
 
 ### Methods
 
@@ -78,6 +80,69 @@ model.fit(X, y)
 | `predict_proba(X)` | Class probabilities (classifier only) |
 | `score(X, y)` | R² (regression) or accuracy (classification) |
 | `partial_fit(X, y)` | One additional Adam/SGD epoch |
+
+## Usage notes
+
+### Categorical data
+
+TabM expects numeric input (`X` must be castable to `float64`). Encode string
+or pandas `category` columns as integer codes yourself before fitting, e.g.:
+
+```python
+import numpy as np
+
+codes = df["color"].astype("category").cat.codes.to_numpy()
+X = np.column_stack([df[["age", "income"]], codes])
+```
+
+Columns are treated as categorical when they are explicitly listed in
+`categorical_indices` **or** automatically detected by having at most
+`categorical_cardinality_threshold` (default 32) unique values. Detected
+columns are available after fitting via `model.preprocessor_.categorical_indices_`.
+
+Categorical columns are encoded internally as plain one-hot blocks that feed
+straight into the backbone; they bypass all numeric preprocessing and the PLE
+embedding layer, so no extra configuration is needed:
+
+```python
+model = TabMClassifier(
+    k=32,
+    categorical_indices=[2, 5],
+    max_iter=200,
+    random_state=0,
+)
+```
+
+Unseen values at predict time map to the first fitted category rather than
+raising an error.
+
+### Numeric preprocessing and PLE embeddings
+
+For the remaining numeric columns the fit-time pipeline is, in order:
+quantile transform → asinh → standard scaling → piecewise-linear encoding
+(PLE). With `use_embeddings=True` (the default), each numeric feature's PLE
+components — computed over `n_bins` quantile bins — plus its raw value are
+projected through learned per-feature embeddings of width `d_embedding`
+before entering the backbone.
+
+- `n_bins` and `d_embedding` only take effect when `use_embeddings=True`.
+- Set `use_embeddings=False` to skip the PLE encoding and feed scaled numerics
+  directly into the backbone (closer to the original TabM recipe).
+- Disable individual transforms with `use_quantile=False`, `use_asinh=False`
+  or `use_scaler=False` if your data is already well-behaved.
+
+```python
+model = TabMRegressor(
+    hidden_layer_sizes=(256,),
+    k=32,
+    use_embeddings=True,
+    n_bins=48,
+    d_embedding=16,
+    random_state=0,
+)
+```
+
+Fitted bin edges are exposed via `model.preprocessor_.bins_`.
 
 ## Backends
 
