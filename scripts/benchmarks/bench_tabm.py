@@ -92,12 +92,11 @@ def bench_torch(max_iter: int, n_samples: int, n_features: int):
     """
     try:
         import torch
-        from tabm_reference import Model
+        from tabm import TabM
     except ImportError as exc:
         print(f"\n--- torch reference unavailable ({exc}) ---")
         return
     print("\n--- backend: torch (upstream reference) ---")
-    del n_features  # the reference builds its own architecture defaults
     for name, (X, y) in [
         ("regression", make_regression(n_samples, n_features)),
         ("mixed categorical", make_mixed_classification(n_samples, n_features)),
@@ -108,19 +107,31 @@ def bench_torch(max_iter: int, n_samples: int, n_features: int):
                 y, dtype=torch.float32 if name == "regression" else torch.long
             )
             d_out = 1 if name == "regression" else 2
-            if hasattr(Model, "make_kan_based"):
-                model = Model.make_kan_based(xt.shape[1], d_out)
-            elif hasattr(Model, "make_plr_embeddings"):
-                model = Model.make_plr_embeddings(d_out, 8, xt.shape[1])
-            else:
-                model = Model(xt.shape[1], d_out)
+            # upstream TabM needs n_num_features + cat_cardinalities
+            n_cat_cols = X.shape[1] // 2 if name == "mixed categorical" else 0
+            n_num = X.shape[1] - n_cat_cols
+            model = TabM.make(
+                n_num_features=n_num,
+                cat_cardinalities=[7] * n_cat_cols if n_cat_cols else None,
+                d_out=d_out,
+            )
             opt = torch.optim.Adam(model.parameters(), lr=2e-3)
             t0 = time.perf_counter()
             model.train()
             for _ in range(max_iter):
                 opt.zero_grad()
-                out = model(xt, None)
-                loss = out.loss.mean() if hasattr(out, "loss") else out.mean()
+                # TabM expects (x_num, x_cat) — x_cat is one-hot encoded
+                if name == "regression":
+                    out = model(xt)
+                else:
+                    # mixed categorical: split into num + cat, raw indices for x_cat
+                    n_cat = X.shape[1] // 2
+                    x_num = xt[:, n_cat:].float()
+                    # raw integer indices for categorical columns (TabM handles one-hot internally)
+                    x_cat = xt[:, :n_cat].long() + 3  # offset to handle negative values
+                    out = model(x_num, x_cat)
+                # TabM returns [batch, k, d_out] — average over ensemble
+                loss = out.mean()
                 loss.backward()
                 opt.step()
             elapsed = time.perf_counter() - t0

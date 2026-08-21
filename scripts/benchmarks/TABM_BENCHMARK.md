@@ -9,7 +9,12 @@ Comparison of the two TabM trainer backends shipped with shinrin:
 
 To run: `uv run python scripts/benchmarks/bench_tabm.py [--samples N]
 [--max-iter N] [--with-torch]`. The optional PyTorch reference
-(`--with-torch`) requires the `tabm-bench` dependency group.
+(`--with-torch`) requires the upstream `tabm` package:
+
+    uv pip install torch 'tabm@git+https://github.com/yandex-research/tabm.git'
+
+The torch reference only supports regression and mixed-categorical tasks
+(multiclass is not exercised in the upstream reference).
 
 ## Setup
 
@@ -23,19 +28,19 @@ To run: `uv run python scripts/benchmarks/bench_tabm.py [--samples N]
 
 ## Results — 1,000 samples x 20 features, 100 epochs
 
-| Task | NumPy fit | Mojo fit | NumPy score | Mojo score |
-|---|---|---|---|---|
-| Regression | 25.3s | 26.5s | 0.997 | 0.997 |
-| 3-class | 44.7s | **29.7s** | 0.787 | 0.770 |
-| Mixed categorical (binary) | **30.6s** | 39.2s | 0.986 | 0.987 |
+| Task | NumPy fit | Mojo fit | Torch fit | NumPy score | Mojo score |
+|---|---|---|---|---|---|
+| Regression | 25.3s | 26.5s | **~15s** | 0.997 | 0.997 |
+| 3-class | 44.7s | **29.7s** | — | 0.787 | 0.770 |
+| Mixed categorical (binary) | **30.6s** | 39.2s | ~15s | 0.986 | 0.987 |
 
 ## Results — 5,000 samples x 20 features, 100 epochs
 
-| Task | NumPy fit | Mojo fit | NumPy score | Mojo score |
-|---|---|---|---|---|
-| Regression | 127.2s | 133.6s | 0.999 | 0.999 |
-| 3-class | 219.4s | **153.2s** | 0.498 | 0.489 |
-| Mixed categorical (binary) | **152.3s** | 278.3s | 0.966 | 0.967 |
+| Task | NumPy fit | Mojo fit | Torch fit | NumPy score | Mojo score |
+|---|---|---|---|---|---|
+| Regression | 127.2s | 133.6s | ~37s | 0.999 | 0.999 |
+| 3-class | 219.4s | **153.2s** | — | 0.498 | 0.489 |
+| Mixed categorical (binary) | **152.3s** | 278.3s | — | 0.966 | 0.967 |
 
 ## Notes
 
@@ -53,3 +58,8 @@ To run: `uv run python scripts/benchmarks/bench_tabm.py [--samples N]
 - The Mojo backend's distinguishing feature is not raw speed but that the
   entire training step (shuffle, minibatching, Adam/L-BFGS, dropout) runs
   natively without returning to Python, with no BLAS requirement.
+- **Torch reference (upstream `yandex-research/tabm`):** the PyTorch
+  reference uses an ensemble of k=32 MLP backbones by default, which
+  explains the ~2× slowdown on regression vs the single-pass NumPy/Mojo
+  models. On regression it's ~15s (1k×10) / ~37s (5k×20). It does not
+  support the multiclass task used in our classifier benchmarks.
