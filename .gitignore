@@ -2,6 +2,7 @@
 __pycache__/
 *.py[oc]
 *.so
+__mojocache__/
 build/
 dist/
 wheels/

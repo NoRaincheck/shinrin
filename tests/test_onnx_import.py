@@ -132,7 +132,10 @@ class TestMondrianTreeFromModel:
         tree_pred = tree.predict(X_test)
         sklearn_classes = sklearn_model.classes_
         sklearn_indices = np.array(
-            [list(sklearn_classes).index(c) if isinstance(c, str) else int(c) for c in sklearn_pred]
+            [
+                list(sklearn_classes).index(c) if isinstance(c, str) else int(c)
+                for c in sklearn_pred
+            ]
         )
         tree_classes = tree.classes_
         tree_indices = np.array([list(tree_classes).index(c) for c in tree_pred])
@@ -156,17 +159,13 @@ class TestMondrianTreeFromModel:
         sklearn_classes = sklearn_model.classes_
         sklearn_indices = np.array(
             [
-                list(sklearn_classes).index(c)
-                if isinstance(c, str)
-                else int(c)
+                list(sklearn_classes).index(c) if isinstance(c, str) else int(c)
                 for c in sklearn_pred
             ]
         )
         # Map tree predictions (string class names) to indices
         tree_classes = tree.classes_
-        tree_indices = np.array(
-            [list(tree_classes).index(c) for c in tree_pred]
-        )
+        tree_indices = np.array([list(tree_classes).index(c) for c in tree_pred])
         np.testing.assert_array_equal(sklearn_indices, tree_indices)
 
 
@@ -191,9 +190,7 @@ class TestMondrianForestFromModel:
         sklearn_model.fit(X_train, y_train)
         onnx_model = to_onnx(sklearn_model, X_train)
 
-        forest = MondrianForestRegressor.from_model(
-            onnx_model, X_train, y_train
-        )
+        forest = MondrianForestRegressor.from_model(onnx_model, X_train, y_train)
 
         # Predictions should match
         sklearn_pred = sklearn_model.predict(X_test)
@@ -209,9 +206,7 @@ class TestMondrianForestFromModel:
         sklearn_model.fit(X_train, y_train)
         onnx_model = to_onnx(sklearn_model, X_train)
 
-        forest = MondrianForestRegressor.from_model(
-            onnx_model, X_train, y_train
-        )
+        forest = MondrianForestRegressor.from_model(onnx_model, X_train, y_train)
 
         # Predictions should match
         sklearn_pred = sklearn_model.predict(X_test)
@@ -227,9 +222,7 @@ class TestMondrianForestFromModel:
         sklearn_model.fit(X_train, y_train)
         onnx_model = to_onnx(sklearn_model, X_train)
 
-        forest = MondrianForestRegressor.from_model(
-            onnx_model, X_train, y_train
-        )
+        forest = MondrianForestRegressor.from_model(onnx_model, X_train, y_train)
 
         # Predictions should match
         sklearn_pred = sklearn_model.predict(X_test)
@@ -245,9 +238,7 @@ class TestMondrianForestFromModel:
         sklearn_model.fit(X_train, y_train)
         onnx_model = to_onnx(sklearn_model, X_train)
 
-        forest = MondrianForestClassifier.from_model(
-            onnx_model, X_train, y_train
-        )
+        forest = MondrianForestClassifier.from_model(onnx_model, X_train, y_train)
 
         # Predictions should match (compare class indices)
         sklearn_pred = sklearn_model.predict(X_test)
@@ -255,16 +246,12 @@ class TestMondrianForestFromModel:
         sklearn_classes = sklearn_model.classes_
         sklearn_indices = np.array(
             [
-                list(sklearn_classes).index(c)
-                if isinstance(c, str)
-                else int(c)
+                list(sklearn_classes).index(c) if isinstance(c, str) else int(c)
                 for c in sklearn_pred
             ]
         )
         forest_classes = forest.classes_
-        forest_indices = np.array(
-            [list(forest_classes).index(c) for c in forest_pred]
-        )
+        forest_indices = np.array([list(forest_classes).index(c) for c in forest_pred])
         np.testing.assert_array_equal(sklearn_indices, forest_indices)
 
     def test_forest_classifier_from_onnx(self, classification_data):
@@ -276,9 +263,7 @@ class TestMondrianForestFromModel:
         sklearn_model.fit(X_train, y_train)
         onnx_model = to_onnx(sklearn_model, X_train)
 
-        forest = MondrianForestClassifier.from_model(
-            onnx_model, X_train, y_train
-        )
+        forest = MondrianForestClassifier.from_model(onnx_model, X_train, y_train)
 
         # Predictions should match (compare class indices)
         sklearn_pred = sklearn_model.predict(X_test)
@@ -286,16 +271,12 @@ class TestMondrianForestFromModel:
         sklearn_classes = sklearn_model.classes_
         sklearn_indices = np.array(
             [
-                list(sklearn_classes).index(c)
-                if isinstance(c, str)
-                else int(c)
+                list(sklearn_classes).index(c) if isinstance(c, str) else int(c)
                 for c in sklearn_pred
             ]
         )
         forest_classes = forest.classes_
-        forest_indices = np.array(
-            [list(forest_classes).index(c) for c in forest_pred]
-        )
+        forest_indices = np.array([list(forest_classes).index(c) for c in forest_pred])
         np.testing.assert_array_equal(sklearn_indices, forest_indices)
 
 
@@ -340,9 +321,7 @@ class TestPartialFitAfterConversion:
         sklearn_model.fit(X_train, y_train)
         onnx_model = to_onnx(sklearn_model, X_train)
 
-        forest = MondrianForestRegressor.from_model(
-            onnx_model, X_train, y_train
-        )
+        forest = MondrianForestRegressor.from_model(onnx_model, X_train, y_train)
 
         # partial_fit should not raise
         rng = np.random.RandomState(123)
@@ -361,9 +340,7 @@ class TestPartialFitAfterConversion:
         sklearn_model.fit(X_train, y_train)
         onnx_model = to_onnx(sklearn_model, X_train)
 
-        forest = MondrianForestClassifier.from_model(
-            onnx_model, X_train, y_train
-        )
+        forest = MondrianForestClassifier.from_model(onnx_model, X_train, y_train)
 
         # partial_fit should not raise
         rng = np.random.RandomState(123)
@@ -401,13 +378,11 @@ class TestWarnings:
 
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
-            _ = MondrianTreeRegressor.from_model(
-                onnx_model, X_small, y_small
-            )
+            _ = MondrianTreeRegressor.from_model(onnx_model, X_small, y_small)
             assert len(w) >= 1
-            assert any(
-                "300" in str(warning.message) for warning in w
-            ), f"Expected 300 sample warning, got: {[str(x.message) for x in w]}"
+            assert any("300" in str(warning.message) for warning in w), (
+                f"Expected 300 sample warning, got: {[str(x.message) for x in w]}"
+            )
 
     def test_no_warning_for_large_dataset(self, regression_data):
         """Test that no warning is issued for large datasets."""
@@ -420,12 +395,8 @@ class TestWarnings:
 
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
-            _ = MondrianTreeRegressor.from_model(
-                onnx_model, X_train, y_train
-            )
-            sample_warnings = [
-                x for x in w if "300" in str(x.message)
-            ]
+            _ = MondrianTreeRegressor.from_model(onnx_model, X_train, y_train)
+            sample_warnings = [x for x in w if "300" in str(x.message)]
             assert len(sample_warnings) == 0
 
 

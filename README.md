@@ -54,6 +54,24 @@ pip install shinrin[onnx]      # ONNX export
 pip install shinrin[full]      # All optional dependencies
 ```
 
+### Native backends
+
+The tree/forest internals ship with two interchangeable native backends:
+
+- `rust` (default) – the original pyo3/maturin extension (`shinrin._native`)
+- `mojo` – an experimental Mojo port (`shinrin._native_mojo`)
+
+Select the backend with the `SHINRIN_BACKEND` environment variable:
+
+```bash
+SHINRIN_BACKEND=mojo python your_script.py
+```
+
+The default remains `rust`; the Mojo backend is opt-in while Mojo is in alpha.
+Both backends produce identical trees for identical random states (verified by
+`tests/test_mojo_parity.py`). Build the Mojo extension with `just build-mojo`
+(requires the `mojo` package, e.g. `pip install 'shinrin[mojo]'`).
+
 ## API Overview
 
 ### Models

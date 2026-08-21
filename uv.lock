@@ -1577,7 +1577,6 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "joblib" },
-    { name = "mojo" },
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
     { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
@@ -1592,6 +1591,9 @@ full = [
     { name = "pandas", version = "3.0.5", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "scikit-learn", version = "1.7.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "scikit-learn", version = "1.9.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+]
+mojo = [
+    { name = "mojo" },
 ]
 pandas = [
     { name = "pandas", version = "2.3.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
@@ -1616,7 +1618,7 @@ docs = [
 [package.metadata]
 requires-dist = [
     { name = "joblib", specifier = ">=1.4" },
-    { name = "mojo", specifier = ">=1.0.0" },
+    { name = "mojo", marker = "extra == 'mojo'", specifier = ">=1.0.0" },
     { name = "numpy", specifier = ">=2.2.6" },
     { name = "pandas", marker = "extra == 'full'", specifier = ">=2.2" },
     { name = "pandas", marker = "extra == 'pandas'", specifier = ">=2.2" },
@@ -1624,7 +1626,7 @@ requires-dist = [
     { name = "scikit-learn", marker = "extra == 'sklearn'", specifier = ">=1.7" },
     { name = "scipy", specifier = ">=1.14" },
 ]
-provides-extras = ["sklearn", "pandas", "full"]
+provides-extras = ["mojo", "sklearn", "pandas", "full"]
 
 [package.metadata.requires-dev]
 dev = [

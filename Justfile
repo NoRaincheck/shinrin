@@ -1,5 +1,5 @@
 # Justfile for shinrin
-# Requires: just, rustfmt, cargo, uv, ruff, ty
+# Requires: just, rustfmt, cargo, uv, ruff, ty (mojo optional for the Mojo backend)
 
 # ---------- Format ----------
 
@@ -20,6 +20,20 @@ lint:
     cargo clippy --all-targets --all-features -- -D warnings
     uv run ruff check src/ tests/
     uv run ty check --exclude "src/shinrin/_skgarden/**" --exclude "src/shinrin/_skrules/**" --exclude "tests/vendored/**" src/ tests/
+
+# ---------- Mojo backend ----------
+
+# Build the Mojo native extension (shinrin._native_mojo_core)
+build-mojo:
+    uv run mojo build src/shinrin/_native_mojo.mojo --emit shared-lib -o src/shinrin/_native_mojo_core.so
+
+# Run the test suite against the Mojo backend
+test-mojo: build-mojo
+    SHINRIN_BACKEND=mojo uv run pytest tests/
+
+# Benchmark Rust vs Mojo backends
+bench-backends: build-mojo
+    uv run python benchmarks/bench_backends.py
 
 # ---------- Test ----------
 
