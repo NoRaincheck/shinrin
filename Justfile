@@ -33,7 +33,7 @@ test-mojo: build-mojo
 
 # Benchmark Rust vs Mojo backends
 bench-backends: build-mojo
-    uv run python benchmarks/bench_backends.py
+    uv run python scripts/benchmarks/bench_backends.py
 
 # ---------- Test ----------
 

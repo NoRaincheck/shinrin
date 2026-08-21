@@ -1,10 +1,17 @@
 # Benchmarks
 
+Two benchmark scripts live here:
+
+- **`bench_baselines.py`** — compares Shinrin against LightGBM and SGD baselines (results below).
+- **`bench_backends.py`** — compares the Rust and Mojo native backends against each other (`just bench-backends`).
+
+## Baselines: LightGBM / SGD
+
 Benchmarks compare **Shinrin** (Mondrian trees/forests) against **LightGBM** and **SGD** from scikit-learn.
 
 **Dataset:** 5,000 samples × 20 features (regression / binary classification)
 
-> To run benchmarks yourself: `python scripts/benchmark/benchmark.py`
+> To run benchmarks yourself: `python scripts/benchmarks/bench_baselines.py`
 
 ## Regression
 

@@ -1,11 +1,12 @@
 """Benchmark the Rust and Mojo native backends against each other.
 
 Usage:
-    just bench-backends          # or: uv run python benchmarks/bench_backends.py
+    just bench-backends          # or: uv run python scripts/benchmarks/bench_backends.py
 
 Measures fit / predict / partial_fit wall time for Mondrian trees and
 forests under both backends on identical data and seeds, then prints a
 comparison table. The Mojo shared library is built first if missing.
+For comparisons against LightGBM/SGD baselines, see bench_baselines.py.
 """
 
 from __future__ import annotations

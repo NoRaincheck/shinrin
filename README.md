@@ -36,9 +36,9 @@ shap_values = explainer.shap_values(X)
 
 ## Benchmarks
 
-See [scripts/benchmark/BENCHMARK.md](scripts/benchmark/BENCHMARK.md) for detailed benchmark results comparing Shinrin against LightGBM and scikit-learn SGD.
+See [scripts/benchmarks/BENCHMARK.md](scripts/benchmarks/BENCHMARK.md) for detailed benchmark results comparing Shinrin against LightGBM and scikit-learn SGD.
 
-To run benchmarks yourself: `python scripts/benchmark/benchmark.py`
+To run benchmarks yourself: `python scripts/benchmarks/bench_baselines.py` (or `just bench-backends` for Rust vs Mojo backend comparisons)
 
 ## Installation
 

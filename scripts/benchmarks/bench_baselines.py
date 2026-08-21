@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Benchmark Shinrin against LightGBM and scikit-learn SGD.
+"""Benchmark Shinrin against LightGBM and scikit-learn SGD baselines.
 
 Compares training time, prediction time, and partial fit performance
-for regression and classification tasks.
+for regression and classification tasks. For backend (Rust vs Mojo)
+comparisons, see bench_backends.py.
 
 Usage:
-    python scripts/benchmark/benchmark.py
+    python scripts/benchmarks/bench_baselines.py
 """
 
 from __future__ import annotations
@@ -52,8 +53,7 @@ def _regression_bench() -> None:
 
     X_train = np.random.randn(5000, 20).astype(np.float32)
     y_train = (
-        np.sum(X_train[:, :5], axis=1)
-        + np.random.randn(5000).astype(np.float32) * 0.1
+        np.sum(X_train[:, :5], axis=1) + np.random.randn(5000).astype(np.float32) * 0.1
     )
     X_test = np.random.randn(1000, 20).astype(np.float32)
 
