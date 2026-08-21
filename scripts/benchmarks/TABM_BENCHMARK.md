@@ -13,8 +13,12 @@ To run: `uv run python scripts/benchmarks/bench_tabm.py [--samples N]
 
     uv pip install torch 'tabm@git+https://github.com/yandex-research/tabm.git'
 
-The torch reference only supports regression and mixed-categorical tasks
-(multiclass is not exercised in the upstream reference).
+The torch reference mirrors our default setup for a like-for-like
+comparison — same backbone (`d_block=256`, `n_blocks=1`, `k=32`,
+`arch_type='tabm'`, dropout 0.1), Adam at lr 1e-3, batch size 200,
+asinh + standardization followed by piecewise-linear embeddings
+(`n_bins=64`, `d_embedding=8`) — and exercises regression, multiclass
+and mixed-categorical tasks.
 
 ## Setup
 
@@ -28,19 +32,23 @@ The torch reference only supports regression and mixed-categorical tasks
 
 ## Results — 1,000 samples x 20 features, 100 epochs
 
-| Task | NumPy fit | Mojo fit | Torch fit | NumPy score | Mojo score |
-|---|---|---|---|---|---|
-| Regression | 25.3s | 26.5s | **~15s** | 0.997 | 0.997 |
-| 3-class | 44.7s | **29.7s** | — | 0.787 | 0.770 |
-| Mixed categorical (binary) | **30.6s** | 39.2s | ~15s | 0.986 | 0.987 |
+| Task | NumPy fit | Mojo fit | Torch fit | NumPy score | Mojo score | Torch score |
+|---|---|---|---|---|---|---|
+| Regression | 23.8s | 24.6s | **6.2s** | 0.997 | 0.997 | 0.995 |
+| 3-class | 42.6s | 28.2s | **6.4s** | 0.787 | 0.770 | 0.880 |
+| Mixed categorical (binary) | 29.8s | 36.6s | **6.9s** | 0.986 | 0.987 | 0.999 |
 
 ## Results — 5,000 samples x 20 features, 100 epochs
 
-| Task | NumPy fit | Mojo fit | Torch fit | NumPy score | Mojo score |
-|---|---|---|---|---|---|
-| Regression | 127.2s | 133.6s | ~37s | 0.999 | 0.999 |
-| 3-class | 219.4s | **153.2s** | — | 0.498 | 0.489 |
-| Mixed categorical (binary) | **152.3s** | 278.3s | — | 0.966 | 0.967 |
+| Task | NumPy fit | Mojo fit | Torch fit† | NumPy score | Mojo score | Torch score† |
+|---|---|---|---|---|---|---|
+| Regression | 121.9s | 124.8s | **26.8s** | 0.999 | 0.999 | 0.999 |
+| 3-class | 214.9s | 147.9s | **29.1s** | 0.498 | 0.489 | 0.499 |
+| Mixed categorical (binary) | 154.5s | 261.0s | **33.8s** | 0.966 | 0.967 | 1.000 |
+
+† Torch 5k numbers were measured before piecewise-linear embeddings
+were added to the torch reference; expect similar fit times with the
+PLE-enabled setup (the 1k rows above are post-PLE).
 
 ## Notes
 
@@ -58,8 +66,18 @@ The torch reference only supports regression and mixed-categorical tasks
 - The Mojo backend's distinguishing feature is not raw speed but that the
   entire training step (shuffle, minibatching, Adam/L-BFGS, dropout) runs
   natively without returning to Python, with no BLAS requirement.
-- **Torch reference (upstream `yandex-research/tabm`):** the PyTorch
-  reference uses an ensemble of k=32 MLP backbones by default, which
-  explains the ~2× slowdown on regression vs the single-pass NumPy/Mojo
-  models. On regression it's ~15s (1k×10) / ~37s (5k×20). It does not
-  support the multiclass task used in our classifier benchmarks.
+- **Torch reference (upstream `yandex-research/tabm`):** configured
+  like-for-like with the NumPy/Mojo fits — same backbone shape
+  (`d_block=256`, `n_blocks=1`), BatchEnsemble weight sharing
+  (`arch_type='tabm'`), `k=32`, dropout 0.1, Adam at lr 1e-3,
+  batch_size=200 minibatches, and proper mean-of-member losses
+  (MSE / cross-entropy over the k predictions, not loss-of-mean).
+  An earlier revision compared against upstream defaults
+  (`d_block=512`, `n_blocks=3`, full-batch training), which made torch
+  look ~2x slower than NumPy; on identical work PyTorch is in fact
+  ~4-8x faster than the NumPy path here.
+- Remaining caveats on the torch column: timings cover the training
+  loop only (NumPy/Mojo are end-to-end `fit()` including quantile-bin
+  preprocessing and scoring), it runs on CPU, and its
+  hyperparameters are not tuned per task, so treat the torch scores as
+  a sanity check rather than a quality claim.
