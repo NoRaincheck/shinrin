@@ -74,7 +74,7 @@ def _tree_to_onnx(
         nodes_values = np.where(
             feature_ids == -2,  # leaf nodes
             scaled_values,  # scaled leaf values
-            t.threshold  # internal node thresholds
+            t.threshold,  # internal node thresholds
         ).astype(np.float64)
 
         attributes.update(
@@ -102,17 +102,19 @@ def _tree_to_onnx(
             # Binary classification: one value array, transform is sigmoid
             # Use log-odds (difference between class 1 and class 0 values)
             if node_values.ndim == 3:
-                clf_values = (node_values[:, 0, 1] - node_values[:, 0, 0]) * learning_rate
+                clf_values = (
+                    node_values[:, 0, 1] - node_values[:, 0, 0]
+                ) * learning_rate
             else:
                 clf_values = node_values.ravel() * learning_rate
-            
+
             # For classification, nodes_values should be:
             # - threshold for internal nodes (same as regression)
             # - log-odds for leaf nodes
             nodes_values_clf = np.where(
                 feature_ids == -2,  # leaf nodes
                 clf_values,  # scaled leaf log-odds
-                t.threshold  # internal node thresholds
+                t.threshold,  # internal node thresholds
             ).astype(np.float64)
 
             attributes.update(
@@ -141,14 +143,14 @@ def _tree_to_onnx(
                 clf_values = node_values[:, 0, :n_classes].flatten() * learning_rate
             else:
                 clf_values = node_values.ravel() * learning_rate
-            
+
             # For multi-class, nodes_values should be:
             # - threshold for internal nodes (use first class value as proxy)
             # - leaf values for leaf nodes (flattened per-class values)
             nodes_values_mc = np.where(
                 feature_ids == -2,  # leaf nodes
                 clf_values,  # scaled leaf values (flattened per-class)
-                t.threshold  # internal node thresholds
+                t.threshold,  # internal node thresholds
             ).astype(np.float64)
 
             attributes.update(
@@ -264,7 +266,7 @@ def to_onnx(
         # GradientBoosting has estimators_ as 2D array (n_estimators, n_outputs)
         # RandomForest has estimators_ as 1D array (n_estimators,) or list
         estimators_attr = estimator.estimators_
-        is_2d = hasattr(estimators_attr, 'ndim') and estimators_attr.ndim > 1
+        is_2d = hasattr(estimators_attr, "ndim") and estimators_attr.ndim > 1
         first_tree = estimators_attr[0][0] if is_2d else estimators_attr[0]
         if hasattr(first_tree, "tree_"):
             is_classification = int(first_tree.tree_.n_classes[0]) > 1
@@ -291,8 +293,8 @@ def to_onnx(
 
     # Build tree ensemble nodes
     # Get learning_rate for GradientBoosting (defaults to 1.0 for RandomForest)
-    learning_rate = getattr(estimator, 'learning_rate', 1.0)
-    
+    learning_rate = getattr(estimator, "learning_rate", 1.0)
+
     if hasattr(estimator, "tree_"):
         # Single tree
         tree_attrs = _tree_to_onnx(
@@ -308,12 +310,14 @@ def to_onnx(
         # GradientBoosting has estimators_ as 2D array (n_estimators, n_outputs)
         # RandomForest has estimators_ as 1D array (n_estimators,) or list
         estimators_attr = estimator.estimators_
-        is_2d = hasattr(estimators_attr, 'ndim') and estimators_attr.ndim > 1
+        is_2d = hasattr(estimators_attr, "ndim") and estimators_attr.ndim > 1
         if is_2d:
             # GradientBoosting: iterate over first dimension
             estimators_iter = [estimators[0] for estimators in estimators_attr]
             # GradientBoosting: base_values is the initial prediction
-            base_values = np.array([estimator.init_.predict(X[:1])[0]], dtype=np.float64)
+            base_values = np.array(
+                [estimator.init_.predict(X[:1])[0]], dtype=np.float64
+            )
         else:
             estimators_iter = estimators_attr
             base_values = np.array([0.0], dtype=np.float64)

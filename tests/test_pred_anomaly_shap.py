@@ -2,10 +2,12 @@
 
 import numpy as np
 import pytest
-from sklearn.datasets import make_classification, make_regression
 
-from shinrin import MondrianForestRegressor, MondrianForestClassifier
-from shinrin._skgarden.mondrian.tree import MondrianTreeRegressor, MondrianTreeClassifier
+from shinrin import MondrianForestClassifier, MondrianForestRegressor
+from shinrin._skgarden.mondrian.tree import (
+    MondrianTreeClassifier,
+    MondrianTreeRegressor,
+)
 
 
 class TestTreePredAnomaly:
@@ -60,20 +62,16 @@ class TestTreePredContribs:
     def test_tree_shap_shape_regression(self, X_train, y_train_reg, X_test):
         tree = MondrianTreeRegressor(random_state=42)
         tree.fit(X_train, y_train_reg)
-        pred, shap = tree.predict(X_test, return_shap=True)
+        _pred, shap = tree.predict(X_test, return_shap=True)
         assert shap.shape == (10, 4)
 
-    def test_tree_pred_contribs_shape_regression(
-        self, X_train, y_train_reg, X_test
-    ):
+    def test_tree_pred_contribs_shape_regression(self, X_train, y_train_reg, X_test):
         tree = MondrianTreeRegressor(random_state=42)
         tree.fit(X_train, y_train_reg)
         contribs = tree.pred_contribs(X_test)
         assert contribs.shape == (10, 5)  # 4 features + 1 base value
 
-    def test_tree_shap_additive_regression(
-        self, X_train, y_train_reg, X_test
-    ):
+    def test_tree_shap_additive_regression(self, X_train, y_train_reg, X_test):
         tree = MondrianTreeRegressor(random_state=42)
         tree.fit(X_train, y_train_reg)
         pred = tree.predict(X_test)
@@ -87,12 +85,10 @@ class TestTreePredContribs:
         with pytest.raises(ValueError, match="return_std is not supported"):
             tree.predict(X_test, return_std=True)
 
-    def test_tree_shap_shape_classification(
-        self, X_train, y_train_clf, X_test
-    ):
+    def test_tree_shap_shape_classification(self, X_train, y_train_clf, X_test):
         tree = MondrianTreeClassifier(random_state=42)
         tree.fit(X_train, y_train_clf)
-        pred, shap = tree.predict(X_test, return_shap=True)
+        _pred, shap = tree.predict(X_test, return_shap=True)
         # Classification returns per-class SHAP: (n_samples, n_features, n_classes)
         assert shap.shape == (10, 4, 3)
 
@@ -105,9 +101,7 @@ class TestTreePredContribs:
         assert contribs.ndim == 3
         assert contribs.shape == (10, 5, 3)  # 4 features + 1 base, 3 classes
 
-    def test_tree_predict_all_kwargs(
-        self, X_train, y_train_reg, X_test
-    ):
+    def test_tree_predict_all_kwargs(self, X_train, y_train_reg, X_test):
         tree = MondrianTreeRegressor(random_state=42)
         tree.fit(X_train, y_train_reg)
         result = tree.predict(
@@ -143,35 +137,27 @@ class TestForestPredAnomaly:
     def X_test(self):
         return np.random.randn(10, 4).astype(np.float32)
 
-    def test_forest_anomaly_shape_regression(
-        self, X_train, y_train_reg, X_test
-    ):
+    def test_forest_anomaly_shape_regression(self, X_train, y_train_reg, X_test):
         forest = MondrianForestRegressor(n_estimators=10, random_state=42)
         forest.fit(X_train, y_train_reg)
         anomaly = forest.pred_anomaly(X_test)
         assert anomaly.shape == (10,)
 
-    def test_forest_anomaly_range_regression(
-        self, X_train, y_train_reg, X_test
-    ):
+    def test_forest_anomaly_range_regression(self, X_train, y_train_reg, X_test):
         forest = MondrianForestRegressor(n_estimators=10, random_state=42)
         forest.fit(X_train, y_train_reg)
         anomaly = forest.pred_anomaly(X_test)
         assert anomaly.min() >= 0.0
         assert anomaly.max() <= 1.0
 
-    def test_forest_anomaly_consistent(
-        self, X_train, y_train_reg, X_test
-    ):
+    def test_forest_anomaly_consistent(self, X_train, y_train_reg, X_test):
         forest = MondrianForestRegressor(n_estimators=10, random_state=42)
         forest.fit(X_train, y_train_reg)
         anomaly_direct = forest.pred_anomaly(X_test)
         _, anomaly_from_pred = forest.predict(X_test, return_anomaly=True)
         assert np.allclose(anomaly_direct, anomaly_from_pred)
 
-    def test_forest_anomaly_classifier(
-        self, X_train, y_train_clf, X_test
-    ):
+    def test_forest_anomaly_classifier(self, X_train, y_train_clf, X_test):
         forest = MondrianForestClassifier(n_estimators=10, random_state=42)
         forest.fit(X_train, y_train_clf)
         anomaly = forest.pred_anomaly(X_test)
@@ -199,25 +185,19 @@ class TestForestPredContribs:
     def X_test(self):
         return np.random.randn(10, 4).astype(np.float32)
 
-    def test_forest_shap_shape_regression(
-        self, X_train, y_train_reg, X_test
-    ):
+    def test_forest_shap_shape_regression(self, X_train, y_train_reg, X_test):
         forest = MondrianForestRegressor(n_estimators=10, random_state=42)
         forest.fit(X_train, y_train_reg)
-        pred, shap = forest.predict(X_test, return_shap=True)
+        _pred, shap = forest.predict(X_test, return_shap=True)
         assert shap.shape == (10, 4)
 
-    def test_forest_pred_contribs_shape_regression(
-        self, X_train, y_train_reg, X_test
-    ):
+    def test_forest_pred_contribs_shape_regression(self, X_train, y_train_reg, X_test):
         forest = MondrianForestRegressor(n_estimators=10, random_state=42)
         forest.fit(X_train, y_train_reg)
         contribs = forest.pred_contribs(X_test)
         assert contribs.shape == (10, 5)
 
-    def test_forest_shap_additive_regression(
-        self, X_train, y_train_reg, X_test
-    ):
+    def test_forest_shap_additive_regression(self, X_train, y_train_reg, X_test):
         forest = MondrianForestRegressor(n_estimators=10, random_state=42)
         forest.fit(X_train, y_train_reg)
         pred = forest.predict(X_test)
@@ -230,7 +210,7 @@ class TestForestPredContribs:
     ):
         forest = MondrianForestClassifier(n_estimators=10, random_state=42)
         forest.fit(X_train, y_train_clf)
-        pred, shap = forest.predict(X_test, return_shap=True)
+        _pred, shap = forest.predict(X_test, return_shap=True)
         # Classification returns per-class SHAP: (n_samples, n_features, n_classes)
         assert shap.shape == (10, 4, 3)
         contribs = forest.pred_contribs(X_test)
@@ -254,9 +234,7 @@ class TestPredictWithMultipleKwargs:
     def X_test(self):
         return np.random.randn(10, 4).astype(np.float32)
 
-    def test_forest_predict_all_kwargs_regression(
-        self, X_train, y_train_reg, X_test
-    ):
+    def test_forest_predict_all_kwargs_regression(self, X_train, y_train_reg, X_test):
         forest = MondrianForestRegressor(n_estimators=10, random_state=42)
         forest.fit(X_train, y_train_reg)
         result = forest.predict(

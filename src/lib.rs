@@ -2115,16 +2115,16 @@ impl PyTree {
         // Populate nodes
         for i in 0..n_nodes {
             let lb_vec: Vec<f32> = if i < lb_rows {
-                (0..n_features).map(|f| {
-                    if f < lb_cols { lb[i][f] } else { 0.0 }
-                }).collect()
+                (0..n_features)
+                    .map(|f| if f < lb_cols { lb[i][f] } else { 0.0 })
+                    .collect()
             } else {
                 vec![0.0; n_features]
             };
             let ub_vec: Vec<f32> = if i < lb_rows {
-                (0..n_features).map(|f| {
-                    if f < lb_cols { ub[i][f] } else { 0.0 }
-                }).collect()
+                (0..n_features)
+                    .map(|f| if f < lb_cols { ub[i][f] } else { 0.0 })
+                    .collect()
             } else {
                 vec![0.0; n_features]
             };

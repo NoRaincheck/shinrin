@@ -36,7 +36,7 @@ if TYPE_CHECKING:
 
 SklearnModel = Any  # fitted sklearn tree/forest estimator
 OnnxModel = "ModelProto"  # onnx.ModelProto
-ModelInput = Union[SklearnModel, OnnxModel]
+ModelInput = Union[SklearnModel, OnnxModel]  # noqa: UP007
 
 # ---------------------------------------------------------------------------
 # Minimum sample threshold
@@ -68,10 +68,14 @@ def _extract_tree_from_onnx_node(onnx_model: ModelProto, tree_id: int) -> dict:
     """
     # Find the TreeEnsemble node for this tree
     # For forests, each TreeEnsemble node represents one tree
-    tree_nodes = [node for node in onnx_model.graph.node if node.op_type == "TreeEnsemble"]
+    tree_nodes = [
+        node for node in onnx_model.graph.node if node.op_type == "TreeEnsemble"
+    ]
     if tree_id >= len(tree_nodes):
-        raise ValueError(f"Tree with id {tree_id} not found in ONNX model (found {len(tree_nodes)} trees)")
-    
+        raise ValueError(
+            f"Tree with id {tree_id} not found in ONNX model (found {len(tree_nodes)} trees)"
+        )
+
     tree_node = tree_nodes[tree_id]
 
     # Extract attributes
@@ -87,17 +91,19 @@ def _extract_tree_from_onnx_node(onnx_model: ModelProto, tree_id: int) -> dict:
     # Determine if regression or classification
     # post_transform is present for both regression and classification,
     # but regression uses "none" while classification uses "sigmoid" or "softmax"
-    post_transform = attrs["post_transform"].s.decode() if "post_transform" in attrs else "none"
+    post_transform = (
+        attrs["post_transform"].s.decode() if "post_transform" in attrs else "none"
+    )
     is_classification = post_transform in ("sigmoid", "softmax")
 
     # Separate thresholds (internal nodes) and leaf values (leaf nodes)
     # In ONNX, nodes_values contains thresholds for internal nodes and
     # leaf values for leaf nodes. We need to separate them.
     nodes_values = np.array(attrs["nodes_values"].floats, dtype=np.float64)
-    
+
     # Create threshold array: use actual thresholds for internal nodes, -2.0 for leaf nodes
     threshold = np.where(feature == -2, -2.0, nodes_values)
-    
+
     # Create value array: use leaf values for leaf nodes, 0.0 for internal nodes
     value = np.where(feature == -2, nodes_values, 0.0)
 
@@ -212,7 +218,9 @@ def _get_sklearn_tree_info(model: SklearnModel) -> dict:
     right_child = t.children_right.copy().astype(np.int64)
 
     # Extract node values
-    raw_value = t.value  # shape: (n_nodes, n_outputs, max_n_classes) or (n_nodes, max_n_classes)
+    raw_value = (
+        t.value
+    )  # shape: (n_nodes, n_outputs, max_n_classes) or (n_nodes, max_n_classes)
 
     if n_classes[0] == 1:
         # Regression
@@ -223,9 +231,9 @@ def _get_sklearn_tree_info(model: SklearnModel) -> dict:
     else:
         # Classification: store class counts
         if raw_value.ndim == 3:
-            value = raw_value[:, 0, :n_classes[0]].astype(np.float64)
+            value = raw_value[:, 0, : n_classes[0]].astype(np.float64)
         else:
-            value = raw_value[:, :n_classes[0]].astype(np.float64)
+            value = raw_value[:, : n_classes[0]].astype(np.float64)
 
     return {
         "feature": feature,
@@ -342,7 +350,7 @@ def _compute_tau(
     if depth == 0:
         return 1.0
 
-    tau = 1.0 / (2 ** depth)
+    tau = 1.0 / (2**depth)
     return tau
 
 
@@ -471,8 +479,10 @@ def _convert_sklearn_tree_to_mondrian(
             if total_samples == 0:
                 filled_value[i] = (filled_value[left] + filled_value[right]) / 2.0
             else:
-                filled_value[i] = (left_samples * filled_value[left] +
-                                   right_samples * filled_value[right]) / total_samples
+                filled_value[i] = (
+                    left_samples * filled_value[left]
+                    + right_samples * filled_value[right]
+                ) / total_samples
 
         mean = filled_value.copy()
         value = filled_value.copy()
@@ -643,7 +653,7 @@ def from_model(
 
     X, y = check_X_y(X, y, dtype=np.float64, multi_output=False)
 
-    n_samples, n_features = X.shape
+    n_samples = X.shape[0]
 
     # Warn about small datasets
     if n_samples < _MIN_SAMPLES_FOR_STATS:
@@ -680,8 +690,10 @@ def _from_model_single_tree(
     cls: type,
 ) -> Any:
     """Convert a single tree model to Mondrian format."""
-    # Import the native tree builder
-    from shinrin._native import Tree
+    # Import the native tree builder (active backend)
+    from shinrin._backend import get_backend_module
+
+    Tree = get_backend_module().Tree
 
     # Extract tree structure from ONNX
     tree_info = _extract_tree_from_onnx_node(model, 0)
@@ -738,7 +750,11 @@ def _from_model_single_tree(
         mondrian_tree.max_depth = None
         mondrian_tree.min_samples_split = 2
         mondrian_tree.random_state = None
-        mondrian_tree.classes_ = classes if classes is not None else np.array([f"class_{i}" for i in range(int(n_classes[0]))])
+        mondrian_tree.classes_ = (
+            classes
+            if classes is not None
+            else np.array([f"class_{i}" for i in range(int(n_classes[0]))])
+        )
         mondrian_tree.first_ = True
         mondrian_tree._onnx_converted = True
         return mondrian_tree
@@ -765,8 +781,7 @@ def _from_model_forest(
 
     # Extract tree count and IDs from ONNX model
     tree_ids = [
-        i for i, node in enumerate(model.graph.node)
-        if node.op_type == "TreeEnsemble"
+        i for i, node in enumerate(model.graph.node) if node.op_type == "TreeEnsemble"
     ]
 
     # Extract base_values from ONNX model if available (for GradientBoosting)
@@ -784,9 +799,7 @@ def _from_model_forest(
     def _convert_single_tree(tree_id: int) -> Any:
         tree_info = _extract_tree_from_onnx_node(model, tree_id)
         n_classes = tree_info["n_classes"]
-        tree_data = _convert_onnx_tree_to_mondrian(
-            model, tree_id, tree_info, X
-        )
+        tree_data = _convert_onnx_tree_to_mondrian(model, tree_id, tree_info, X)
         # Add base_values to the first tree for GradientBoosting
         if tree_id == 0 and base_values is not None:
             # Add base_values to all leaf values
@@ -802,8 +815,10 @@ def _from_model_forest(
                 # For regression, value is 1D
                 tree_data["value"] += base_values
 
-        # Create the native tree
-        from shinrin._native import Tree
+        # Create the native tree (active backend)
+        from shinrin._backend import get_backend_module
+
+        Tree = get_backend_module().Tree
 
         n_features = X.shape[1]
         n_classes_arr = np.array(n_classes, dtype=np.intp)
@@ -830,7 +845,9 @@ def _from_model_forest(
         tree_wrapper.max_depth = None
         tree_wrapper.min_samples_split = 2
         tree_wrapper.random_state = None
-        tree_wrapper.classes_ = np.array([f"class_{i}" for i in range(int(n_classes[0]))])
+        tree_wrapper.classes_ = np.array(
+            [f"class_{i}" for i in range(int(n_classes[0]))]
+        )
         tree_wrapper.first_ = True
         tree_wrapper._onnx_converted = True
         return tree_wrapper
@@ -875,7 +892,6 @@ def _from_model_forest(
         forest.n_jobs = -1
         forest.random_state = None
         forest.verbose = 0
-
 
     forest.first_ = True  # Mark as converted
     forest._onnx_converted = True  # Mark as ONNX/sklearn converted
