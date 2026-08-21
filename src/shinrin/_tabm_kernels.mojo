@@ -23,12 +23,14 @@ losses are means over B*k members. L2 adds alpha*theta to gradients and
 0.5*alpha*||theta||^2 to the loss.
 """
 
-from std.os import abort
+from std.os import abort, getenv
 from std.math import abs, exp, log, pow, sqrt
 from std.memory import alloc
 from std.io import Writer
 from std.python import Python, PythonObject
 from std.python.bindings import PythonModuleBuilder
+from std.runtime.asyncrt import TaskGroup
+from std.sys.info import num_performance_cores
 
 comptime SIMDW = 8
 
@@ -96,6 +98,47 @@ def softplus(x: Float32) -> Float32:
     if x < -20.0:
         return fast_exp(x)
     return fast_log(1.0 + fast_exp(x))
+
+
+@always_inline
+def mix_u64(x: UInt64) -> UInt64:
+    """splitmix64 finalizer: derives independent per-worker RNG streams."""
+    var z = x + 0x9E3779B97F4A7C15
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EB
+    return z ^ (z >> 31)
+
+
+def resolve_threads() raises -> Int:
+    """Worker count for data-parallel kernels.
+
+    Defaults to the number of performance cores; override with the
+    SHINRIN_TABM_THREADS environment variable.
+    """
+    var t = num_performance_cores()
+    if t < 1:
+        t = 1
+    var env = getenv("SHINRIN_TABM_THREADS")
+    if env:
+        var parsed = Int(String(env))
+        if parsed >= 1:
+            t = parsed
+    return t
+
+
+@always_inline
+def keep_mask_from_bits(v: UInt64, keep: Float32, thresh: UInt64) -> SIMD[DType.float32, SIMDW]:
+    """Expand 8 dropout decisions (one byte each) from the top of v.
+
+    A lane is kept iff its byte >= thresh, giving P(drop) = thresh/256
+    (~1/2560 granular error vs the float-draw scheme at one 64-bit draw
+    per 8 elements instead of eight).
+    """
+    var out = SIMD[DType.float32, SIMDW](0.0)
+    comptime for lane in range(SIMDW):
+        if ((v >> UInt64(56 - 8 * lane)) & 0xFF) >= thresh:
+            out[lane] = keep
+    return out
 
 
 @always_inline
@@ -174,6 +217,20 @@ def sum_sq_f32(a: Pointer[Float32, MutUntrackedOrigin], n: Int) -> Float64:
         acc += Float64(a.unsafe_load[width=1](i) * a.unsafe_load[width=1](i))
         i += 1
     return acc
+
+
+@always_inline
+def accumulate_into(dst: Pointer[Float32, MutUntrackedOrigin], src: Pointer[Float32, MutUntrackedOrigin], n: Int):
+    """dst += src elementwise (gradient reduction across workers)."""
+    var i = 0
+    while i + SIMDW <= n:
+        dst.unsafe_store[width=SIMDW](
+            i, dst.unsafe_load[width=SIMDW](i) + src.unsafe_load[width=SIMDW](i)
+        )
+        i += SIMDW
+    while i < n:
+        dst[i] = dst[i] + src[i]
+        i += 1
 
 
 @always_inline
@@ -405,11 +462,15 @@ struct Workspace(Movable):
     var dq: Pointer[Float32, MutUntrackedOrigin]
     var dv: Pointer[Float32, MutUntrackedOrigin]
     var dh: Pointer[Float32, MutUntrackedOrigin]
-    var vs: List[Pointer[Float32, MutUntrackedOrigin]]
-    var qs: List[Pointer[Float32, MutUntrackedOrigin]]
-    var rmasks: List[Pointer[Float32, MutUntrackedOrigin]]
-    var dmasks: List[Pointer[Float32, MutUntrackedOrigin]]
-    var acts: List[Pointer[Float32, MutUntrackedOrigin]]
+    # Per-block caches live in one contiguous slab (fewer allocations, better
+    # locality, and plain-pointer fields keep the struct coroutine-friendly).
+    var slab: Pointer[Float32, MutUntrackedOrigin]
+    var vs_off: Pointer[Int, MutUntrackedOrigin]
+    var qs_off: Pointer[Int, MutUntrackedOrigin]
+    var rm_off: Pointer[Int, MutUntrackedOrigin]
+    var dm_off: Pointer[Int, MutUntrackedOrigin]
+    var ac_off: Pointer[Int, MutUntrackedOrigin]
+    var nb: Int
 
     def __init__(
         out self,
@@ -440,42 +501,67 @@ struct Workspace(Movable):
         self.dq = alloc[Float32](bk * db + 16)
         self.dv = alloc[Float32](bk * bmax + 16)
         self.dh = alloc[Float32](chunk * d_in + 16)
-        self.vs = List[Pointer[Float32, MutUntrackedOrigin]]()
-        self.qs = List[Pointer[Float32, MutUntrackedOrigin]]()
-        self.rmasks = List[Pointer[Float32, MutUntrackedOrigin]]()
-        self.dmasks = List[Pointer[Float32, MutUntrackedOrigin]]()
-        self.acts = List[Pointer[Float32, MutUntrackedOrigin]]()
+        self.nb = nb
+        self.vs_off = alloc[Int](nb + 16)
+        self.qs_off = alloc[Int](nb + 16)
+        self.rm_off = alloc[Int](nb + 16)
+        self.dm_off = alloc[Int](nb + 16)
+        self.ac_off = alloc[Int](nb + 16)
+        comptime PAD = 16
+        var total = 0
         for i in range(nb):
             var b_in = d_in if i == 0 else db
-            self.vs.append(alloc[Float32](bk * b_in + 16))
-            self.qs.append(alloc[Float32](bk * db + 16))
-            self.rmasks.append(alloc[Float32](bk * db + 16))
-            self.dmasks.append(alloc[Float32](bk * db + 16))
-            self.acts.append(alloc[Float32](bk * db + 16))
+            self.vs_off[i] = total
+            total += bk * b_in + PAD
+            self.qs_off[i] = total
+            total += bk * db + PAD
+            self.rm_off[i] = total
+            total += bk * db + PAD
+            self.dm_off[i] = total
+            total += bk * db + PAD
+            self.ac_off[i] = total
+            total += bk * db + PAD
+        self.slab = alloc[Float32](total)
 
-    def free(self):
-        self.h.free()
-        self.pl.free()
-        self.tmp.free()
-        self.tmp2.free()
-        self.xnum.free()
-        self.enc_snap.free()
-        self.preds.free()
-        self.dpreds.free()
-        self.da.free()
-        self.dq.free()
-        self.dv.free()
-        self.dh.free()
-        for p in self.vs:
-            p.free()
-        for p in self.qs:
-            p.free()
-        for p in self.rmasks:
-            p.free()
-        for p in self.dmasks:
-            p.free()
-        for p in self.acts:
-            p.free()
+    @always_inline
+    def vs_ptr(self, i: Int) -> Pointer[Float32, MutUntrackedOrigin]:
+        return self.slab + self.vs_off[i]
+
+    @always_inline
+    def qs_ptr(self, i: Int) -> Pointer[Float32, MutUntrackedOrigin]:
+        return self.slab + self.qs_off[i]
+
+    @always_inline
+    def rmask_ptr(self, i: Int) -> Pointer[Float32, MutUntrackedOrigin]:
+        return self.slab + self.rm_off[i]
+
+    @always_inline
+    def dmask_ptr(self, i: Int) -> Pointer[Float32, MutUntrackedOrigin]:
+        return self.slab + self.dm_off[i]
+
+    @always_inline
+    def act_ptr(self, i: Int) -> Pointer[Float32, MutUntrackedOrigin]:
+        return self.slab + self.ac_off[i]
+
+    def unsafe_free(self):
+        self.h.unsafe_free()
+        self.pl.unsafe_free()
+        self.tmp.unsafe_free()
+        self.tmp2.unsafe_free()
+        self.xnum.unsafe_free()
+        self.enc_snap.unsafe_free()
+        self.preds.unsafe_free()
+        self.dpreds.unsafe_free()
+        self.da.unsafe_free()
+        self.dq.unsafe_free()
+        self.dv.unsafe_free()
+        self.dh.unsafe_free()
+        self.slab.unsafe_free()
+        self.vs_off.unsafe_free()
+        self.qs_off.unsafe_free()
+        self.rm_off.unsafe_free()
+        self.dm_off.unsafe_free()
+        self.ac_off.unsafe_free()
 
 
 # =============================================================================
@@ -661,18 +747,29 @@ struct TabMTrainer(ImplicitlyCopyable, Movable, Writable):
                 r += 1
             var w0 = theta + self.off_emb_w0()
             var b0 = theta + self.off_emb_b0()
+            var demb_vec = demb % SIMDW == 0
             r = 0
             while r < b:
                 var src = rows[r]
                 var f = 0
                 while f < self.F:
                     var xv = x_num[src * self.F + f]
-                    var o = 0
-                    while o < demb:
-                        ws.h[r * self.d_in + f * demb + o] = (
-                            xv * w0[f * demb + o] + b0[f * demb + o]
-                        )
-                        o += 1
+                    var hp = ws.h + r * self.d_in + f * demb
+                    var wp0 = w0 + f * demb
+                    var bp0 = b0 + f * demb
+                    if demb_vec:
+                        var xv_simd = SIMD[DType.float32, SIMDW](xv)
+                        var o2 = 0
+                        while o2 < demb:
+                            hp.unsafe_store[width=SIMDW](
+                                o2, xv_simd * wp0.unsafe_load[width=SIMDW](o2) + bp0.unsafe_load[width=SIMDW](o2)
+                            )
+                            o2 += SIMDW
+                    else:
+                        var o3 = 0
+                        while o3 < demb:
+                            hp[o3] = xv * wp0[o3] + bp0[o3]
+                            o3 += 1
                     f += 1
                 r += 1
             # piecewise component per feature into ws.pl (pre-relu values)
@@ -737,11 +834,19 @@ struct TabMTrainer(ImplicitlyCopyable, Movable, Writable):
         dropout: Float32,
         train: Bool,
     ):
-        """ws.h -> per-block caches; final activation in acts[nb-1]."""
+        """ws.h -> per-block caches; final activation in act_ptr(nb-1)."""
         var keep = 1.0 / (1.0 - dropout)
         var use_dropout = train and dropout > 0.0
+        # Byte-wise dropout thresholds: byte >= thresh keeps the element.
+        var thresh = UInt64(dropout * 256.0)
+        if thresh < 1:
+            thresh = 1
         var zero = SIMD[DType.float32, SIMDW](0.0)
         var ones = SIMD[DType.float32, SIMDW](1.0)
+        # Bit-buffer for dropout draws: one 64-bit draw covers 64 keep/drop
+        # decisions instead of 64 uniform() calls (~8x fewer RNG ops).
+        var bits: UInt64 = 0
+        var nbits = 0
         var i = 0
         while i < self.nb:
             var b_in = self.block_in(i)
@@ -749,11 +854,11 @@ struct TabMTrainer(ImplicitlyCopyable, Movable, Writable):
             var rr = theta + self.off_r(i)
             var ss = theta + self.off_s(i)
             var bb = theta + self.off_b(i)
-            var v = ws.vs[i]
-            var q = ws.qs[i]
-            var rmask = ws.rmasks[i]
-            var dmask = ws.dmasks[i]
-            var act = ws.acts[i]
+            var v = ws.vs_ptr(i)
+            var q = ws.qs_ptr(i)
+            var rmask = ws.rmask_ptr(i)
+            var dmask = ws.dmask_ptr(i)
+            var act = ws.act_ptr(i)
 
             # v[row, :] = input[row or broadcast] * r[j, :]
             var row = 0
@@ -763,7 +868,7 @@ struct TabMTrainer(ImplicitlyCopyable, Movable, Writable):
                 if i == 0:
                     src = ws.h + (row // self.k) * self.d_in
                 else:
-                    src = ws.acts[i - 1] + row * self.db
+                    src = ws.act_ptr(i - 1) + row * self.db
                 var dst = v + row * b_in
                 var rrow = rr + j * b_in
                 var t = 0
@@ -804,11 +909,12 @@ struct TabMTrainer(ImplicitlyCopyable, Movable, Writable):
                         l += 1
                     var dv = ones
                     if use_dropout:
-                        dv = SIMD[DType.float32, SIMDW](0.0)
-                        l = 0
-                        while l < SIMDW:
-                            dv[l] = keep if rng.uniform() >= dropout else 0.0
-                            l += 1
+                        if nbits < SIMDW * 8:
+                            bits = rng.next_u64()
+                            nbits = 64
+                        dv = keep_mask_from_bits(bits, keep, thresh)
+                        bits <<= SIMDW * 8
+                        nbits -= SIMDW * 8
                     rp.unsafe_store[width=SIMDW](o, mv)
                     dp.unsafe_store[width=SIMDW](o, dv)
                     ap.unsafe_store[width=SIMDW](o, max(uv, zero) * dv)
@@ -820,7 +926,12 @@ struct TabMTrainer(ImplicitlyCopyable, Movable, Writable):
                     rp[o] = 1.0 if pos else 0.0
                     var dm: Float32 = 1.0
                     if use_dropout:
-                        dm = keep if rng.uniform() >= dropout else 0.0
+                        if nbits < 8:
+                            bits = rng.next_u64()
+                            nbits = 64
+                        dm = keep if ((bits >> 56) & 0xFF) >= thresh else 0.0
+                        bits <<= 8
+                        nbits -= 8
                     dp[o] = dm
                     ap[o] = a * dm
                     o += 1
@@ -834,9 +945,29 @@ struct TabMTrainer(ImplicitlyCopyable, Movable, Writable):
         b: Int,
     ):
         # preds[row, o] = sum_t act_last[row,t]*head_w[j,t,o] + head_b[j,o]
-        var act_last = ws.acts[self.nb - 1]
+        var act_last = ws.act_ptr(self.nb - 1)
         var hw = theta + self.off_head_w()
         var hb = theta + self.off_head_b()
+        if self.dout == 1:
+            # Fast path: fully contiguous over t -> SIMD dot per member row.
+            var row = 0
+            while row < b * self.k:
+                var j = row % self.k
+                var ap = act_last + row * self.db
+                var hwp = hw + j * self.db
+                var acc = hb[j]
+                var t = 0
+                while t + SIMDW <= self.db:
+                    acc += (
+                        ap.unsafe_load[width=SIMDW](t) * hwp.unsafe_load[width=SIMDW](t)
+                    ).reduce_add()
+                    t += SIMDW
+                while t < self.db:
+                    acc += ap[t] * hwp[t]
+                    t += 1
+                ws.preds[row] = acc
+                row += 1
+            return
         var row = 0
         while row < b * self.k:
             var j = row % self.k
@@ -877,13 +1008,19 @@ struct TabMTrainer(ImplicitlyCopyable, Movable, Writable):
         rows: Pointer[Int, MutUntrackedOrigin],
         b: Int,
         task: Int,
+        denom_b: Int,
     ) -> Float64:
         """Fill ws.dpreds; returns chunk loss summed over members.
 
-        task: 0 = regression, 1 = binary, 2 = multiclass.
+        task: 0 = regression, 1 = binary, 2 = multiclass. denom_b is the row
+        count of the full minibatch the chunk belongs to (gradient/loss
+        normalization must use the minibatch size even when a chunk is a
+        thread-local slice of it).
         """
         var members = b * self.k
-        var total = members * self.dout
+        var gmembers = denom_b * self.k
+        var total = gmembers * self.dout
+        var local_total = members * self.dout
         var loss: Float64 = 0.0
         var row = 0
         while row < members:
@@ -901,7 +1038,7 @@ struct TabMTrainer(ImplicitlyCopyable, Movable, Writable):
                 var z = ws.preds[row * self.dout]
                 var target = y[src * self.dout]
                 loss += Float64(softplus(z) - target * z)
-                ws.dpreds[row * self.dout] = (sigmoid(z) - target) / Float32(members)
+                ws.dpreds[row * self.dout] = (sigmoid(z) - target) / Float32(gmembers)
             else:
                 # softmax cross-entropy over dout logits
                 var base = row * self.dout
@@ -928,11 +1065,13 @@ struct TabMTrainer(ImplicitlyCopyable, Movable, Writable):
                     var onehot: Float32 = 0.0
                     if o == cls:
                         onehot = 1.0
-                    ws.dpreds[base + o] = (sm - onehot) / Float32(members)
+                    ws.dpreds[base + o] = (sm - onehot) / Float32(gmembers)
                     o += 1
             row += 1
         if task == 0:
-            return loss / Float64(total)
+            # Returned loss stays a per-chunk mean; only dpreds scaling uses
+            # the full-minibatch denominator.
+            return loss / Float64(local_total)
         return loss / Float64(members)
 
     # -- backward ------------------------------------------------------------------
@@ -949,60 +1088,101 @@ struct TabMTrainer(ImplicitlyCopyable, Movable, Writable):
         var bk = b * k
 
         # ---- head ----
-        var act_last = ws.acts[self.nb - 1]
+        var act_last = ws.act_ptr(self.nb - 1)
         var hw = theta + self.off_head_w()
         var dhw = g + self.off_head_w()
         var dhb = g + self.off_head_b()
-        # da[row, t] = sum_o dpred[row,o]*head_w[j,t,o]
-        var row = 0
-        while row < bk:
-            var j = row % k
-            var t = 0
-            while t < self.db:
-                var acc = SIMD[DType.float32, SIMDW](0.0)
-                var o = 0
-                while o + SIMDW <= self.dout:
-                    acc += ws.dpreds.unsafe_load[width=SIMDW](row * self.dout + o) * hw.unsafe_load[width=SIMDW](
-                        j * self.db * self.dout + t * self.dout + o
+        if self.dout == 1:
+            # Fast path: da[row,t] = dpred[row]*hw[j,t]; dhw[j,t] += act*dpred.
+            var row0 = 0
+            while row0 < bk:
+                var j0 = row0 % k
+                var dp0 = ws.dpreds[row0]
+                var hwp0 = hw + j0 * self.db
+                var dap0 = ws.da + row0 * self.db
+                var t0v = 0
+                while t0v + SIMDW <= self.db:
+                    dap0.unsafe_store[width=SIMDW](
+                        t0v, SIMD[DType.float32, SIMDW](dp0) * hwp0.unsafe_load[width=SIMDW](t0v)
                     )
-                    o += SIMDW
-                var da_val = acc.reduce_add()
-                while o < self.dout:
-                    da_val += ws.dpreds[row * self.dout + o] * hw[j * self.db * self.dout + t * self.dout + o]
-                    o += 1
-                ws.da[row * self.db + t] = da_val
-                t += 1
-            row += 1
-        # dhw[j,t,o] += sum_bb act_last[bb,j,t]*dpred[bb,j,o]; dhb[j,o] += sum_bb dpred
-        var j = 0
-        while j < k:
-            var bb = 0
-            while bb < b:
-                var rowj = bb * k + j
+                    t0v += SIMDW
+                while t0v < self.db:
+                    dap0[t0v] = dp0 * hwp0[t0v]
+                    t0v += 1
+                row0 += 1
+            var j1 = 0
+            while j1 < k:
+                var dhwj = dhw + j1 * self.db
+                var bb1 = 0
+                var dhb_acc: Float32 = 0.0
+                while bb1 < b:
+                    var rowj1 = bb1 * k + j1
+                    var dp1 = ws.dpreds[rowj1]
+                    dhb_acc += dp1
+                    var ap1 = act_last + rowj1 * self.db
+                    var t1 = 0
+                    while t1 + SIMDW <= self.db:
+                        var cur = dhwj.unsafe_load[width=SIMDW](t1)
+                        cur += SIMD[DType.float32, SIMDW](dp1) * ap1.unsafe_load[width=SIMDW](t1)
+                        dhwj.unsafe_store[width=SIMDW](t1, cur)
+                        t1 += SIMDW
+                    while t1 < self.db:
+                        dhwj[t1] += ap1[t1] * dp1
+                        t1 += 1
+                    bb1 += 1
+                dhb[j1] += dhb_acc
+                j1 += 1
+        else:
+            # da[row, t] = sum_o dpred[row,o]*head_w[j,t,o]
+            var row = 0
+            while row < bk:
+                var j = row % k
                 var t = 0
                 while t < self.db:
-                    var av = act_last[rowj * self.db + t]
+                    var acc = SIMD[DType.float32, SIMDW](0.0)
                     var o = 0
                     while o + SIMDW <= self.dout:
-                        var cur = dhw.unsafe_load[width=SIMDW](j * self.db * self.dout + t * self.dout + o)
-                        cur += SIMD[DType.float32, SIMDW](av) * ws.dpreds.unsafe_load[width=SIMDW](rowj * self.dout + o)
-                        dhw.unsafe_store[width=SIMDW](j * self.db * self.dout + t * self.dout + o, cur)
+                        acc += ws.dpreds.unsafe_load[width=SIMDW](row * self.dout + o) * hw.unsafe_load[width=SIMDW](
+                            j * self.db * self.dout + t * self.dout + o
+                        )
                         o += SIMDW
+                    var da_val = acc.reduce_add()
                     while o < self.dout:
-                        dhw[j * self.db * self.dout + t * self.dout + o] += av * ws.dpreds[rowj * self.dout + o]
+                        da_val += ws.dpreds[row * self.dout + o] * hw[j * self.db * self.dout + t * self.dout + o]
                         o += 1
+                    ws.da[row * self.db + t] = da_val
                     t += 1
-                var o2 = 0
-                while o2 + SIMDW <= self.dout:
-                    var cur = dhb.unsafe_load[width=SIMDW](j * self.dout + o2)
-                    cur += ws.dpreds.unsafe_load[width=SIMDW](rowj * self.dout + o2)
-                    dhb.unsafe_store[width=SIMDW](j * self.dout + o2, cur)
-                    o2 += SIMDW
-                while o2 < self.dout:
-                    dhb[j * self.dout + o2] += ws.dpreds[rowj * self.dout + o2]
-                    o2 += 1
-                bb += 1
-            j += 1
+                row += 1
+            # dhw[j,t,o] += sum_bb act_last[bb,j,t]*dpred[bb,j,o]; dhb[j,o] += sum_bb dpred
+            var j = 0
+            while j < k:
+                var bb = 0
+                while bb < b:
+                    var rowj = bb * k + j
+                    var t = 0
+                    while t < self.db:
+                        var av = act_last[rowj * self.db + t]
+                        var o = 0
+                        while o + SIMDW <= self.dout:
+                            var cur = dhw.unsafe_load[width=SIMDW](j * self.db * self.dout + t * self.dout + o)
+                            cur += SIMD[DType.float32, SIMDW](av) * ws.dpreds.unsafe_load[width=SIMDW](rowj * self.dout + o)
+                            dhw.unsafe_store[width=SIMDW](j * self.db * self.dout + t * self.dout + o, cur)
+                            o += SIMDW
+                        while o < self.dout:
+                            dhw[j * self.db * self.dout + t * self.dout + o] += av * ws.dpreds[rowj * self.dout + o]
+                            o += 1
+                        t += 1
+                    var o2 = 0
+                    while o2 + SIMDW <= self.dout:
+                        var cur = dhb.unsafe_load[width=SIMDW](j * self.dout + o2)
+                        cur += ws.dpreds.unsafe_load[width=SIMDW](rowj * self.dout + o2)
+                        dhb.unsafe_store[width=SIMDW](j * self.dout + o2, cur)
+                        o2 += SIMDW
+                    while o2 < self.dout:
+                        dhb[j * self.dout + o2] += ws.dpreds[rowj * self.dout + o2]
+                        o2 += 1
+                    bb += 1
+                j += 1
 
         # ---- blocks in reverse ----
         var i = self.nb - 1
@@ -1011,17 +1191,26 @@ struct TabMTrainer(ImplicitlyCopyable, Movable, Writable):
             var w = theta + self.off_w(i)
             var rr = theta + self.off_r(i)
             var ss = theta + self.off_s(i)
-            var v = ws.vs[i]
-            var q = ws.qs[i]
-            var rmask = ws.rmasks[i]
-            var dmask = ws.dmasks[i]
+            var v = ws.vs_ptr(i)
+            var q = ws.qs_ptr(i)
+            var rmask = ws.rmask_ptr(i)
+            var dmask = ws.dmask_ptr(i)
             var da = ws.da
             var dq = ws.dq
             var dv = ws.dv
 
             # dropout then relu on incoming da
             var idx = 0
-            while idx < bk * self.db:
+            var bkdb = bk * self.db
+            while idx + SIMDW <= bkdb:
+                dq.unsafe_store[width=SIMDW](
+                    idx,
+                    da.unsafe_load[width=SIMDW](idx)
+                    * dmask.unsafe_load[width=SIMDW](idx)
+                    * rmask.unsafe_load[width=SIMDW](idx),
+                )
+                idx += SIMDW
+            while idx < bkdb:
                 dq[idx] = da[idx] * dmask[idx] * rmask[idx]
                 idx += 1
 
@@ -1081,16 +1270,27 @@ struct TabMTrainer(ImplicitlyCopyable, Movable, Writable):
             row = 0
             while row < bk:
                 var jj = row % k
+                var src: Pointer[Float32, MutUntrackedOrigin]
+                if i == 0:
+                    src = ws.h + (row // k) * self.d_in
+                else:
+                    src = ws.act_ptr(i - 1) + row * self.db
+                var dvp = dv + row * b_in
+                var drp = dr + jj * b_in
+                var anp = da_new + row * b_in
+                var rp2 = rr + jj * b_in
                 var t = 0
+                while t + SIMDW <= b_in:
+                    var dvv = dvp.unsafe_load[width=SIMDW](t)
+                    var cur = drp.unsafe_load[width=SIMDW](t)
+                    cur += dvv * src.unsafe_load[width=SIMDW](t)
+                    drp.unsafe_store[width=SIMDW](t, cur)
+                    anp.unsafe_store[width=SIMDW](t, dvv * rp2.unsafe_load[width=SIMDW](t))
+                    t += SIMDW
                 while t < b_in:
-                    var xin: Float32
-                    if i == 0:
-                        xin = ws.h[(row // k) * self.d_in + t]
-                    else:
-                        xin = ws.acts[i - 1][row * self.db + t]
-                    var dvv = dv[row * b_in + t]
-                    dr[jj * b_in + t] += dvv * xin
-                    da_new[row * b_in + t] = dvv * rr[jj * b_in + t]
+                    var dvv_s = dvp[t]
+                    drp[t] += dvv_s * src[t]
+                    anp[t] = dvv_s * rp2[t]
                     t += 1
                 row += 1
 
@@ -1129,17 +1329,30 @@ struct TabMTrainer(ImplicitlyCopyable, Movable, Writable):
         var demb = self.demb
         var dw0 = g + self.off_emb_w0()
         var db0 = g + self.off_emb_b0()
+        var demb_vec = demb % SIMDW == 0
         var r = 0
         while r < b:
             var f = 0
             while f < self.F:
                 var xn = ws.xnum[r * self.F + f]
-                var o = 0
-                while o < demb:
-                    var dg = ws.dh[r * self.d_in + f * demb + o]
-                    dw0[f * demb + o] += xn * dg
-                    db0[f * demb + o] += dg
-                    o += 1
+                var dhp = ws.dh + r * self.d_in + f * demb
+                if demb_vec:
+                    var xn_simd = SIMD[DType.float32, SIMDW](xn)
+                    var dwp = dw0 + f * demb
+                    var dbp = db0 + f * demb
+                    var o2 = 0
+                    while o2 < demb:
+                        var dg = dhp.unsafe_load[width=SIMDW](o2)
+                        dwp.unsafe_store[width=SIMDW](o2, dwp.unsafe_load[width=SIMDW](o2) + xn_simd * dg)
+                        dbp.unsafe_store[width=SIMDW](o2, dbp.unsafe_load[width=SIMDW](o2) + dg)
+                        o2 += SIMDW
+                else:
+                    var o3 = 0
+                    while o3 < demb:
+                        var dg = dhp[o3]
+                        dw0[f * demb + o3] += xn * dg
+                        db0[f * demb + o3] += dg
+                        o3 += 1
                 f += 1
             r += 1
         # dpl = dh * (pl >= 0), then dwp_f += enc^T @ dpl_f
@@ -1179,32 +1392,11 @@ struct TabMTrainer(ImplicitlyCopyable, Movable, Writable):
         task: Int,
         add_l2: Bool,
         alpha: Float32,
+        nthreads: Int,
     ) -> Float64:
-        """Chunked forward/backward over all N rows; returns mean loss."""
-        vec_zero(grad, self.P)
-        var rng = Rng(1)
-        var chunk = max(1, 8192 // self.k)
-        var idx = alloc[Int](N)
-        var i = 0
-        while i < N:
-            idx[i] = i
-            i += 1
-        var ws = Workspace(chunk, self.k, self.nb, self.d_in, self.db, self.dout, self.F, self.demb, self.denc)
-        var weighted: Float64 = 0.0
-        var start = 0
-        while start < N:
-            var b = min(chunk, N - start)
-            self.forward_chunk(theta, ws, x_num, x_enc, x_cat, idx + start, b, rng, 0.0, False)
-            weighted += self.loss_and_dpreds(ws, y, idx + start, b, task) * Float64(b)
-            self.backward_chunk(theta, ws, grad, b)
-            start += b
-        ws.free()
-        idx.free()
-        var loss = weighted / Float64(N)
-        if add_l2:
-            loss += 0.5 * Float64(alpha) * sum_sq_f32(theta, self.P)
-            saxpy(grad, theta, Float64(alpha), self.P)
-        return loss
+        return k_full_loss_grad(
+            self, theta, grad, x_num, x_enc, x_cat, y, N, task, add_l2, alpha, nthreads
+        )
 
     # -- bound-type entry points -------------------------------------------------------
 
@@ -1225,62 +1417,11 @@ struct TabMTrainer(ImplicitlyCopyable, Movable, Writable):
         alpha: Float32,
         seed: UInt64,
         task: Int,
+        nthreads: Int,
     ) -> Tuple[Float64, Int]:
-        var rng = Rng(seed)
-        var idx = alloc[Int](N)
-        var i = 0
-        while i < N:
-            idx[i] = i
-            i += 1
-        # Fisher-Yates shuffle
-        var ii = N - 1
-        while ii > 0:
-            var jj = Int(rng.next_u64() % UInt64(ii + 1))
-            var tmp = idx[ii]
-            idx[ii] = idx[jj]
-            idx[jj] = tmp
-            ii -= 1
-
-        var g = alloc[Float32](self.P)
-        var chunk = max(1, 8192 // self.k)
-        # One workspace reused across every minibatch chunk of this epoch.
-        var ws = Workspace(chunk, self.k, self.nb, self.d_in, self.db, self.dout, self.F, self.demb, self.denc)
-        var l2_term = 0.5 * Float64(alpha) * sum_sq_f32(theta, self.P)
-        var weighted: Float64 = 0.0
-        var t = t0
-        var start = 0
-        while start < N:
-            var be = min(start + bs, N)
-            var nb_rows = be - start
-            vec_zero(g, self.P)
-            var batch_loss: Float64 = 0.0
-            var c0 = start
-            while c0 < be:
-                var b = min(chunk, be - c0)
-                self.forward_chunk(theta, ws, x_num, x_enc, x_cat, idx + c0, b, rng, dropout, True)
-                batch_loss += self.loss_and_dpreds(ws, y, idx + c0, b, task) * Float64(b)
-                self.backward_chunk(theta, ws, g, b)
-                c0 += b
-            batch_loss = batch_loss / Float64(nb_rows) + l2_term
-            # Adam update (bias-corrected, mirrors _optim.adam_step)
-            t += 1
-            var bc1 = 1.0 - pow(0.9, Float64(t))
-            var bc2 = 1.0 - pow(0.999, Float64(t))
-            var p = 0
-            while p < self.P:
-                var gi = g[p] + alpha * theta[p]
-                m[p] = 0.9 * m[p] + 0.1 * gi
-                v[p] = 0.999 * v[p] + 0.001 * gi * gi
-                var mh = m[p] / Float32(bc1)
-                var vh = v[p] / Float32(bc2)
-                theta[p] -= lr * mh / (sqrt(vh) + 1e-8)
-                p += 1
-            weighted += batch_loss * Float64(nb_rows)
-            start = be
-        ws.free()
-        idx.free()
-        g.free()
-        return (weighted / Float64(N), t)
+        return k_adam_epoch(
+            self, theta, m, v, t0, x_num, x_enc, x_cat, y, N, lr, bs, dropout, alpha, seed, task, nthreads
+        )
 
     def lbfgs_minimize_impl(
         self,
@@ -1296,6 +1437,7 @@ struct TabMTrainer(ImplicitlyCopyable, Movable, Writable):
         alpha: Float32,
         losses_out: Pointer[Float64, MutUntrackedOrigin],
         task: Int,
+        nthreads: Int,
     ) -> Int:
         var P = self.P
         # Model state and evaluations stay float32; all L-BFGS bookkeeping
@@ -1315,7 +1457,7 @@ struct TabMTrainer(ImplicitlyCopyable, Movable, Writable):
         var rho = alloc[Float64](maxcor)
         var alphas = alloc[Float64](maxcor)
 
-        var loss = self.full_loss_grad(theta, g, x_num, x_enc, x_cat, y, N, task, True, alpha)
+        var loss = self.full_loss_grad(theta, g, x_num, x_enc, x_cat, y, N, task, True, alpha, nthreads)
         losses_out[0] = loss
         var n_losses = 1
         var i = 0
@@ -1401,7 +1543,7 @@ struct TabMTrainer(ImplicitlyCopyable, Movable, Writable):
                     cand64[i] = th64[i] + step * dir[i]
                     cand[i] = Float32(cand64[i])
                     i += 1
-                var loss_new = self.full_loss_grad(cand, gnew, x_num, x_enc, x_cat, y, N, task, True, alpha)
+                var loss_new = self.full_loss_grad(cand, gnew, x_num, x_enc, x_cat, y, N, task, True, alpha, nthreads)
                 if loss_new <= loss + 1e-4 * step * dg:
                     # success: shift state
                     i = 0
@@ -1477,7 +1619,7 @@ struct TabMTrainer(ImplicitlyCopyable, Movable, Writable):
         var alpha = Float32(Float64(py=parts[11]))
         var seed = UInt64(Int(py=parts[12]))
         var task = Int(py=parts[13])
-        var res = self.adam_epoch_impl(theta, m, v, t0, x_num, x_enc, x_cat, y, N, lr, bs, dropout, alpha, seed, task)
+        var res = self.adam_epoch_impl(theta, m, v, t0, x_num, x_enc, x_cat, y, N, lr, bs, dropout, alpha, seed, task, resolve_threads())
         return Python.tuple(res[0], res[1])
 
     @staticmethod
@@ -1495,7 +1637,7 @@ struct TabMTrainer(ImplicitlyCopyable, Movable, Writable):
         var alpha = Float32(Float64(py=parts[8]))
         var losses_out = ptr_f64(parts[9])
         var task = Int(py=parts[10])
-        var nit = self.lbfgs_minimize_impl(theta, x_num, x_enc, x_cat, y, N, max_iter, tol, maxcor, alpha, losses_out, task)
+        var nit = self.lbfgs_minimize_impl(theta, x_num, x_enc, x_cat, y, N, max_iter, tol, maxcor, alpha, losses_out, task, resolve_threads())
         return Int(nit)
 
     @staticmethod
@@ -1512,7 +1654,7 @@ struct TabMTrainer(ImplicitlyCopyable, Movable, Writable):
         var alpha = Float32(Float64(py=parts[6]))
         var grad_arr = np_empty_1d(np, self.P, "float32")
         var grad = ptr_f32(grad_arr)
-        var loss = self.full_loss_grad(theta, grad, x_num, x_enc, x_cat, y, N, task, True, alpha)
+        var loss = self.full_loss_grad(theta, grad, x_num, x_enc, x_cat, y, N, task, True, alpha, resolve_threads())
         return Python.tuple(Float64(loss), grad_arr)
 
     @staticmethod
@@ -1548,14 +1690,306 @@ struct TabMTrainer(ImplicitlyCopyable, Movable, Writable):
                     j += 1
                 r += 1
             start += b
-        ws.free()
-        idx.free()
+        ws.unsafe_free()
+        idx.unsafe_free()
         return Python.none()
 
     @staticmethod
     def param_count(self_ptr: Pointer[Self, MutAnyOrigin]) raises -> PythonObject:
         var self = self_ptr[]
         return Int(self.P)
+
+
+# =============================================================================
+# Data-parallel workers (one private workspace + gradient buffer per thread)
+# =============================================================================
+
+
+struct ChunkWorker(Movable):
+    var tr: TabMTrainer
+    var ws: Workspace
+    var g: Pointer[Float32, MutUntrackedOrigin]
+    var theta: Pointer[Float32, MutUntrackedOrigin]
+    var x_num: Pointer[Float32, MutUntrackedOrigin]
+    var x_enc: Pointer[Float32, MutUntrackedOrigin]
+    var x_cat: Pointer[Float32, MutUntrackedOrigin]
+    var y: Pointer[Float32, MutUntrackedOrigin]
+    var rows: Pointer[Int, MutUntrackedOrigin]
+    var nrows: Int
+    var denom_b: Int
+    var task: Int
+    var dropout: Float32
+    var train: Bool
+    var seed: UInt64
+    var loss_out: Float64
+
+    def __init__(
+        out self,
+        tr: TabMTrainer,
+        max_rows: Int,
+        theta: Pointer[Float32, MutUntrackedOrigin],
+        x_num: Pointer[Float32, MutUntrackedOrigin],
+        x_enc: Pointer[Float32, MutUntrackedOrigin],
+        x_cat: Pointer[Float32, MutUntrackedOrigin],
+        y: Pointer[Float32, MutUntrackedOrigin],
+        task: Int,
+        dropout: Float32,
+        train: Bool,
+        rows: Pointer[Int, MutUntrackedOrigin],
+    ):
+        self.tr = tr
+        self.ws = Workspace(max_rows, tr.k, tr.nb, tr.d_in, tr.db, tr.dout, tr.F, tr.demb, tr.denc)
+        self.g = alloc[Float32](tr.P + 16)
+        self.theta = theta
+        self.x_num = x_num
+        self.x_enc = x_enc
+        self.x_cat = x_cat
+        self.y = y
+        self.rows = rows
+        self.nrows = 0
+        self.denom_b = 1
+        self.task = task
+        self.dropout = dropout
+        self.train = train
+        self.seed = 1
+        self.loss_out = 0.0
+
+    def release(mut self):
+        self.ws.unsafe_free()
+        self.g.unsafe_free()
+
+    async def run(mut self):
+        """forward -> loss/dpreds -> backward for this worker's row slice."""
+        if self.nrows <= 0:
+            self.loss_out = 0.0
+            return
+        vec_zero(self.g, self.tr.P)
+        # Per-worker RNG stream: deterministic for a fixed seed + thread count.
+        var rng = Rng(self.seed)
+        self.tr.forward_chunk(
+            self.theta, self.ws, self.x_num, self.x_enc, self.x_cat,
+            self.rows, self.nrows, rng, self.dropout, self.train,
+        )
+        self.loss_out = self.tr.loss_and_dpreds(
+            self.ws, self.y, self.rows, self.nrows, self.task, self.denom_b
+        )
+        self.tr.backward_chunk(self.theta, self.ws, self.g, self.nrows)
+
+
+@always_inline
+def adam_update(
+    theta: Pointer[Float32, MutUntrackedOrigin],
+    m: Pointer[Float32, MutUntrackedOrigin],
+    v: Pointer[Float32, MutUntrackedOrigin],
+    g: Pointer[Float32, MutUntrackedOrigin],
+    P: Int,
+    alpha: Float32,
+    lr: Float32,
+    bc1: Float64,
+    bc2: Float64,
+):
+    """Vectorized bias-corrected Adam update (mirrors _optim.adam_step)."""
+    var af = SIMD[DType.float32, SIMDW](alpha)
+    var lrv = SIMD[DType.float32, SIMDW](lr)
+    var eps = SIMD[DType.float32, SIMDW](1e-8)
+    var b1inv = SIMD[DType.float32, SIMDW](Float32(1.0 / bc1))
+    var b2inv = SIMD[DType.float32, SIMDW](Float32(1.0 / bc2))
+    var c90 = SIMD[DType.float32, SIMDW](0.9)
+    var c10 = SIMD[DType.float32, SIMDW](0.1)
+    var c999 = SIMD[DType.float32, SIMDW](0.999)
+    var c001 = SIMD[DType.float32, SIMDW](0.001)
+    var p = 0
+    while p + SIMDW <= P:
+        var gv = g.unsafe_load[width=SIMDW](p) + af * theta.unsafe_load[width=SIMDW](p)
+        var mv = m.unsafe_load[width=SIMDW](p) * c90 + gv * c10
+        var vv = v.unsafe_load[width=SIMDW](p) * c999 + gv * gv * c001
+        m.unsafe_store[width=SIMDW](p, mv)
+        v.unsafe_store[width=SIMDW](p, vv)
+        var upd = lrv * (mv * b1inv) / (sqrt(vv * b2inv) + eps)
+        theta.unsafe_store[width=SIMDW](p, theta.unsafe_load[width=SIMDW](p) - upd)
+        p += SIMDW
+    while p < P:
+        var gi = g[p] + alpha * theta[p]
+        m[p] = 0.9 * m[p] + 0.1 * gi
+        v[p] = 0.999 * v[p] + 0.001 * gi * gi
+        var mh = m[p] / Float32(bc1)
+        var vh = v[p] / Float32(bc2)
+        theta[p] -= lr * mh / (sqrt(vh) + 1e-8)
+        p += 1
+
+
+def run_round(
+    mut workers: List[ChunkWorker],
+    nthreads: Int,
+    tr: TabMTrainer,
+    theta: Pointer[Float32, MutUntrackedOrigin],
+    x_num: Pointer[Float32, MutUntrackedOrigin],
+    x_enc: Pointer[Float32, MutUntrackedOrigin],
+    x_cat: Pointer[Float32, MutUntrackedOrigin],
+    y: Pointer[Float32, MutUntrackedOrigin],
+    idx: Pointer[Int, MutUntrackedOrigin],
+    offset: Int,
+    nrows_total: Int,
+    dropout: Float32,
+    train: Bool,
+    task: Int,
+    denom_b: Int,
+    seed: UInt64,
+    round_id: UInt64,
+    g_out: Pointer[Float32, MutUntrackedOrigin],
+) -> Float64:
+    """Process rows [offset, offset+nrows_total) across worker threads.
+
+    Returns the loss SUM over those rows; accumulates every worker's
+    gradients into g_out. Deterministic for fixed nthreads and seeds.
+    """
+    var T = min(nthreads, nrows_total)
+    if T < 1:
+        T = 1
+    var rows_per = (nrows_total + T - 1) // T
+    var assigned = 0
+    var tg = TaskGroup()
+    for t in range(T):
+        var lo = assigned
+        var hi = min(lo + rows_per, nrows_total)
+        assigned = hi
+        workers[t].rows = idx + offset + lo
+        workers[t].nrows = hi - lo
+        workers[t].denom_b = denom_b
+        workers[t].seed = mix_u64(seed ^ mix_u64(round_id * 0x9E3779B97F4A7C15 + UInt64(t)))
+        tg.create_task(workers[t].run())
+    tg.wait()
+    assigned = 0
+    var wsum: Float64 = 0.0
+    for t2 in range(T):
+        var lo = assigned
+        var hi = min(lo + rows_per, nrows_total)
+        assigned = hi
+        wsum += workers[t2].loss_out * Float64(hi - lo)
+        accumulate_into(g_out, workers[t2].g, tr.P)
+    return wsum
+
+
+def k_full_loss_grad(
+    tr: TabMTrainer,
+    theta: Pointer[Float32, MutUntrackedOrigin],
+    grad: Pointer[Float32, MutUntrackedOrigin],
+    x_num: Pointer[Float32, MutUntrackedOrigin],
+    x_enc: Pointer[Float32, MutUntrackedOrigin],
+    x_cat: Pointer[Float32, MutUntrackedOrigin],
+    y: Pointer[Float32, MutUntrackedOrigin],
+    N: Int,
+    task: Int,
+    add_l2: Bool,
+    alpha: Float32,
+    nthreads: Int,
+) -> Float64:
+    """Parallel chunked forward/backward over all N rows; mean loss."""
+    vec_zero(grad, tr.P)
+    var chunk = max(1, 8192 // tr.k)
+    var rows_cap = (chunk + nthreads - 1) // nthreads
+    var dummy_rows = alloc[Int](1)
+    var workers = List[ChunkWorker]()
+    for t in range(nthreads):
+        workers.append(ChunkWorker(tr, rows_cap, theta, x_num, x_enc, x_cat, y, task, 0.0, False, dummy_rows))
+    var idx = alloc[Int](N)
+    var i = 0
+    while i < N:
+        idx[i] = i
+        i += 1
+    var weighted: Float64 = 0.0
+    var start = 0
+    var rnd = 0
+    while start < N:
+        var b = min(chunk, N - start)
+        weighted += run_round(
+            workers, nthreads, tr, theta, x_num, x_enc, x_cat, y,
+            idx, start, b, 0.0, False, task, b, 1, mix_u64(UInt64(rnd)), grad,
+        )
+        start += b
+        rnd += 1
+    for t2 in range(nthreads):
+        workers[t2].release()
+    dummy_rows.unsafe_free()
+    idx.unsafe_free()
+    var loss = weighted / Float64(N)
+    if add_l2:
+        loss += 0.5 * Float64(alpha) * sum_sq_f32(theta, tr.P)
+        saxpy(grad, theta, Float64(alpha), tr.P)
+    return loss
+
+
+def k_adam_epoch(
+    tr: TabMTrainer,
+    theta: Pointer[Float32, MutUntrackedOrigin],
+    m: Pointer[Float32, MutUntrackedOrigin],
+    v: Pointer[Float32, MutUntrackedOrigin],
+    t0: Int,
+    x_num: Pointer[Float32, MutUntrackedOrigin],
+    x_enc: Pointer[Float32, MutUntrackedOrigin],
+    x_cat: Pointer[Float32, MutUntrackedOrigin],
+    y: Pointer[Float32, MutUntrackedOrigin],
+    N: Int,
+    lr: Float32,
+    bs: Int,
+    dropout: Float32,
+    alpha: Float32,
+    seed: UInt64,
+    task: Int,
+    nthreads: Int,
+) -> Tuple[Float64, Int]:
+    var rng = Rng(seed)
+    var idx = alloc[Int](N)
+    var i = 0
+    while i < N:
+        idx[i] = i
+        i += 1
+    # Fisher-Yates shuffle (same stream as the serial kernels)
+    var ii = N - 1
+    while ii > 0:
+        var jj = Int(rng.next_u64() % UInt64(ii + 1))
+        var tmp = idx[ii]
+        idx[ii] = idx[jj]
+        idx[jj] = tmp
+        ii -= 1
+
+    var chunk = max(1, 8192 // tr.k)
+    var rows_cap = (chunk + nthreads - 1) // nthreads
+    var workers = List[ChunkWorker]()
+    for t in range(nthreads):
+        workers.append(ChunkWorker(tr, rows_cap, theta, x_num, x_enc, x_cat, y, task, dropout, True, idx))
+    var g = alloc[Float32](tr.P)
+    var l2_term = 0.5 * Float64(alpha) * sum_sq_f32(theta, tr.P)
+    var weighted: Float64 = 0.0
+    var t = t0
+    var start = 0
+    var mb = 0
+    while start < N:
+        var be = min(start + bs, N)
+        var nb_rows = be - start
+        vec_zero(g, tr.P)
+        var batch_loss: Float64 = 0.0
+        var c0 = start
+        while c0 < be:
+            var rb = min(chunk, be - c0)
+            batch_loss += run_round(
+                workers, nthreads, tr, theta, x_num, x_enc, x_cat, y,
+                idx, c0, rb, dropout, True, task, rb, seed,
+                mix_u64(UInt64(mb) * 2654435761 + UInt64(c0)), g,
+            )
+            c0 += rb
+        mb += 1
+        batch_loss = batch_loss / Float64(nb_rows) + l2_term
+        # Adam update (bias-corrected, mirrors _optim.adam_step)
+        t += 1
+        adam_update(theta, m, v, g, tr.P, alpha, lr, 1.0 - pow(0.9, Float64(t)), 1.0 - pow(0.999, Float64(t)))
+        weighted += batch_loss * Float64(nb_rows)
+        start = be
+    for t3 in range(nthreads):
+        workers[t3].release()
+    idx.unsafe_free()
+    g.unsafe_free()
+    return (weighted / Float64(N), t)
 
 
 @export
