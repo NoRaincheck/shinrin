@@ -115,9 +115,7 @@ def test_loss_grad_parity_tasks(task, use_emb):
     g_np = space.flatten_grads(grads_np)
 
     trainer = get_native_trainer(config)
-    loss_m, grad_m = trainer.loss_grad(
-        theta, batch, config, task=TASK_CODES[task]
-    )
+    loss_m, grad_m = trainer.loss_grad(theta, batch, config, task=TASK_CODES[task])
 
     assert loss_np == pytest.approx(float(loss_m), rel=1e-2, abs=1e-3)
     np.testing.assert_allclose(g_np, np.asarray(grad_m), rtol=1e-2, atol=1e-3)
@@ -134,7 +132,9 @@ def test_loss_grad_l2_parity():
     g_np = space.flatten_grads(grads_np)
     if alpha > 0.0:
         g_np += (alpha * theta).astype(np.float32)
-        loss_np += 0.5 * alpha * float(theta.astype(np.float64) @ theta.astype(np.float64))
+        loss_np += (
+            0.5 * alpha * float(theta.astype(np.float64) @ theta.astype(np.float64))
+        )
 
     trainer = get_native_trainer(config)
     loss_m, grad_m = trainer.loss_grad(theta, batch, config, task=0, alpha=alpha)
@@ -194,9 +194,7 @@ def test_loss_grad_no_embeddings_parity():
     g_np = space.flatten_grads(grads_np)
 
     trainer = get_native_trainer(config)
-    loss_m, grad_m = trainer.loss_grad(
-        theta, batch, config, task=TASK_CODES["binary"]
-    )
+    loss_m, grad_m = trainer.loss_grad(theta, batch, config, task=TASK_CODES["binary"])
     assert loss_np == pytest.approx(float(loss_m), rel=1e-2, abs=1e-3)
     np.testing.assert_allclose(g_np, np.asarray(grad_m), rtol=1e-2, atol=1e-3)
 

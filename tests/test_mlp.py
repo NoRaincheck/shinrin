@@ -50,14 +50,20 @@ def test_training_loss_matches_sklearn(regression_data):
     """With the same seed the per-epoch losses must track sklearn closely."""
     X, _, y = regression_data
     ours = MLPRegressor(hidden_layer_sizes=(24,), max_iter=30, random_state=0).fit(X, y)
-    ref = SkMLPRegressor(hidden_layer_sizes=(24,), max_iter=30, random_state=0).fit(X, y)
+    ref = SkMLPRegressor(hidden_layer_sizes=(24,), max_iter=30, random_state=0).fit(
+        X, y
+    )
     np.testing.assert_allclose(ours.loss_curve_, ref.loss_curve_, rtol=2e-2)
 
 
 def test_classifier_loss_matches_sklearn(binary_data):
     X, y = binary_data
-    ours = MLPClassifier(hidden_layer_sizes=(24,), max_iter=30, random_state=0).fit(X, y)
-    ref = SkMLPClassifier(hidden_layer_sizes=(24,), max_iter=30, random_state=0).fit(X, y)
+    ours = MLPClassifier(hidden_layer_sizes=(24,), max_iter=30, random_state=0).fit(
+        X, y
+    )
+    ref = SkMLPClassifier(hidden_layer_sizes=(24,), max_iter=30, random_state=0).fit(
+        X, y
+    )
     np.testing.assert_allclose(ours.loss_curve_, ref.loss_curve_, rtol=2e-2)
 
 
@@ -100,7 +106,9 @@ def test_regressor_column_vector_warning(regression_data):
 
 def test_regressor_lbfgs(regression_data):
     X, _, y = regression_data
-    reg = MLPRegressor(hidden_layer_sizes=(32,), solver="lbfgs", max_iter=60, random_state=0).fit(X, y)
+    reg = MLPRegressor(
+        hidden_layer_sizes=(32,), solver="lbfgs", max_iter=60, random_state=0
+    ).fit(X, y)
     assert reg.score(X, y) > 0.8
 
 
@@ -206,8 +214,12 @@ def test_all_activations_train(binary_data):
     X, y = binary_data
     for activation in ("relu", "tanh", "logistic", "identity"):
         clf = MLPClassifier(
-            hidden_layer_sizes=(16,), activation=activation, max_iter=100,
-            learning_rate_init=0.05, solver="sgd", random_state=0,
+            hidden_layer_sizes=(16,),
+            activation=activation,
+            max_iter=100,
+            learning_rate_init=0.05,
+            solver="sgd",
+            random_state=0,
         ).fit(X[:200], y[:200])
         # identity hidden layers can still separate linearly-separable data
         assert clf.score(X[200:], y[200:]) > 0.5, activation
@@ -253,7 +265,9 @@ def test_ple_embeddings_config(binary_data):
     ).fit(X, y)
     enc_width = sum(len(b) - 1 for b in clf.preprocessor_.bins_)
     expected_d_in = 10 * 4 + enc_width * 0  # embedding projects to d_embedding
-    assert all(c.shape[0] == expected_d_in or i > 0 for i, c in enumerate(clf.coefs_[0:1]))
+    assert all(
+        c.shape[0] == expected_d_in or i > 0 for i, c in enumerate(clf.coefs_[0:1])
+    )
     assert clf.coefs_[0].shape[0] == 10 * 4
 
 

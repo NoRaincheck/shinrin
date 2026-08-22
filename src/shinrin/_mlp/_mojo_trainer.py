@@ -25,6 +25,8 @@ from typing import Any
 
 import numpy as np
 
+from shinrin._tabm._model import Batch
+
 from ._backend import get_mlp_native
 from ._layers import MLPConfig
 
@@ -89,7 +91,7 @@ class NativeTrainer:
         return int(self._trainer.param_count())
 
     @staticmethod
-    def _data(batch: BatchLike, config: MLPConfig):
+    def _data(batch: Batch, config: MLPConfig):
         x_num = _or_dummy(batch.x_num)
         x_enc = (
             _or_dummy(batch.x_enc)
@@ -105,7 +107,7 @@ class NativeTrainer:
     def loss_grad(
         self,
         theta: np.ndarray,
-        batch: BatchLike,
+        batch: Batch,
         config: MLPConfig,
         task: int = 0,
         alpha: float = 0.0,
@@ -113,15 +115,22 @@ class NativeTrainer:
         """Full-batch loss + gradient (used by parity tests)."""
         x_num, x_enc, x_cat, y = self._data(batch, config)
         loss, grad = self._trainer.loss_grad(
-            [np.ascontiguousarray(theta, dtype=np.float32), x_num, x_enc, x_cat, y,
-             int(task), float(alpha)]
+            [
+                np.ascontiguousarray(theta, dtype=np.float32),
+                x_num,
+                x_enc,
+                x_cat,
+                y,
+                int(task),
+                float(alpha),
+            ]
         )
         return float(loss), np.asarray(grad)
 
     def forward(
         self,
         theta: np.ndarray,
-        batch: BatchLike,
+        batch: Batch,
         config: MLPConfig,
         out: np.ndarray,
     ) -> None:
@@ -137,7 +146,7 @@ class NativeTrainer:
         m: np.ndarray,
         v: np.ndarray,
         t: int,
-        batch: BatchLike,
+        batch: Batch,
         config: MLPConfig,
         *,
         lr: float,
@@ -172,7 +181,7 @@ class NativeTrainer:
     def lbfgs(
         self,
         theta: np.ndarray,
-        batch: BatchLike,
+        batch: Batch,
         config: MLPConfig,
         *,
         max_iter: int,
@@ -199,7 +208,3 @@ class NativeTrainer:
             ]
         )
         return int(nit), [float(x) for x in losses[: nit + 1]]
-
-
-class BatchLike:
-    """Structural type: anything exposing x_num/x_enc/x_cat/y arrays."""
