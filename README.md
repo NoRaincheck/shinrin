@@ -10,6 +10,7 @@ Since skope-rules and scikit-garden are no longer actively maintained, this proj
 ## Features
 
 - **Mondrian Trees & Forests** — Full scikit-learn API compatibility
+- **Tabular Neural Networks** — scikit-learn compatible `MLPClassifier`/`MLPRegressor` and `TabMClassifier`/`TabMRegressor` with optional PLE embeddings and Mojo-accelerated training
 - **TreeSHAP Explanations** — `TreeExplainer` for single trees and forests with `explanation()` visualization helper
 - **ONNX Export** — Export trained models to ONNX format for deployment
 - **Benchmarking** — Built-in utilities for training speed, prediction speed, and model size
