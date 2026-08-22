@@ -25,6 +25,8 @@ __all__ = [
     "ExtraTreeQuantileRegressor",
     "ExtraTreesQuantileRegressor",
     "ExtraTreesRegressor",
+    "MLPClassifier",
+    "MLPRegressor",
     "MondrianForestClassifier",
     "MondrianForestRegressor",
     "MondrianTreeClassifier",
@@ -54,6 +56,8 @@ __all__ = [
 # Mapping of public name → (module_path, attr_name)
 _IMPORT_MAP: dict[str, tuple[str, str]] = {
     "ExtraTreesRegressor": ("shinrin._skgarden.forest", "ExtraTreesRegressor"),
+    "MLPClassifier": ("shinrin.mlp", "MLPClassifier"),
+    "MLPRegressor": ("shinrin.mlp", "MLPRegressor"),
     "RandomForestRegressor": ("shinrin._skgarden.forest", "RandomForestRegressor"),
     "DecisionTreeQuantileRegressor": (
         "shinrin._skgarden.quantile.tree",
