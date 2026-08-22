@@ -12,6 +12,7 @@ Shinrin also includes **TabM** — a parameter-efficient ensemble MLP for tabula
 ## Features
 
 - **Mondrian Trees & Forests** — Full scikit-learn API compatibility
+- **Tabular Neural Networks** — scikit-learn compatible `MLPClassifier`/`MLPRegressor` and `TabMClassifier`/`TabMRegressor` with optional PLE embeddings and Mojo-accelerated training
 - **TabM Neural Networks** — Parameter-efficient ensemble MLPs for tabular data with BatchEnsemble-style multiplicative adapters (ICLR 2025)
 - **TreeSHAP Explanations** — `TreeExplainer` for single trees and forests with `explanation()` visualization helper
 - **ONNX Export** — Export trained models to ONNX format for deployment

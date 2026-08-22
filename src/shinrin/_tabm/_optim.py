@@ -6,28 +6,37 @@ same interface serves both this module and the Mojo kernels.
 
 from __future__ import annotations
 
+from typing import Protocol
+
 import numpy as np
 
-from ._layers import TabMParams
+
+class _ParamsLike(Protocol):
+    """Structural view of TabM/MLP parameter containers."""
+
+    def names(self) -> list[str]: ...
+
+    @property
+    def arrays(self) -> dict[str, np.ndarray]: ...
 
 
 class FlatSpace:
-    """Maps between :class:`TabMParams` dictionaries and a flat vector."""
+    """Maps between :class:`TabMParams`-style dictionaries and a flat vector."""
 
-    def __init__(self, params: TabMParams) -> None:
+    def __init__(self, params: _ParamsLike) -> None:
         self.names = params.names()
         self.shapes = [params.arrays[n].shape for n in self.names]
         self.sizes = [int(np.prod(s)) for s in self.shapes]
         self.offsets = np.cumsum([0] + self.sizes[:-1]).tolist()
         self.total = int(sum(self.sizes))
 
-    def flatten(self, params: TabMParams) -> np.ndarray:
+    def flatten(self, params: _ParamsLike) -> np.ndarray:
         return np.concatenate([params.arrays[n].ravel() for n in self.names])
 
     def flatten_grads(self, grads: dict[str, np.ndarray]) -> np.ndarray:
         return np.concatenate([grads[n].ravel() for n in self.names])
 
-    def scatter(self, theta: np.ndarray, params: TabMParams) -> None:
+    def scatter(self, theta: np.ndarray, params: _ParamsLike) -> None:
         """Copy slices of ``theta`` into the existing parameter arrays."""
         for name, start, size, shape in zip(
             self.names, self.offsets, self.sizes, self.shapes
