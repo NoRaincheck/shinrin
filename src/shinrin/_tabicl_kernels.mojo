@@ -416,6 +416,7 @@ def self_attn_block_forward(
             q_proj[i * d_model + b] += b_attn_in[b]
             k_proj[i * d_model + b] += b_attn_in[d_model + b]
             v_proj[i * d_model + b] += b_attn_in[2 * d_model + b]
+            b += 1
         i += 1
 
     # Reshape to head-major (n_heads, n, head_dim) so per-head GEMMs are
@@ -1297,7 +1298,10 @@ struct TabICLInference(ImplicitlyCopyable, Movable, Writable):
         # Apply col ISAB blocks (3 blocks)
         var col_cur = col_embed
         # Per-call scratch: 6 buffers of n_train * embed_dim (reused per block)
-        var col_ws = alloc[Float32](n_train * cfg.embed_dim * 6 + 16)
+        # Workspaces: 6 slots, each sized for the FFN hidden width (d_ff)
+        # because the shared self-attention/FFN helpers use one slot as an
+        # n x d_ff scratch buffer.
+        var col_ws = alloc[Float32](n_train * cfg.col_dim_feedforward() * 6 + 16)
         var e = cfg.embed_dim
         var block_idx = 0
         while block_idx < cfg.col_num_blocks:
@@ -1368,8 +1372,9 @@ struct TabICLInference(ImplicitlyCopyable, Movable, Writable):
 
         # Apply row transformer blocks (3 blocks with RoPE)
         var row_cur = row_combined
-        # Per-call scratch: 4 buffers of n_test * embed_dim
-        var row_ws = alloc[Float32](n_test * cfg.embed_dim * 4 + 16)
+        # Per-call scratch: 4 buffers, each sized for the FFN hidden width
+        # (the helpers use one slot as an n x d_ff scratch buffer).
+        var row_ws = alloc[Float32](n_test * cfg.col_dim_feedforward() * 4 + 16)
         var rope_row = alloc[Float32](1024 + 16)
         var rp = 0
         while rp < 1024:
@@ -1501,7 +1506,9 @@ struct TabICLInference(ImplicitlyCopyable, Movable, Writable):
         # Apply ICL self-attention blocks
         var icl_cur = y_encoded
         # Per-call scratch: 4 buffers of max_classes * icl_dim
-        var icl_ws = alloc[Float32](cfg.max_classes * cfg.icl_dim * 4 + 16)
+        # Per-call scratch: 4 buffers, each sized for the ICL FFN hidden
+        # width (the helpers use one slot as an n x d_ff scratch buffer).
+        var icl_ws = alloc[Float32](cfg.max_classes * cfg.icl_dim_feedforward() * 4 + 16)
         var d_icl = cfg.icl_dim
         block_idx = 0
         while block_idx < cfg.icl_num_blocks:
