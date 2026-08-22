@@ -39,6 +39,18 @@ build-tabm-mojo:
 test-tabm-mojo: build-tabm-mojo
     SHINRIN_TABM_BACKEND=mojo uv run pytest tests/test_tabm_parity.py tests/test_tabm.py
 
+# Build the MLP Mojo trainer extension (shinrin._native_mlp)
+build-mlp-mojo:
+    uv run mojo build src/shinrin/_mlp_kernels.mojo --emit shared-lib -o src/shinrin/_native_mlp.so
+
+# Run MLP tests against the Mojo backend
+test-mlp-mojo: build-mlp-mojo
+    SHINRIN_MLP_BACKEND=mojo uv run pytest tests/test_mlp_parity.py tests/test_mlp.py
+
+# Benchmark sklearn vs shinrin MLP backends
+bench-mlp:
+    uv run python scripts/benchmarks/bench_mlp.py
+
 # Benchmark Rust vs Mojo backends
 bench-backends: build-mojo
     uv run python scripts/benchmarks/bench_backends.py

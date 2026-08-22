@@ -595,7 +595,6 @@ class _BaseMLP(BaseEstimator):
             opt.t,
             train,
             self.config_,
-            self._space,
             lr=self.learning_rate_init,
             batch_size=bs,
             dropout=float(self.dropout),
@@ -794,6 +793,9 @@ class MLPClassifier(ClassifierMixin, _BaseMLP):
             self.t_ = 0.0
         else:
             y_enc = self._label_encoder.transform(y).astype(np.float32)
+            X = validate_data(
+                self, X, reset=False, accept_sparse=False, dtype=np.float32
+            )
         self._partial_fit_epoch(np.ascontiguousarray(X, dtype=np.float32), y_enc)
         return self
 
@@ -923,6 +925,10 @@ class MLPRegressor(RegressorMixin, _BaseMLP):
             self.params_ = MLPParams.init(self.config_, seed=_seed(self.random_state))
             self.loss_curve_ = []
             self.t_ = 0.0
+        else:
+            X = validate_data(
+                self, X, reset=False, accept_sparse=False, dtype=np.float32
+            )
         self._partial_fit_epoch(
             np.ascontiguousarray(X, dtype=np.float32), np.asarray(y, dtype=np.float32)
         )
