@@ -31,6 +31,7 @@ nav:
       - Mondrian Trees: models/mondrian-trees.md
       - Mondrian Forests: models/mondrian-forests.md
       - TabM: models/tabm.md
+      - TabICL: models/tabicl.md
   - Features:
       - TreeSHAP Explanations: features/treeshap-explanations.md
       - ONNX Export: features/onnx-export.md

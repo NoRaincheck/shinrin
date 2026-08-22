@@ -35,9 +35,17 @@ tabm-bench = [
     "tabm",
     "rtdl-num-embeddings",
 ]
+# Torch backend + checkpoint download for TabICL (shinrin.tabicl)
 tabicl = [
     "torch>=2.2",
     "huggingface-hub",
+]
+# Optional deps for comparing against the upstream TabICL package
+# (scripts/benchmarks/bench_tabicl.py --with-upstream)
+tabicl-bench = [
+    "torch>=2.0",
+    "huggingface-hub",
+    "tabicl",
 ]
 # "full+mojo" installs everything including the Mojo backend
 
@@ -66,4 +74,9 @@ extend-exclude = [
     "src/shinrin/_skrules",
     "tests/vendored",
     "src/shinrin/_compat.py",
+]
+
+[tool.pytest.ini_options]
+markers = [
+    "slow: optionally-enabled slow or network tests",
 ]

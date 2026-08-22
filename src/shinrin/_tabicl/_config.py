@@ -11,6 +11,8 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, fields
 from typing import Any
 
+import numpy as np
+
 
 @dataclass(frozen=True)
 class TabICLConfig:
@@ -42,6 +44,9 @@ class TabICLConfig:
     bias_free_ln: bool = False
     zero_init: bool = True
     recompute: bool = False
+    # Hidden width of the SSMax scale MLPs (upstream default).
+    col_ssmax_n_hidden: int = 64
+    icl_ssmax_n_hidden: int = 64
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> TabICLConfig:
@@ -55,6 +60,58 @@ class TabICLConfig:
     def to_dict(self) -> dict[str, Any]:
         """Return the config as a plain dict."""
         return asdict(self)
+
+    @staticmethod
+    def _ssmax_flags(ssmax: str) -> tuple[int, int]:
+        """Map an SSMax variant name to ``(elementwise, n_hidden)`` flags.
+
+        The Mojo kernels encode the SSMax configuration numerically; only
+        ``*mlp`` variants carry a scale MLP (hidden width 64 upstream), and
+        only ``*-elementwise`` variants emit per-dimension scales.
+        """
+        name = str(ssmax).lower()
+        elementwise = 1 if "elementwise" in name else 0
+        hidden = 64 if "mlp" in name else 0
+        return elementwise, hidden
+
+    def dims_array(self) -> np.ndarray:
+        """Pack the architecture hyper-parameters for the Mojo kernels.
+
+        The field order is fixed by ``TabICLConfig`` in
+        ``_tabicl_kernels.mojo``; keep both sides in sync. ``row_rope_base``
+        is stored as an integer (exact for the upstream value 100000.0) and
+        converted back to float on the native side.
+        """
+        col_elementwise, _ = self._ssmax_flags(self.col_ssmax)
+        icl_elementwise, _ = self._ssmax_flags(self.icl_ssmax)
+        return np.array(
+            [
+                self.embed_dim,
+                self.col_feature_group_size,
+                self.col_num_blocks,
+                self.col_nhead,
+                self.col_num_inds,
+                1 if self.col_target_aware else 0,
+                col_elementwise,
+                self.col_ssmax_n_hidden if "mlp" in str(self.col_ssmax).lower() else 0,
+                self.row_num_cls,
+                self.row_num_blocks,
+                self.row_nhead,
+                round(float(self.row_rope_base)),
+                1 if self.row_rope_interleaved else 0,
+                self.icl_num_blocks,
+                self.icl_nhead,
+                self.icl_dim,
+                icl_elementwise,
+                self.icl_ssmax_n_hidden if "mlp" in str(self.icl_ssmax).lower() else 0,
+                self.ff_factor,
+                1 if self.bias_free_ln else 0,
+                self.max_classes,
+                self.num_quantiles,
+                self.out_dim,
+            ],
+            dtype=np.int64,
+        )
 
     @property
     def is_regression(self) -> bool:

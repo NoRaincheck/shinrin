@@ -10,6 +10,8 @@ Since skope-rules and scikit-garden are no longer actively maintained, this proj
 ## Features
 
 - **Mondrian Trees & Forests** — Full scikit-learn API compatibility
+- **TabM** — Efficient ensemble MLP trainer with NumPy and native Mojo backends
+- **TabICL** — Tabular in-context learning foundation model (torch/NumPy backends)
 - **TreeSHAP Explanations** — `TreeExplainer` for single trees and forests with `explanation()` visualization helper
 - **ONNX Export** — Export trained models to ONNX format for deployment
 - **Benchmarking** — Built-in utilities for training speed, prediction speed, and model size
@@ -82,6 +84,8 @@ Both backends produce identical trees for identical random states (verified by
 | `MondrianTreeClassifier` | Single Mondrian tree for classification |
 | `MondrianForestRegressor` | Ensemble of Mondrian trees for regression |
 | `MondrianForestClassifier` | Ensemble of Mondrian trees for classification |
+| `TabMClassifier` / `TabMRegressor` | Ensemble MLP trainers (NumPy / Mojo backends) |
+| `TabICLClassifier` / `TabICLRegressor` | Tabular in-context learning estimators (TabICLv2) |
 
 ### Explanations
 

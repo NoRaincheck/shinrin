@@ -12,6 +12,11 @@
 - `MondrianForestRegressor` — Ensemble of Mondrian trees for regression
 - `MondrianForestClassifier` — Ensemble of Mondrian trees for classification
 
+### TabICL
+
+- `TabICLClassifier` — Tabular in-context learning classifier (TabICLv2)
+- `TabICLRegressor` — Tabular in-context learning regressor (quantile decoder)
+
 ## Explanations
 
 - `TreeExplainer` — SHAP explainer for tree models

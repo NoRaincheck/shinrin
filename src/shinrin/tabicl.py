@@ -13,6 +13,7 @@ backend is selected via the ``backend`` parameter or the
 from __future__ import annotations
 
 from collections import OrderedDict
+from typing import Any
 
 import numpy as np
 from sklearn.base import BaseEstimator, ClassifierMixin, RegressorMixin
@@ -42,6 +43,20 @@ def _softmax(
     return e / e.sum(axis=axis, keepdims=True)
 
 
+def _concat_chunks(chunks: list[np.ndarray]) -> np.ndarray:
+    """Join test-row chunks along the test axis (last for 2-D, axis 1 for
+    batched 3-D model outputs)."""
+    if len(chunks) == 1:
+        return chunks[0]
+    axis = 1 if chunks[0].ndim == 3 else 0
+    return np.concatenate(chunks, axis=axis)
+
+
+def _squeeze_member(out: np.ndarray) -> np.ndarray:
+    """Drop a leading singleton batch dimension from one member output."""
+    return out[0] if out.ndim == 3 and out.shape[0] == 1 else out
+
+
 def _detect_feature_mask(X) -> np.ndarray | None:
     """Boolean mask of all-NaN columns (used for SHAP-style masking)."""
     if hasattr(X, "columns"):
@@ -60,6 +75,13 @@ def _detect_feature_mask(X) -> np.ndarray | None:
 class _TabICLBase(BaseEstimator):
     """Shared checkpoint loading / backend plumbing."""
 
+    # Assigned during fit(); declared for type checkers.
+    model_config_: dict
+    model_: Any
+    X_encoder_: Any
+    ensemble_generator_: Any
+    model_kv_cache_: OrderedDict | None
+
     def __init__(
         self,
         *,
@@ -72,6 +94,8 @@ class _TabICLBase(BaseEstimator):
         random_state: int | None = 42,
         verbose: bool = False,
         backend: str = "auto",
+        batch_size: int = 8,
+        device=None,
     ) -> None:
         self.norm_methods = norm_methods
         self.feat_shuffle_method = feat_shuffle_method
@@ -82,6 +106,8 @@ class _TabICLBase(BaseEstimator):
         self.random_state = random_state
         self.verbose = verbose
         self.backend = backend
+        self.batch_size = batch_size
+        self.device = device
 
     # -- backend handling ---------------------------------------------------
 
@@ -90,6 +116,11 @@ class _TabICLBase(BaseEstimator):
 
     def _load_model(self) -> None:
         backend_name = self._resolve_backend()
+        if self.device is not None and backend_name != "torch":
+            raise ValueError(
+                f"device={self.device!r} is only supported by the 'torch' "
+                f"backend, but backend '{backend_name}' was selected."
+            )
         _, config_dict, params = ensure_npz(
             filename=self.checkpoint_version,
             model_path=self.model_path,
@@ -100,7 +131,7 @@ class _TabICLBase(BaseEstimator):
         if backend_name == "torch":
             from ._tabicl._model_torch import TabICLTorchModel
 
-            self.model_ = TabICLTorchModel(config, params)
+            self.model_ = TabICLTorchModel(config, params, device=self.device)
         elif backend_name == "numpy":
             from ._tabicl._model_numpy import TabICLNumPyModel
 
@@ -119,6 +150,12 @@ class _TabICLBase(BaseEstimator):
         return int(self.model_.config.max_classes)
 
     # -- shared predict plumbing ---------------------------------------------
+
+    def _chunks(self, n_test: int):
+        """Yield ``(start, stop)`` slices of ``batch_size`` test rows."""
+        step = self.batch_size if self.batch_size and self.batch_size > 0 else n_test
+        for start in range(0, n_test, step):
+            yield start, min(start + step, n_test)
 
     def _prepare_test_data(self, X, feature_mask):
         """Fill masked columns and run the numerical encoder."""
@@ -160,6 +197,12 @@ class TabICLClassifier(ClassifierMixin, _TabICLBase):
     kv_cache : bool, default=False
         Pre-compute key/value caches of the training data for faster repeated
         prediction. Not supported with more than the native number of classes.
+    batch_size : int, default=8
+        Number of test rows processed per forward pass. Does not affect
+        predictions (test rows never attend to each other).
+    device : str, optional
+        Torch device for the ``'torch'`` backend (e.g. ``'cuda'``); ignored
+        by the NumPy/Mojo backends.
     checkpoint_version : str, default='tabicl-classifier-v2-20260212.ckpt'
         Checkpoint file name in the ``jingang/TabICL`` HF repository.
     model_path : path-like, optional
@@ -169,7 +212,7 @@ class TabICLClassifier(ClassifierMixin, _TabICLBase):
     random_state : int, optional
         Seed for ensemble shuffling and normalization noise.
     verbose : bool, default=False
-    backend : {'auto', 'torch'}, default='auto'
+    backend : {'auto', 'torch', 'numpy', 'mojo'}, default='auto'
         Compute backend; 'auto' honors ``SHINRIN_TABICL_BACKEND``.
 
     Attributes
@@ -177,6 +220,10 @@ class TabICLClassifier(ClassifierMixin, _TabICLBase):
     classes_ : ndarray of shape (n_classes,)
     n_classes_ : int
     """
+
+    y_encoder_: Any
+    classes_: np.ndarray
+    n_classes_: int
 
     def __init__(
         self,
@@ -188,10 +235,12 @@ class TabICLClassifier(ClassifierMixin, _TabICLBase):
         softmax_temperature: float = 0.9,
         average_logits: bool = True,
         support_many_classes: bool = True,
+        batch_size: int = 8,
         kv_cache: bool = False,
         checkpoint_version: str = CLASSIFIER_CHECKPOINT,
         model_path=None,
         allow_auto_download: bool = True,
+        device=None,
         random_state: int | None = 42,
         verbose: bool = False,
         backend: str = "auto",
@@ -206,6 +255,8 @@ class TabICLClassifier(ClassifierMixin, _TabICLBase):
             random_state=random_state,
             verbose=verbose,
             backend=backend,
+            batch_size=batch_size,
+            device=device,
         )
         self.n_estimators = n_estimators
         self.class_shuffle_method = class_shuffle_method
@@ -273,31 +324,47 @@ class TabICLClassifier(ClassifierMixin, _TabICLBase):
 
         outputs = []
         if use_cache:
+            kv_caches = self.model_kv_cache_
+            if kv_caches is None:  # pragma: no cover - defensive
+                raise RuntimeError("kv_cache=True but no cache was built.")
             for norm_method, (Xs_test,) in eg.transform(X, mode="test").items():
-                caches = self.model_kv_cache_[norm_method]
+                caches = kv_caches[norm_method]
                 for i in range(Xs_test.shape[0]):
-                    outputs.append(
+                    chunks = [
                         self.model_.predict_with_cache(
-                            Xs_test[i],
+                            Xs_test[i, start:stop],
                             caches[i],
                             return_logits=self.average_logits,
                             temperature=self.softmax_temperature,
                         )
-                    )
+                        for start, stop in self._chunks(Xs_test.shape[1])
+                    ]
+                    outputs.append(_squeeze_member(_concat_chunks(chunks)))
         else:
-            for _method, (Xs, ys) in eg.transform(
+            for Xs, ys in eg.transform(
                 X, mode="both", feature_mask=feature_mask
             ).values():
                 for i in range(Xs.shape[0]):
+                    train_size = ys[i].shape[0]
                     R = self.model_.representations(Xs[i], ys[i])
-                    outputs.append(
-                        self.model_.predict_from_representations(
-                            R,
-                            ys[i],
-                            return_logits=self.average_logits,
-                            temperature=self.softmax_temperature,
+                    chunks = []
+                    for start, stop in self._chunks(Xs.shape[1] - train_size):
+                        R_chunk = np.concatenate(
+                            [
+                                R[:, :train_size],
+                                R[:, train_size + start : train_size + stop],
+                            ],
+                            axis=1,
                         )
-                    )
+                        chunks.append(
+                            self.model_.predict_from_representations(
+                                R_chunk,
+                                ys[i],
+                                return_logits=self.average_logits,
+                                temperature=self.softmax_temperature,
+                            )
+                        )
+                    outputs.append(_squeeze_member(_concat_chunks(chunks)))
         return np.stack(outputs, axis=0)
 
     def predict_proba(self, X) -> np.ndarray:
@@ -340,16 +407,20 @@ class TabICLRegressor(RegressorMixin, _TabICLBase):
     ``support_many_classes``).
     """
 
+    y_scaler_: Any
+
     def __init__(
         self,
         n_estimators: int = 8,
         norm_methods=None,
         feat_shuffle_method: str = "latin",
         outlier_threshold: float = 4.0,
+        batch_size: int = 8,
         kv_cache: bool = False,
         checkpoint_version: str = REGRESSOR_CHECKPOINT,
         model_path=None,
         allow_auto_download: bool = True,
+        device=None,
         random_state: int | None = 42,
         verbose: bool = False,
         backend: str = "auto",
@@ -364,6 +435,8 @@ class TabICLRegressor(RegressorMixin, _TabICLBase):
             random_state=random_state,
             verbose=verbose,
             backend=backend,
+            batch_size=batch_size,
+            device=device,
         )
         self.n_estimators = n_estimators
         self.kv_cache = kv_cache
@@ -412,19 +485,39 @@ class TabICLRegressor(RegressorMixin, _TabICLBase):
 
         outputs = []
         if use_cache:
+            kv_caches = self.model_kv_cache_
+            if kv_caches is None:  # pragma: no cover - defensive
+                raise RuntimeError("kv_cache=True but no cache was built.")
             for norm_method, (Xs_test,) in eg.transform(X, mode="test").items():
-                caches = self.model_kv_cache_[norm_method]
+                caches = kv_caches[norm_method]
                 for i in range(Xs_test.shape[0]):
-                    outputs.append(
-                        self.model_.predict_with_cache(Xs_test[i], caches[i])
-                    )
+                    chunks = [
+                        self.model_.predict_with_cache(
+                            Xs_test[i, start:stop], caches[i]
+                        )
+                        for start, stop in self._chunks(Xs_test.shape[1])
+                    ]
+                    outputs.append(_squeeze_member(_concat_chunks(chunks)))
         else:
-            for _method, (Xs, ys) in eg.transform(
+            for Xs, ys in eg.transform(
                 X, mode="both", feature_mask=feature_mask
             ).values():
                 for i in range(Xs.shape[0]):
+                    train_size = ys[i].shape[0]
                     R = self.model_.representations(Xs[i], ys[i])
-                    outputs.append(self.model_.predict_from_representations(R, ys[i]))
+                    chunks = []
+                    for start, stop in self._chunks(Xs.shape[1] - train_size):
+                        R_chunk = np.concatenate(
+                            [
+                                R[:, :train_size],
+                                R[:, train_size + start : train_size + stop],
+                            ],
+                            axis=1,
+                        )
+                        chunks.append(
+                            self.model_.predict_from_representations(R_chunk, ys[i])
+                        )
+                    outputs.append(_squeeze_member(_concat_chunks(chunks)))
         return np.stack(outputs, axis=0)
 
     def predict(
@@ -465,9 +558,12 @@ class TabICLRegressor(RegressorMixin, _TabICLBase):
 
         final = {}
         for key in keys:
-            arr = np.concatenate(results[key], axis=0)
-            shape = arr.shape
-            flat = self.y_scaler_.inverse_transform(arr.reshape(-1, 1))
+            # Stack members so the final mean averages across the ensemble.
+            stacked = np.stack(results[key], axis=0)
+            shape = stacked.shape
+            flat = self.y_scaler_.inverse_transform(
+                np.asarray(stacked, dtype=float).reshape(-1, 1)
+            )
             final[key] = flat.reshape(shape).mean(axis=0)
 
         return final[keys[0]] if len(keys) == 1 else final

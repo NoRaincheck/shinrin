@@ -10,6 +10,7 @@ from __future__ import annotations
 import math
 
 import numpy as np
+from scipy.special import erf
 
 from ._config import TabICLConfig
 from ._many_classes import (
@@ -26,6 +27,11 @@ SKIP_VALUE = -100.0
 # --------------------------------------------------------------------------- #
 # Primitives
 # --------------------------------------------------------------------------- #
+
+
+def _gelu(x: np.ndarray) -> np.ndarray:
+    """Exact (erf-based) GELU matching ``torch.nn.GELU``."""
+    return 0.5 * x * (1.0 + erf(x / np.float32(np.sqrt(2.0))))
 
 
 class RotaryEmbedding:
@@ -98,7 +104,7 @@ class SSMaxMLP:
 
     def forward(self, q: np.ndarray, n: int) -> np.ndarray:
         logn = np.float32(math.log(max(n, 1))).reshape(1, 1)
-        hidden = np.maximum(0, logn @ self.w1 + self.b1)
+        hidden = _gelu(logn @ self.w1 + self.b1)
         scales = hidden @ self.w2 + self.b2
         if self.elementwise:
             scales = scales.reshape(1, self.num_heads, 1, q.shape[-1])
@@ -133,14 +139,14 @@ class QASSMaxMLP:
 
     def forward(self, q: np.ndarray, n: int) -> np.ndarray:
         logn = np.float32(math.log(max(n, 1))).reshape(1, 1)
-        base_hidden = np.maximum(0, logn @ self.base_w1 + self.base_b1)
+        base_hidden = _gelu(logn @ self.base_w1 + self.base_b1)
         base_scales = base_hidden @ self.base_w2 + self.base_b2
         if self.elementwise:
             base_scales = base_scales.reshape(1, self.num_heads, 1, self.head_dim)
         else:
             base_scales = base_scales.reshape(1, self.num_heads, 1, 1)
         q_f = q.astype(np.float32)
-        mod_hidden = np.maximum(0, q_f @ self.query_w1 + self.query_b1)
+        mod_hidden = _gelu(q_f @ self.query_w1 + self.query_b1)
         modulation = 1.0 + np.tanh(mod_hidden @ self.query_w2 + self.query_b2)
         return q * (base_scales * modulation)
 
@@ -216,16 +222,16 @@ def _attention_numpy(
         q = q_in @ w[:embed_dim].T + b[:embed_dim]  # ty: ignore[not-subscriptable]
         k = k_in @ w[embed_dim : 2 * embed_dim].T + b[embed_dim : 2 * embed_dim]  # ty: ignore[not-subscriptable]
         v = v_in @ w[2 * embed_dim :].T + b[2 * embed_dim :]  # ty: ignore[not-subscriptable]
-        q = q.reshape(*q.shape[:-1], num_heads, head_dim).transpose(0, -2, -3, -1)
-        k = k.reshape(*k.shape[:-1], num_heads, head_dim).transpose(0, -2, -3, -1)
-        v = v.reshape(*v.shape[:-1], num_heads, head_dim).transpose(0, -2, -3, -1)
+        q = np.swapaxes(q.reshape(*q.shape[:-1], num_heads, head_dim), -2, -3)
+        k = np.swapaxes(k.reshape(*k.shape[:-1], num_heads, head_dim), -2, -3)
+        v = np.swapaxes(v.reshape(*v.shape[:-1], num_heads, head_dim), -2, -3)
         if rope is not None:
             q = rope.rotate(q)
             k = rope.rotate(k)
     else:
         k, v = cached_kv
         q = q_in @ w[:embed_dim].T + b[:embed_dim]  # ty: ignore[not-subscriptable]
-        q = q.reshape(*q.shape[:-1], num_heads, head_dim).transpose(0, -2, -3, -1)
+        q = np.swapaxes(q.reshape(*q.shape[:-1], num_heads, head_dim), -2, -3)
         if rope is not None:
             q = rope.rotate(q)
 
@@ -233,12 +239,12 @@ def _attention_numpy(
     if attn.ssmax_layer is not None:
         q = attn.ssmax_layer.forward(q, src_len)
 
-    scores = np.matmul(q, k.transpose(0, 1, 3, 2)) * (head_dim**-0.5)
+    scores = np.matmul(q, np.swapaxes(k, -1, -2)) * (head_dim**-0.5)
     attn_weights = np.exp(scores - scores.max(axis=-1, keepdims=True))
     attn_weights = attn_weights / attn_weights.sum(axis=-1, keepdims=True)
     out = np.matmul(attn_weights, v)
     batch_shape = q_in.shape[:-1]
-    out = out.transpose(0, -2, -3, -1).reshape(*batch_shape, embed_dim)
+    out = np.swapaxes(out, -2, -3).reshape(*batch_shape, embed_dim)
     out_proj_w = attn.out_proj_w
     out_proj_b = attn.out_proj_b
     out = out @ out_proj_w.T + out_proj_b  # ty: ignore[unresolved-attribute]
@@ -268,15 +274,26 @@ class AttentionBlock:
             (dim_feedforward, d_model), dtype=np.float32
         )
         self.linear2_b: np.ndarray = np.zeros(d_model, dtype=np.float32)
+        # LayerNorm affine parameters (gamma always present; beta unless
+        # ``bias_free_ln``, mirroring ``nn.LayerNorm(bias=not bias_free_ln)``).
+        self.norm1_w: np.ndarray = np.ones(d_model, dtype=np.float32)
+        self.norm2_w: np.ndarray = np.ones(d_model, dtype=np.float32)
+        self.norm1_b: np.ndarray | None = (
+            None if bias_free_ln else np.zeros(d_model, dtype=np.float32)
+        )
+        self.norm2_b: np.ndarray | None = (
+            None if bias_free_ln else np.zeros(d_model, dtype=np.float32)
+        )
         self.norm_first = True
         self.bias_free_ln = bias_free_ln
 
-    def _layer_norm(self, x: np.ndarray) -> np.ndarray:
-        if self.bias_free_ln:
-            mean = x.mean(axis=-1, keepdims=True)
-            var = x.var(axis=-1, keepdims=True, ddof=0)
-            return (x - mean) / np.sqrt(var + 1e-5)
-        return x
+    def _layer_norm(self, x: np.ndarray, which: int = 1) -> np.ndarray:
+        gamma = self.norm1_w if which == 1 else self.norm2_w
+        beta = self.norm1_b if which == 1 else self.norm2_b
+        mean = x.mean(axis=-1, keepdims=True)
+        var = x.var(axis=-1, keepdims=True, ddof=0)
+        out = (x - mean) / np.sqrt(var + 1e-5)
+        return out * gamma if beta is None else out * gamma + beta
 
     def __call__(
         self,
@@ -298,12 +315,12 @@ class AttentionBlock:
                 v = k
 
         if cached_kv is not None:
-            attn_out = self.attn(self._layer_norm(q), cached_kv=cached_kv, rope=rope)
+            attn_out = self.attn(self._layer_norm(q, 1), cached_kv=cached_kv, rope=rope)
             x = q + attn_out
         elif self.norm_first:
-            qn = self._layer_norm(q)
-            kn = qn if k is q else self._layer_norm(k)
-            vn = kn if v is k else self._layer_norm(v)
+            qn = self._layer_norm(q, 1)
+            kn = qn if k is q else self._layer_norm(k, 1)
+            vn = kn if v is k else self._layer_norm(v, 1)
             result = self.attn(qn, kn, vn, rope=rope, need_kv=need_kv)
             if need_kv:
                 attn_out, k_proj, v_proj = result
@@ -319,7 +336,8 @@ class AttentionBlock:
             x = self._layer_norm(q + attn_out)
 
         ff = (
-            np.maximum(0, self.linear1_w.T @ x.T + self.linear1_b).T @ self.linear2_w.T
+            _gelu(self._layer_norm(x, 2) @ self.linear1_w + self.linear1_b)
+            @ self.linear2_w
             + self.linear2_b
         )
         x = x + ff
@@ -549,9 +567,9 @@ class ColEmbedding:
             ssmax=cfg.col_ssmax,
             bias_free_ln=cfg.bias_free_ln,
         )
-        self.y_encoder_w: np.ndarray = np.zeros(
-            (cfg.max_classes, cfg.embed_dim), dtype=np.float32
-        )
+        # Regression checkpoints use nn.Linear(1, embed_dim) targets.
+        y_in = cfg.max_classes if cfg.max_classes > 0 else 1
+        self.y_encoder_w: np.ndarray = np.zeros((y_in, cfg.embed_dim), dtype=np.float32)
         self.y_encoder_b: np.ndarray = np.zeros(cfg.embed_dim, dtype=np.float32)
 
     def feature_grouping(self, X: np.ndarray) -> np.ndarray:
@@ -577,7 +595,7 @@ class ColEmbedding:
                 y_emb = one_hot @ self.y_encoder_w + self.y_encoder_b
             else:
                 y_emb = (
-                    y_train[..., None].astype(np.float32) @ self.y_encoder_w.T
+                    y_train[..., None].astype(np.float32) @ self.y_encoder_w
                     + self.y_encoder_b
                 )
             src[..., :train_size, :] = src[..., :train_size, :] + y_emb
@@ -609,9 +627,11 @@ class ColEmbedding:
         )
         Xg = np.concatenate([pad, Xg], axis=2)
         features = Xg.transpose(0, 2, 1, 3)
+        # Expand labels across every feature-group token; the last dim stays
+        # ``train_size`` so it aligns with ``src[..., :train_size, :]``.
         y_exp = np.broadcast_to(
             y_train[:, None, :],
-            (Xg.shape[0], features.shape[1], -1),
+            (Xg.shape[0], features.shape[1], y_train.shape[-1]),
         )
         embeddings = self._compute_embeddings(features, train_size, y_exp)
         return embeddings.transpose(0, 2, 1, 3)
@@ -625,6 +645,11 @@ class RowInteraction:
         self.embed_dim = cfg.embed_dim
         self.cls_tokens: np.ndarray = np.zeros(
             (cfg.row_num_cls, cfg.embed_dim), dtype=np.float32
+        )
+        # Final LayerNorm before CLS flattening (mirrors ``out_ln``).
+        self.out_ln_w: np.ndarray = np.ones(cfg.embed_dim, dtype=np.float32)
+        self.out_ln_b: np.ndarray | None = (
+            None if cfg.bias_free_ln else np.zeros(cfg.embed_dim, dtype=np.float32)
         )
         self.tf_row = Encoder(
             num_blocks=cfg.row_num_blocks,
@@ -648,7 +673,16 @@ class RowInteraction:
             v=embeddings,
             rope=rope,
         )
-        return cls_outputs.reshape(cls_outputs.shape[0], cls_outputs.shape[1], -1)  # ty: ignore[unresolved-attribute]
+        cls_outputs = np.asarray(cls_outputs)
+        mean = cls_outputs.mean(axis=-1, keepdims=True)
+        var = cls_outputs.var(axis=-1, keepdims=True, ddof=0)
+        flat = (cls_outputs - mean) / np.sqrt(var + 1e-5)
+        flat = (
+            flat * self.out_ln_w
+            if self.out_ln_b is None
+            else (flat * self.out_ln_w + self.out_ln_b)
+        )
+        return flat.reshape(flat.shape[0], flat.shape[1], -1)
 
     def __call__(self, embeddings: np.ndarray) -> np.ndarray:
         B, T = embeddings.shape[:2]
@@ -666,9 +700,12 @@ class ICLearning:
     def __init__(self, cfg: TabICLConfig) -> None:
         self.cfg = cfg
         self.max_classes = cfg.max_classes
-        self.y_encoder_w: np.ndarray = np.zeros(
-            (cfg.max_classes, cfg.icl_dim), dtype=np.float32
+        self.ln_w: np.ndarray = np.ones(cfg.icl_dim, dtype=np.float32)
+        self.ln_b: np.ndarray | None = (
+            None if cfg.bias_free_ln else np.zeros(cfg.icl_dim, dtype=np.float32)
         )
+        y_in = cfg.max_classes if cfg.max_classes > 0 else 1
+        self.y_encoder_w: np.ndarray = np.zeros((y_in, cfg.icl_dim), dtype=np.float32)
         self.y_encoder_b: np.ndarray = np.zeros(cfg.icl_dim, dtype=np.float32)
         self.decoder_w1: np.ndarray = np.zeros(
             (cfg.icl_dim, cfg.icl_dim * 2), dtype=np.float32
@@ -698,14 +735,18 @@ class ICLearning:
             Ry = one_hot @ self.y_encoder_w + self.y_encoder_b
         else:
             Ry = (
-                y_train[..., None].astype(np.float32) @ self.y_encoder_w.T
+                y_train[..., None].astype(np.float32) @ self.y_encoder_w
                 + self.y_encoder_b
             )
         R = R.copy()
         R[:, :train_size] = R[:, :train_size] + Ry
         src = self.tf_icl(R, train_size=train_size)
-        h = np.maximum(0, src @ self.decoder_w1.T + self.decoder_b1)
-        out = h @ self.decoder_w2.T + self.decoder_b2
+        mean = src.mean(axis=-1, keepdims=True)
+        var = src.var(axis=-1, keepdims=True, ddof=0)
+        src = (src - mean) / np.sqrt(var + 1e-5)
+        src = src * self.ln_w if self.ln_b is None else src * self.ln_w + self.ln_b
+        h = _gelu(src @ self.decoder_w1 + self.decoder_b1)
+        out = h @ self.decoder_w2 + self.decoder_b2
         return out
 
     def predict_standard(
@@ -741,9 +782,10 @@ class ICLearning:
             if node.is_leaf:
                 assert node.y is not None and node.classes_ is not None
                 node_y = label_encoding(node.y)
-                preds = self._predict_standard(
+                preds = self.predict_standard(
                     node_r[None],
                     node_y[None],
+                    return_logits=False,
                     temperature=temperature,
                 ).squeeze(0)
                 global_preds = np.zeros((test_size, num_classes), dtype=preds.dtype)
@@ -753,9 +795,10 @@ class ICLearning:
 
             node_y = node.group_indices
             assert node_y is not None
-            group_probs = self._predict_standard(
+            group_probs = self.predict_standard(
                 node_r[None],
                 node_y[None],
+                return_logits=False,
                 temperature=temperature,
             ).squeeze(0)
             final = np.zeros((test_size, num_classes), dtype=np.float64)
@@ -781,13 +824,151 @@ def _softmax(x: np.ndarray, axis: int = -1, temperature: float = 1.0) -> np.ndar
     return e / e.sum(axis=axis, keepdims=True)
 
 
-def _load_weights(
-    net: _TabICLNet,
-    params: dict[str, np.ndarray],
-    config: TabICLConfig,
-) -> None:
+def _resolve_params(params: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+    """Map raw checkpoint tensors onto the NumPy model's attribute names.
+
+    Accepts both the shinrin-native names used by :func:`_load_weights` and
+    the upstream torch state-dict names stored in converted ``.npz``
+    archives (``.weight``/``.bias`` spellings, ``attn.``, ``mlp.0.``,
+    ``decoder.0.`` indirections). Linear weights are transposed where the
+    NumPy attributes hold ``(in, out)`` layouts.
+    """
+    import re
+
+    resolved: dict[str, np.ndarray] = {}
+
+    def put(name: str, arr: np.ndarray, transpose: bool = False) -> None:
+        resolved[name] = np.asarray(arr.T if transpose else arr, dtype=np.float32)
+
+    for name, arr in params.items():
+        if name.endswith("rope.freqs"):
+            continue
+        resolved.setdefault(name, np.asarray(arr, dtype=np.float32))
+
+        # --- attention blocks: strip the `.attn` module level. ISAB blocks
+        # nest as ``...multihead_attnK.attn.*`` while plain Encoder blocks
+        # use ``...attn.*`` directly.
+        base = None
+        rest = None
+        m = re.fullmatch(
+            r"(?P<p>.+(?:multihead_attn\d)?)\.attn\.(?P<r>(?:in_proj|out_proj|linear|norm|ssmax).+)",
+            name,
+        )
+        if m:
+            base = m.group("p")
+            rest = m.group("r")
+        if base is not None:
+            if rest == "in_proj_weight" or rest == "in_proj_bias":
+                put(f"{base}.{rest}", arr)
+            elif rest == "out_proj.weight":
+                put(f"{base}.out_proj.w", arr)
+            elif rest == "out_proj.bias":
+                put(f"{base}.out_proj.b", arr)
+            elif rest == "linear1.weight":
+                put(f"{base}.linear1.w", arr, transpose=True)
+            elif rest == "linear1.bias":
+                put(f"{base}.linear1.b", arr)
+            elif rest == "linear2.weight":
+                put(f"{base}.linear2.w", arr, transpose=True)
+            elif rest == "linear2.bias":
+                put(f"{base}.linear2.b", arr)
+            elif rest == "norm1.weight":
+                put(f"{base}.norm1.w", arr)
+            elif rest == "norm1.bias":
+                put(f"{base}.norm1.b", arr)
+            elif rest == "norm2.weight":
+                put(f"{base}.norm2.w", arr)
+            elif rest == "norm2.bias":
+                put(f"{base}.norm2.b", arr)
+            # ssmax sub-layers live under `...attn.ssmax_layer.*`
+            sm = re.fullmatch(r"ssmax_layer\.(?P<s>.+)", str(rest))
+            if sm:
+                sname = sm.group("s")
+                _put_ssmax(put, f"{base}.ssmax_layer", sname, arr)
+            continue
+
+        # --- FFN / LayerNorm tensors that live directly on the block ---
+        m4 = re.fullmatch(
+            r"(?P<p>.+)\.(?P<r>linear[12]|norm[12])\.(?P<t>weight|bias)", name
+        )
+        if m4:
+            kind = m4.group("r")
+            t = m4.group("t")
+            if t == "bias":
+                put(f"{m4.group('p')}.{kind}.b", arr)
+            elif kind.startswith("linear"):
+                put(f"{m4.group('p')}.{kind}.w", arr, transpose=True)
+            else:
+                put(f"{m4.group('p')}.{kind}.w", arr)
+            continue
+
+        # --- col embedder input projection / target encoders ---
+        if name == "col_embedder.in_linear.weight":
+            put("col_embedder.in_linear.w", arr, transpose=True)
+        elif name == "col_embedder.in_linear.bias":
+            put("col_embedder.in_linear.b", arr)
+        elif name in (
+            "col_embedder.y_encoder.weight",
+            "icl_predictor.y_encoder.weight",
+        ):
+            put(name.replace(".weight", ".w"), arr, transpose=True)
+        elif name in ("col_embedder.y_encoder.bias", "icl_predictor.y_encoder.bias"):
+            put(name.replace(".bias", ".b"), arr)
+        elif name == "row_interactor.out_ln.weight":
+            put("row_interactor.out_ln.w", arr)
+        elif name == "row_interactor.out_ln.bias":
+            put("row_interactor.out_ln.b", arr)
+        elif name == "icl_predictor.ln.weight":
+            put("icl_predictor.ln.w", arr)
+        elif name == "icl_predictor.ln.bias":
+            put("icl_predictor.ln.b", arr)
+        elif name == "icl_predictor.decoder.0.weight":
+            put("icl_predictor.decoder.w1", arr, transpose=True)
+        elif name == "icl_predictor.decoder.0.bias":
+            put("icl_predictor.decoder.b1", arr)
+        elif name == "icl_predictor.decoder.2.weight":
+            put("icl_predictor.decoder.w2", arr, transpose=True)
+        elif name == "icl_predictor.decoder.2.bias":
+            put("icl_predictor.decoder.b2", arr)
+
+    return resolved
+
+
+def _put_ssmax(put, prefix: str, tail: str, arr: np.ndarray) -> None:
+    """Resolve SSMax variant parameter names into attribute names."""
+    # torch nn.Linear stores weights as (out, in); NumPy attrs are (in, out).
+    if tail == "scales":
+        put(f"{prefix}.scales", arr)
+    elif tail == "mlp.0.weight":
+        put(f"{prefix}.w1", arr, transpose=True)
+    elif tail == "mlp.0.bias":
+        put(f"{prefix}.b1", arr)
+    elif tail == "mlp.2.weight":
+        put(f"{prefix}.w2", arr, transpose=True)
+    elif tail == "mlp.2.bias":
+        put(f"{prefix}.b2", arr)
+    elif tail == "base_mlp.0.weight":
+        put(f"{prefix}.base_w1", arr, transpose=True)
+    elif tail == "base_mlp.0.bias":
+        put(f"{prefix}.base_b1", arr)
+    elif tail == "base_mlp.2.weight":
+        put(f"{prefix}.base_w2", arr, transpose=True)
+    elif tail == "base_mlp.2.bias":
+        put(f"{prefix}.base_b2", arr)
+    elif tail == "query_mlp.0.weight":
+        put(f"{prefix}.query_w1", arr, transpose=True)
+    elif tail == "query_mlp.0.bias":
+        put(f"{prefix}.query_b1", arr)
+    elif tail == "query_mlp.2.weight":
+        put(f"{prefix}.query_w2", arr, transpose=True)
+    elif tail == "query_mlp.2.bias":
+        put(f"{prefix}.query_b2", arr)
+
+
+def _load_weights(net, params: dict[str, np.ndarray], config: TabICLConfig) -> None:
     """Load state-dict tensors into the NumPy model."""
     cfg = config
+    params = _resolve_params(params)
 
     def load(name: str, attr: np.ndarray, shape: tuple[int, ...]) -> None:
         if name in params:
@@ -806,7 +987,7 @@ def _load_weights(
     load(
         "col_embedder.y_encoder.w",
         net.col_embedder.y_encoder_w,
-        (cfg.max_classes, cfg.embed_dim),
+        net.col_embedder.y_encoder_w.shape,
     )
     load("col_embedder.y_encoder.b", net.col_embedder.y_encoder_b, (cfg.embed_dim,))
     _load_settransformer(net.col_embedder.tf_col, params, "col_embedder.tf_col")
@@ -817,13 +998,27 @@ def _load_weights(
         net.row_interactor.cls_tokens,
         (cfg.row_num_cls, cfg.embed_dim),
     )
+    load(
+        "row_interactor.out_ln.w",
+        net.row_interactor.out_ln_w,
+        (cfg.embed_dim,),
+    )
+    if net.row_interactor.out_ln_b is not None:
+        load(
+            "row_interactor.out_ln.b",
+            net.row_interactor.out_ln_b,
+            (cfg.embed_dim,),
+        )
     _load_encoder(net.row_interactor.tf_row, params, "row_interactor.tf_row")
 
     # ICLearning
+    load("icl_predictor.ln.w", net.icl_predictor.ln_w, (cfg.icl_dim,))
+    if net.icl_predictor.ln_b is not None:
+        load("icl_predictor.ln.b", net.icl_predictor.ln_b, (cfg.icl_dim,))
     load(
         "icl_predictor.y_encoder.w",
         net.icl_predictor.y_encoder_w,
-        (cfg.max_classes, cfg.icl_dim),
+        net.icl_predictor.y_encoder_w.shape,
     )
     load("icl_predictor.y_encoder.b", net.icl_predictor.y_encoder_b, (cfg.icl_dim,))
     load(
@@ -887,6 +1082,47 @@ def _load_attention_block(block: AttentionBlock, params: dict, prefix: str) -> N
     key = f"{prefix}.linear2.b"
     if key in params:
         block.linear2_b = np.asarray(params[key], dtype=np.float32)
+    for norm_idx in (1, 2):
+        w_key = f"{prefix}.norm{norm_idx}.w"
+        if w_key in params:
+            setattr(
+                block,
+                f"norm{norm_idx}_w",
+                np.asarray(params[w_key], dtype=np.float32),
+            )
+        b_key = f"{prefix}.norm{norm_idx}.b"
+        if b_key in params and getattr(block, f"norm{norm_idx}_b") is not None:
+            setattr(
+                block,
+                f"norm{norm_idx}_b",
+                np.asarray(params[b_key], dtype=np.float32),
+            )
+    _load_ssmax(attn.ssmax_layer, params, f"{prefix}.ssmax_layer")
+
+
+def _load_ssmax(layer, params: dict, prefix: str) -> None:
+    """Load SSMax scale parameters when present."""
+    if layer is None:
+        return
+    simple = {
+        "scales": "scales",
+        "w1": "w1",
+        "b1": "b1",
+        "w2": "w2",
+        "b2": "b2",
+        "base_w1": "base_w1",
+        "base_b1": "base_b1",
+        "base_w2": "base_w2",
+        "base_b2": "base_b2",
+        "query_w1": "query_w1",
+        "query_b1": "query_b1",
+        "query_w2": "query_w2",
+        "query_b2": "query_b2",
+    }
+    for suffix, attr in simple.items():
+        key = f"{prefix}.{suffix}"
+        if key in params:
+            setattr(layer, attr, np.asarray(params[key], dtype=np.float32))
 
 
 class _TabICLNet:
@@ -906,16 +1142,15 @@ class TabICLNumPyModel:
         self.net = _TabICLNet(config)
         _load_weights(self.net, params, config)
 
-    @staticmethod
     def _build_col_cache(
+        self,
         cfg: TabICLConfig,
         x: np.ndarray,
         y: np.ndarray,
         train_size: int,
     ) -> tuple[np.ndarray, list]:
-        """Build ColEmbedding output and KV cache."""
-        net = _TabICLNet(cfg)
-        col = net.col_embedder
+        """Build ColEmbedding output and KV cache (uses the loaded weights)."""
+        col = self.net.col_embedder
         Xg = col.feature_grouping(x)
         pad = np.full(
             (Xg.shape[0], Xg.shape[1], cfg.row_num_cls, Xg.shape[-1]),
@@ -924,7 +1159,9 @@ class TabICLNumPyModel:
         )
         Xg = np.concatenate([pad, Xg], axis=2)
         features = Xg.transpose(0, 2, 1, 3)
-        y_exp = np.broadcast_to(y[:, None, :], (Xg.shape[0], features.shape[1], -1))
+        y_exp = np.broadcast_to(
+            y[:, None, :], (Xg.shape[0], features.shape[1], y.shape[-1])
+        )
         src = features @ col.in_linear.w + col.in_linear.b
         if col.target_aware:
             if cfg.max_classes > 0:
@@ -939,7 +1176,7 @@ class TabICLNumPyModel:
             else:
                 src[..., :train_size, :] = (
                     src[..., :train_size, :]
-                    + y_exp[..., None].astype(np.float32) @ col.y_encoder_w.T
+                    + y_exp[..., None].astype(np.float32) @ col.y_encoder_w
                     + col.y_encoder_b
                 )
         col_cache: list = [None] * cfg.col_num_blocks
@@ -949,34 +1186,30 @@ class TabICLNumPyModel:
         embeddings = embeddings.transpose(0, 2, 1, 3)
         return embeddings, col_cache
 
-    @staticmethod
     def _build_icl_cache(
+        self,
         cfg: TabICLConfig,
         R: np.ndarray,
         y: np.ndarray,
         train_size: int,
     ) -> list:
-        """Build ICL K/V cache."""
-        net = _TabICLNet(cfg)
+        """Build ICL K/V cache (uses the loaded weights)."""
+        icl = self.net.icl_predictor
         if cfg.max_classes > 0:
             one_hot = np.eye(cfg.max_classes, dtype=np.float32)[y.astype(np.int64)]
             R = R.copy()
             R[:, :train_size] = (
-                R[:, :train_size]
-                + one_hot @ net.icl_predictor.y_encoder_w
-                + net.icl_predictor.y_encoder_b
+                R[:, :train_size] + one_hot @ icl.y_encoder_w + icl.y_encoder_b
             )
         else:
             R = R.copy()
             R[:, :train_size] = (
                 R[:, :train_size]
-                + y[..., None].astype(np.float32) @ net.icl_predictor.y_encoder_w.T
-                + net.icl_predictor.y_encoder_b
+                + y[..., None].astype(np.float32) @ icl.y_encoder_w
+                + icl.y_encoder_b
             )
         icl_cache: list = [None] * cfg.icl_num_blocks
-        net.icl_predictor.tf_icl.forward_with_cache(
-            R, icl_cache, train_size, use_cache=False
-        )
+        icl.tf_icl.forward_with_cache(R, icl_cache, train_size, use_cache=False)
         return icl_cache
 
     def representations(self, X: np.ndarray, y_train: np.ndarray) -> np.ndarray:
@@ -1007,7 +1240,8 @@ class TabICLNumPyModel:
             out = self.net.icl_predictor.predict_standard(
                 R, y, return_logits=return_logits, temperature=temperature
             )
-            return out
+            # Match the torch wrapper, which drops the singleton batch dim.
+            return out[0] if out.ndim == 3 else out
 
         root = fit_hierarchical_tree(R[0, :train_size], y_train, cfg.max_classes)
         probs = self.net.icl_predictor.predict_hierarchical(
@@ -1070,9 +1304,8 @@ class TabICLNumPyModel:
         for idx, block in enumerate(icl.tf_icl.blocks):
             k, v = cache["icl"][idx]
             r_out = block(r_out, cached_kv=(k, v))  # ty: ignore[invalid-argument-type]
-        decoded = r_out @ icl.decoder_w1.T + icl.decoder_b1
-        decoded = np.maximum(0, decoded)
-        decoded = decoded @ icl.decoder_w2.T + icl.decoder_b2
+        decoded = _gelu(r_out @ icl.decoder_w1 + icl.decoder_b1)
+        decoded = decoded @ icl.decoder_w2 + icl.decoder_b2
         decoded = decoded.squeeze(0)
 
         if cfg.max_classes == 0:
