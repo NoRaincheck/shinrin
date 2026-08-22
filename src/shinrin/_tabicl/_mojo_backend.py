@@ -96,8 +96,13 @@ class TabICLMojoModel:
         row_input = np.zeros((max(n_test, 1), cfg.embed_dim), dtype=np.float32)
         target = np.asarray(y_train, dtype=np.int64)
 
-        out = self._handle.forward([col_input, row_input, target])
-        out = np.asarray(out, dtype=np.float32)[:n_test] if n_test else out[:0]
+        out = np.asarray(
+            self._handle.forward([col_input, row_input, target]), dtype=np.float32
+        )
+        if n_test:
+            out = out[: n_test * cfg.out_dim].reshape(n_test, cfg.out_dim)
+        else:
+            out = out[:0]
 
         if cfg.max_classes > 0 and not return_logits and out.size:
             out = np.exp(out) / np.sum(np.exp(out), axis=-1, keepdims=True)
