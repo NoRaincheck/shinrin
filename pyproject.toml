@@ -35,6 +35,10 @@ tabm-bench = [
     "tabm",
     "rtdl-num-embeddings",
 ]
+tabicl = [
+    "torch>=2.2",
+    "huggingface-hub",
+]
 # "full+mojo" installs everything including the Mojo backend
 
 [build-system]
