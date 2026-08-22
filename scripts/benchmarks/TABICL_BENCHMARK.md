@@ -114,16 +114,19 @@ is asserted (see caveats).
     overrun per block at ff factor 2). Slots are now sized by the stage's
     feed-forward width.
 - **Open issues blocking a meaningful comparison:**
-  - Parameter layout mismatch: Python packs 27,552,258 float32 values while
-    the kernel's internal layout walk accounts for 26,648,330 — a drift of
-    ~904K values, so the kernels read misaligned weights. This explains
-    much of the numeric non-parity beyond the deliberate simplifications
-    and is the prime suspect for the remaining corruption.
-  - No sanitizer coverage: `mojo build --sanitize address` currently fails
-    to link against the bundled ASAN runtime, so the residual overrun could
-    only be localized indirectly (stage bisection + crash reports).
-  - The staged `representations` / KV-cache API needed by the estimator is
-    not implemented natively yet.
+- RESOLVED: the parameter-layout drift (~904K float32 values on the default
+  config) is fixed. `shinrin._tabicl._mojo_layout` is now the single source
+  of truth for the flat buffer; the kernel validates the packed length AND
+  an exact offset fingerprint at construction, so drift fails loudly.
+- No sanitizer coverage: `mojo build --sanitize address` currently fails
+  to link against the bundled ASAN runtime; a `mojo run`-based harness is
+  the follow-up option.
+- The staged `representations` / KV-cache API needed by the estimator is
+  not implemented natively yet.
+- Reduced graph vs torch (documented in `_tabicl_kernels.mojo`): CLS-token
+  aggregation, `out_ln`/cls_tokens usage and a trained test-row projection
+  are still missing, so end-to-end numeric parity remains open even though
+  per-stage semantics now match the reference.
 
 Until those land, torch remains the production backend; NumPy stays the
 correctness reference, and Mojo numbers should be re-taken after parity

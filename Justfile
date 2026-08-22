@@ -53,7 +53,7 @@ bench-mlp:
 
 # Build the TabICL Mojo native extension (shinrin._native_tabicl)
 build-tabicl-mojo:
-    uv run mojo build src/shinrin/_tabicl_kernels.mojo --emit shared-lib -o src/shinrin/_native_tabicl.so
+    uv run mojo build src/shinrin/_tabicl_kernels.mojo --emit shared-lib -I src -o src/shinrin/_native_tabicl.so
 
 # Run TabICL tests against the Mojo backend
 test-tabicl-mojo: build-tabicl-mojo

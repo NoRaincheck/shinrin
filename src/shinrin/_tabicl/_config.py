@@ -78,12 +78,16 @@ class TabICLConfig:
         """Pack the architecture hyper-parameters for the Mojo kernels.
 
         The field order is fixed by ``TabICLConfig`` in
-        ``_tabicl_kernels.mojo``; keep both sides in sync. ``row_rope_base``
-        is stored as an integer (exact for the upstream value 100000.0) and
-        converted back to float on the native side.
+        ``_tabicl_kernels.mojo``; keep both sides in sync. Indices 23-25
+        (SSMax variant kinds and the ``col_affine`` flag) were appended
+        later; older entries keep their original positions.
+        ``row_rope_base`` is stored as an integer (exact for the upstream
+        value 100000.0) and converted back to float on the native side.
         """
         col_elementwise, _ = self._ssmax_flags(self.col_ssmax)
         icl_elementwise, _ = self._ssmax_flags(self.icl_ssmax)
+        from shinrin._tabicl._mojo_layout import ssmax_kind
+
         return np.array(
             [
                 self.embed_dim,
@@ -109,6 +113,10 @@ class TabICLConfig:
                 self.max_classes,
                 self.num_quantiles,
                 self.out_dim,
+                # -- appended fields (indices >= 23) --------------------- #
+                ssmax_kind(self.col_ssmax),
+                ssmax_kind(self.icl_ssmax),
+                1 if getattr(self, "col_affine", False) else 0,
             ],
             dtype=np.int64,
         )
