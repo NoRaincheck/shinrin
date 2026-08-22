@@ -226,20 +226,20 @@ class QuantileToDistribution:
         Returns a single array when ``output_type`` is a string, else a dict.
         """
         keys = [output_type] if isinstance(output_type, str) else list(output_type)
-        dist = None
         results: dict[str, np.ndarray] = {}
+        # Monotonic quantiles, mirroring upstream ``predict_stats``: simple
+        # mean/variance over the fixed quantiles, icdf for median/quantiles.
+        mono = self.forward(quantiles).quantiles
+        dist = self.forward(mono)
         for key in keys:
             if key == "raw_quantiles":
-                results[key] = quantiles
-                continue
-            if dist is None:
-                dist = self.forward(quantiles)
-            if key == "mean":
-                results[key] = dist.mean()
+                results[key] = mono
+            elif key == "mean":
+                results[key] = mono.mean(axis=-1)
             elif key == "median":
                 results[key] = dist.icdf(0.5)
             elif key == "variance":
-                results[key] = dist.variance()
+                results[key] = mono.var(axis=-1, ddof=1)
             elif key == "quantiles":
                 levels = (
                     alphas

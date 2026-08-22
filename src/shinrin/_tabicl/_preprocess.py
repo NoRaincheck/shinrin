@@ -13,7 +13,6 @@ import copy
 import itertools
 import random
 from collections import OrderedDict
-from typing import Optional
 
 import numpy as np
 from sklearn.base import BaseEstimator, TransformerMixin
@@ -28,14 +27,14 @@ from sklearn.preprocessing import (
 )
 
 __all__ = [
+    "CustomStandardScaler",
+    "EnsembleGenerator",
+    "OutlierRemover",
+    "PreprocessingPipeline",
+    "RTDLQuantileTransformer",
+    "Shuffler",
     "TransformToNumerical",
     "UniqueFeatureFilter",
-    "OutlierRemover",
-    "CustomStandardScaler",
-    "RTDLQuantileTransformer",
-    "PreprocessingPipeline",
-    "Shuffler",
-    "EnsembleGenerator",
 ]
 
 
@@ -190,7 +189,7 @@ class RTDLQuantileTransformer(TransformerMixin, BaseEstimator):
         n_quantiles: int = 1000,
         subsample: int = 1_000_000_000,
         output_distribution: str = "normal",
-        random_state: Optional[int] = None,
+        random_state: int | None = None,
     ) -> None:
         self.noise = noise
         self.n_quantiles = n_quantiles
@@ -226,7 +225,7 @@ class PreprocessingPipeline(TransformerMixin, BaseEstimator):
         self,
         normalization_method: str = "power",
         outlier_threshold: float = 4.0,
-        random_state: Optional[int] = None,
+        random_state: int | None = None,
     ) -> None:
         self.normalization_method = normalization_method
         self.outlier_threshold = outlier_threshold
@@ -300,7 +299,7 @@ class Shuffler:
         n_elements: int,
         method: str = "latin",
         max_elements_for_latin: int = 4000,
-        random_state: Optional[int] = None,
+        random_state: int | None = None,
     ) -> None:
         self.n_elements = n_elements
         self.method = method
@@ -374,7 +373,7 @@ class EnsembleGenerator(TransformerMixin, BaseEstimator):
         feat_shuffle_method: str = "latin",
         class_shuffle_method: str = "shift",
         outlier_threshold: float = 4.0,
-        random_state: Optional[int] = None,
+        random_state: int | None = None,
     ) -> None:
         self.classification = classification
         self.n_estimators = n_estimators
@@ -388,7 +387,11 @@ class EnsembleGenerator(TransformerMixin, BaseEstimator):
         self.norm_methods_ = (
             ["none", "power"]
             if self.norm_methods is None
-            else ([self.norm_methods] if isinstance(self.norm_methods, str) else list(self.norm_methods))
+            else (
+                [self.norm_methods]
+                if isinstance(self.norm_methods, str)
+                else list(self.norm_methods)
+            )
         )
 
         self.unique_filter_ = UniqueFeatureFilter()
@@ -438,7 +441,9 @@ class EnsembleGenerator(TransformerMixin, BaseEstimator):
         shuffle_configs = list(itertools.product(X_shuffles, y_patterns))
         random.Random(self.random_state).shuffle(shuffle_configs)
 
-        shuffle_norm_configs = list(itertools.product(shuffle_configs, self.norm_methods_))
+        shuffle_norm_configs = list(
+            itertools.product(shuffle_configs, self.norm_methods_)
+        )
         shuffle_norm_configs = shuffle_norm_configs[: self.n_estimators]
 
         used_methods = list({config[1] for config in shuffle_norm_configs})
@@ -447,7 +452,9 @@ class EnsembleGenerator(TransformerMixin, BaseEstimator):
         X_shuffle_dict: OrderedDict[str, list] = OrderedDict()
         y_pattern_dict: OrderedDict[str, list] = OrderedDict()
         for method in used_methods:
-            configs = [config[0] for config in shuffle_norm_configs if config[1] == method]
+            configs = [
+                config[0] for config in shuffle_norm_configs if config[1] == method
+            ]
             X_shuffle_dict[method] = [config[0] for config in configs]
             y_pattern_dict[method] = [config[1] for config in configs]
             ensemble_configs[method] = configs

@@ -60,7 +60,7 @@ def resolve_backend(requested: str | None) -> str:
     ``ValueError`` for unknown names and ``ImportError`` when a specific
     backend is requested but unavailable.
     """
-    raw = (requested or os.environ.get("SHINRIN_TABICL_BACKEND", "auto"))
+    raw = requested or os.environ.get("SHINRIN_TABICL_BACKEND", "auto")
     raw = raw.strip().lower()
     if raw not in VALID_BACKENDS:
         raise ValueError(
