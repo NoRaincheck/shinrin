@@ -51,6 +51,14 @@ test-mlp-mojo: build-mlp-mojo
 bench-mlp:
     uv run python scripts/benchmarks/bench_mlp.py
 
+# Build the TabICL Mojo native extension (shinrin._native_tabicl)
+build-tabicl-mojo:
+    uv run mojo build src/shinrin/_tabicl_kernels.mojo --emit shared-lib -o src/shinrin/_native_tabicl.so
+
+# Run TabICL tests against the Mojo backend
+test-tabicl-mojo: build-tabicl-mojo
+    SHINRIN_TABICL_BACKEND=mojo uv run pytest tests/test_tabicl_parity.py tests/test_tabicl.py
+
 # Benchmark GOSDT vs scikit-learn CART
 bench-gosdt:
     uv run python scripts/benchmarks/bench_gosdt.py
