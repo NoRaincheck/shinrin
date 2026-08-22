@@ -3,11 +3,12 @@
 Backends are chosen via the ``backend`` constructor argument or the
 ``SHINRIN_TABICL_BACKEND`` environment variable (the constructor wins):
 
-- ``"auto"``: first available among ``torch``, ``mojo``, ``numpy``
+- ``"auto"``: first available among ``torch``, ``numpy`` (the experimental
+  ``mojo`` backend is opt-in)
 - ``"torch"``: own PyTorch implementation (needs the ``tabicl`` extra)
-- ``"mojo"``: native Mojo inference kernels (needs a prebuilt
-  ``shinrin/_native_tabicl.so``, run ``just build-tabicl-mojo``)
 - ``"numpy"``: pure NumPy reference implementation
+- ``"mojo"`` (**experimental**): native Mojo inference kernels (needs a
+  prebuilt ``shinrin/_native_tabicl.so``, run ``just build-tabicl-mojo``)
 
 All backends load the same converted ``.npz`` weights (see
 :mod:`shinrin._tabicl._checkpoint`) and are held to numeric parity by the
@@ -84,11 +85,9 @@ def resolve_backend(requested: str | None) -> str:
                 "auto-compilation."
             )
         return "mojo"
-    # auto: prefer torch, then mojo, then numpy.
+    # auto: prefer torch, then numpy; mojo stays opt-in (experimental).
     if _torch_available():
         return "torch"
-    if _mojo_available():
-        return "mojo"
     return "numpy"
 
 

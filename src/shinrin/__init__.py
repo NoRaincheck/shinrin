@@ -38,6 +38,8 @@ __all__ = [
     "RandomForestRegressor",
     "Rule",
     "SkopeRules",
+    "TabICLClassifier",
+    "TabICLRegressor",
     "TabMClassifier",
     "TabMRegressor",
     "ThresholdGuessBinarizer",
@@ -101,6 +103,8 @@ _IMPORT_MAP: dict[str, tuple[str, str]] = {
     "Rule": ("shinrin._skrules.rule", "Rule"),
     "replace_feature_name": ("shinrin._skrules.rule", "replace_feature_name"),
     "SkopeRules": ("shinrin._skrules.skope_rules", "SkopeRules"),
+    "TabICLClassifier": ("shinrin.tabicl", "TabICLClassifier"),
+    "TabICLRegressor": ("shinrin.tabicl", "TabICLRegressor"),
     "TabMClassifier": ("shinrin.tabm", "TabMClassifier"),
     "TabMRegressor": ("shinrin.tabm", "TabMRegressor"),
     "ThresholdGuessBinarizer": (

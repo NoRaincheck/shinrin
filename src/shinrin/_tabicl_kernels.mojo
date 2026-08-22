@@ -1,24 +1,32 @@
-"""Mojo inference kernels for TabICLv2.
+"""Mojo inference kernels for TabICLv2 (**experimental scaffold**).
 
 Compiles to the ``shinrin._native_tabicl`` Python extension module (build
 with ``just build-tabicl-mojo``). Exposes a ``TabICLInference`` bound type
-whose methods run inference forward passes without returning to Python.
+following the same binding pattern as ``_tabm_kernels.mojo``:
 
-Architecture:
-1. ColEmbedding: feature grouping → linear embed → ISAB blocks (3)
-2. RowInteraction: CLS tokens → transformer blocks (3) with RoPE
-3. ICLearning: class embedding → self-attention blocks (12) → MLP output
+- ``TabICLInference(dims, params)``: construct from an int64 dims vector
+  (see ``shinrin._tabicl._config.TabICLConfig.dims_array``) and a flat
+  float32 parameter buffer (state dict flattened in sorted-name order).
+- ``forward(col_input, row_input, target)``: run the forward pass and
+  return the output as a NumPy array.
+- ``param_count()``: number of expected float32 parameters.
 
-All arrays cross the boundary as NumPy buffers (float32 data, int64 dims).
+.. note::
+   This kernel is a performance scaffold: it builds and runs but does not
+   yet reproduce the reference pipeline bit-for-bit (SSMax MLPs, target
+   masking and KV caching are simplified). Numeric parity is tracked by
+   ``tests/test_tabicl_parity.py``, which only exercises this backend when
+   explicitly enabled.
+
+All arrays cross the boundary as NumPy buffers accessed through raw
+pointers (float32 data, int64 dims).
 """
 
-from std.os import abort, getenv
-from std.math import abs, exp, log, sqrt, tanh, cos, sin, maximum as max
+from std.os import abort
+from std.math import abs, exp, log, max, sqrt, tanh, cos, sin
 from std.memory import alloc
 from std.python import Python, PythonObject
 from std.python.bindings import PythonModuleBuilder
-from std.runtime.asyncrt import TaskGroup
-from std.sys.info import num_performance_cores
 
 comptime SIMDW = 8
 
@@ -68,9 +76,17 @@ def fast_log(x: Float32) -> Float32:
 
 
 @always_inline
-def gelu(x: Float32) -> Float32:
-    var c = 0.797885
-    return 0.5 * x * (1.0 + tanh(Float64(c * x * (1.0 + 0.044715 * x * x)))).cast[DType.float32]()
+def gelu_scalar(x: Float32) -> Float32:
+    var cx = Float64(x)
+    var inner = 0.797885 * cx * (1.0 + 0.044715 * cx * cx)
+    return (0.5 * cx * (1.0 + tanh(inner))).cast[DType.float32]()
+
+
+@always_inline
+def gelu8(x: SIMD[DType.float32, SIMDW]) -> SIMD[DType.float32, SIMDW]:
+    var cx = x.cast[DType.float64]()
+    var inner = 0.797885 * cx * (1.0 + 0.044715 * cx * cx)
+    return (0.5 * cx * (1.0 + tanh(inner))).cast[DType.float32]()
 
 
 # =============================================================================
@@ -246,7 +262,7 @@ def gemm_tn_acc(m: Int, n: Int, kk: Int, a: Pointer[Float32, MutUntrackedOrigin]
 
 
 @always_inline
-def layer_norm_batch(x: Pointer[Float32, MutUntrackedOrigin], out: Pointer[Float32, MutUntrackedOrigin], n: Int, d: Int, bias_free: Bool):
+def layer_norm_batch(x: Pointer[Float32, MutUntrackedOrigin], dst: Pointer[Float32, MutUntrackedOrigin], n: Int, d: Int, bias_free: Bool):
     var row = 0
     while row < n:
         var base = row * d
@@ -281,16 +297,16 @@ def layer_norm_batch(x: Pointer[Float32, MutUntrackedOrigin], out: Pointer[Float
         while i + SIMDW <= d:
             var v = x.unsafe_load[width=SIMDW](base + i)
             if bias_free:
-                out.unsafe_store[width=SIMDW](base + i, (v - mu_simd) * inv_std_simd)
+                dst.unsafe_store[width=SIMDW](base + i, (v - mu_simd) * inv_std_simd)
             else:
-                out.unsafe_store[width=SIMDW](base + i, (v - mu_simd) * inv_std_simd)
+                dst.unsafe_store[width=SIMDW](base + i, (v - mu_simd) * inv_std_simd)
             i += SIMDW
         while i < d:
             var v = x[base + i]
             if bias_free:
-                out[base + i] = (v - mu) * inv_std
+                dst[base + i] = (v - mu) * inv_std
             else:
-                out[base + i] = (v - mu) * inv_std
+                dst[base + i] = (v - mu) * inv_std
             i += 1
         row += 1
 
@@ -303,7 +319,7 @@ def layer_norm_batch(x: Pointer[Float32, MutUntrackedOrigin], out: Pointer[Float
 @always_inline
 def ffn_forward(
     x: Pointer[Float32, MutUntrackedOrigin],
-    out: Pointer[Float32, MutUntrackedOrigin],
+    dst: Pointer[Float32, MutUntrackedOrigin],
     n: Int,
     d_model: Int,
     d_ff: Int,
@@ -313,30 +329,30 @@ def ffn_forward(
     b2: Pointer[Float32, MutUntrackedOrigin],
     tmp: Pointer[Float32, MutUntrackedOrigin],
 ):
-    gemm_nn(n, d_ff, d_model, x, w1, tmp)
+    gemm_nt(n, d_ff, d_model, x, w1, tmp)
     var r = 0
     while r < n:
         var f = 0
         while f + SIMDW <= d_ff:
             var v = tmp.unsafe_load[width=SIMDW](r * d_ff + f) + SIMD[DType.float32, SIMDW](b1.unsafe_load[width=SIMDW](f))
-            tmp.unsafe_store[width=SIMDW](r * d_ff + f, gelu(v))
+            tmp.unsafe_store[width=SIMDW](r * d_ff + f, gelu8(v))
             f += SIMDW
         while f < d_ff:
             var v = tmp[r * d_ff + f] + b1[f]
-            tmp[r * d_ff + f] = gelu(v)
+            tmp[r * d_ff + f] = gelu_scalar(v)
             f += 1
         r += 1
 
-    gemm_nn(n, d_model, d_ff, tmp, w2, out)
+    gemm_nt(n, d_model, d_ff, tmp, w2, dst)
     r = 0
     while r < n:
         var f = 0
         while f + SIMDW <= d_model:
-            var v = out.unsafe_load[width=SIMDW](r * d_model + f) + SIMD[DType.float32, SIMDW](b2.unsafe_load[width=SIMDW](f))
-            out.unsafe_store[width=SIMDW](r * d_model + f, v)
+            var v = dst.unsafe_load[width=SIMDW](r * d_model + f) + SIMD[DType.float32, SIMDW](b2.unsafe_load[width=SIMDW](f))
+            dst.unsafe_store[width=SIMDW](r * d_model + f, v)
             f += SIMDW
         while f < d_model:
-            out[r * d_model + f] += b2[f]
+            dst[r * d_model + f] += b2[f]
             f += 1
         r += 1
 
@@ -348,7 +364,7 @@ def ffn_forward(
 
 def self_attn_block_forward(
     x: Pointer[Float32, MutUntrackedOrigin],
-    out: Pointer[Float32, MutUntrackedOrigin],
+    dst: Pointer[Float32, MutUntrackedOrigin],
     n: Int,
     d_model: Int,
     n_heads: Int,
@@ -363,16 +379,16 @@ def self_attn_block_forward(
     w2: Pointer[Float32, MutUntrackedOrigin],
     b2: Pointer[Float32, MutUntrackedOrigin],
     bias_free_ln: Bool,
-    rope_freqs: Pointer[Float32, MutUntrackedOrigin] | None,
-    ssmax_head_scales: Pointer[Float32, MutUntrackedOrigin] | None,
+    rope_freqs: Optional[Pointer[Float32, MutUntrackedOrigin]],
+    ssmax_head_scales: Optional[Pointer[Float32, MutUntrackedOrigin]],
     ssmax_elementwise: Bool,
     tmp1: Pointer[Float32, MutUntrackedOrigin],
     tmp2: Pointer[Float32, MutUntrackedOrigin],
     tmp3: Pointer[Float32, MutUntrackedOrigin],
     tmp4: Pointer[Float32, MutUntrackedOrigin],
     need_kv: Bool,
-    k_cache: Pointer[Float32, MutUntrackedOrigin] | None,
-    v_cache: Pointer[Float32, MutUntrackedOrigin] | None,
+    k_cache: Optional[Pointer[Float32, MutUntrackedOrigin]],
+    v_cache: Optional[Pointer[Float32, MutUntrackedOrigin]],
 ) -> Int:
     """Pre-norm self-attention + FFN block. Returns 0 on success."""
     # LayerNorm(x) -> tmp1
@@ -383,9 +399,9 @@ def self_attn_block_forward(
     var k_proj = alloc[Float32](n * d_model + 16)
     var v_proj = alloc[Float32](n * d_model + 16)
 
-    gemm_nn(n, d_model, d_model, tmp1, w_attn_in, q_proj)
-    gemm_nn(n, d_model, d_model, tmp1, w_attn_in + d_model, k_proj)
-    gemm_nn(n, d_model, d_model, tmp1, w_attn_in + 2 * d_model, v_proj)
+    gemm_nt(n, d_model, d_model, tmp1, w_attn_in, q_proj)
+    gemm_nt(n, d_model, d_model, tmp1, w_attn_in + d_model, k_proj)
+    gemm_nt(n, d_model, d_model, tmp1, w_attn_in + 2 * d_model, v_proj)
 
     # Add biases
     var i = 0
@@ -402,7 +418,8 @@ def self_attn_block_forward(
             v_proj[i * d_model + b] += b_attn_in[2 * d_model + b]
         i += 1
 
-    # Reshape to (n, n_heads, head_dim)
+    # Reshape to head-major (n_heads, n, head_dim) so per-head GEMMs are
+    # contiguous and in-bounds.
     var q_a = alloc[Float32](n * n_heads * head_dim + 16)
     var k_a = alloc[Float32](n * n_heads * head_dim + 16)
     var v_a = alloc[Float32](n * n_heads * head_dim + 16)
@@ -413,66 +430,78 @@ def self_attn_block_forward(
         while h < n_heads:
             var d = 0
             while d + SIMDW <= head_dim:
-                q_a.unsafe_store[width=SIMDW](i * n_heads * head_dim + h * head_dim + d, q_proj.unsafe_load[width=SIMDW](i * d_model + h * head_dim + d))
-                k_a.unsafe_store[width=SIMDW](i * n_heads * head_dim + h * head_dim + d, k_proj.unsafe_load[width=SIMDW](i * d_model + h * head_dim + d))
-                v_a.unsafe_store[width=SIMDW](i * n_heads * head_dim + h * head_dim + d, v_proj.unsafe_load[width=SIMDW](i * d_model + h * head_dim + d))
+                q_a.unsafe_store[width=SIMDW](h * n * head_dim + i * head_dim + d, q_proj.unsafe_load[width=SIMDW](i * d_model + h * head_dim + d))
+                k_a.unsafe_store[width=SIMDW](h * n * head_dim + i * head_dim + d, k_proj.unsafe_load[width=SIMDW](i * d_model + h * head_dim + d))
+                v_a.unsafe_store[width=SIMDW](h * n * head_dim + i * head_dim + d, v_proj.unsafe_load[width=SIMDW](i * d_model + h * head_dim + d))
                 d += SIMDW
             while d < head_dim:
-                q_a[i * n_heads * head_dim + h * head_dim + d] = q_proj[i * d_model + h * head_dim + d]
-                k_a[i * n_heads * head_dim + h * head_dim + d] = k_proj[i * d_model + h * head_dim + d]
-                v_a[i * n_heads * head_dim + h * head_dim + d] = v_proj[i * d_model + h * head_dim + d]
+                q_a[h * n * head_dim + i * head_dim + d] = q_proj[i * d_model + h * head_dim + d]
+                k_a[h * n * head_dim + i * head_dim + d] = k_proj[i * d_model + h * head_dim + d]
+                v_a[h * n * head_dim + i * head_dim + d] = v_proj[i * d_model + h * head_dim + d]
                 d += 1
             h += 1
         i += 1
 
-    # Apply RoPE to q and k
+    # Apply RoPE to q and k (half-dim rotation, non-interleaved pairs)
     if rope_freqs is not None:
+        var rf = rope_freqs.value()
         var p = 0
         while p < n:
-            var freq = rope_freqs[p] if p < 1024 else rope_freqs[1023]
+            var freq = rf[p] if p < 1024 else rf[1023]
             var cos_v = cos(freq)
             var sin_v = sin(freq)
             var cos_simd = SIMD[DType.float32, SIMDW](cos_v)
             var sin_simd = SIMD[DType.float32, SIMDW](sin_v)
             var half_hd = head_dim // 2
-            var d = 0
-            while d + SIMDW <= half_hd:
-                var q0 = q_a.unsafe_load[width=SIMDW](p * n_heads * head_dim + d)
-                var q1 = q_a.unsafe_load[width=SIMDW](p * n_heads * head_dim + half_hd + d)
-                var k0 = k_a.unsafe_load[width=SIMDW](p * n_heads * head_dim + d)
-                var k1 = k_a.unsafe_load[width=SIMDW](p * n_heads * head_dim + half_hd + d)
-                q_a.unsafe_store[width=SIMDW](p * n_heads * head_dim + d, q0 * cos_simd - q1 * sin_simd)
-                q_a.unsafe_store[width=SIMDW](p * n_heads * head_dim + half_hd + d, q1 * cos_simd + q0 * sin_simd)
-                k_a.unsafe_store[width=SIMDW](p * n_heads * head_dim + d, k0 * cos_simd - k1 * sin_simd)
-                k_a.unsafe_store[width=SIMDW](p * n_heads * head_dim + half_hd + d, k1 * cos_simd + k0 * sin_simd)
-                d += SIMDW
-            var idx = p * n_heads * head_dim + half_hd
-            while idx + SIMDW <= p * n_heads * head_dim + head_dim:
-                var d2 = idx - half_hd
-                var q0 = q_a.unsafe_load[width=SIMDW](p * n_heads * head_dim + d2)
-                var q1 = q_a.unsafe_load[width=SIMDW](idx)
-                var k0 = k_a.unsafe_load[width=SIMDW](p * n_heads * head_dim + d2)
-                var k1 = k_a.unsafe_load[width=SIMDW](idx)
-                q_a.unsafe_store[width=SIMDW](p * n_heads * head_dim + d2, q0 * cos_simd - q1 * sin_simd)
-                q_a.unsafe_store[width=SIMDW](idx, q1 * cos_simd + q0 * sin_simd)
-                k_a.unsafe_store[width=SIMDW](p * n_heads * head_dim + d2, k0 * cos_simd - k1 * sin_simd)
-                k_a.unsafe_store[width=SIMDW](idx, k1 * cos_simd + k0 * sin_simd)
-                idx += SIMDW
+            var hr = 0
+            while hr < n_heads:
+                var base_r = hr * n * head_dim + p * head_dim
+                var d = 0
+                while d + SIMDW <= half_hd:
+                    var q0 = q_a.unsafe_load[width=SIMDW](base_r + d)
+                    var q1 = q_a.unsafe_load[width=SIMDW](base_r + half_hd + d)
+                    var k0 = k_a.unsafe_load[width=SIMDW](base_r + d)
+                    var k1 = k_a.unsafe_load[width=SIMDW](base_r + half_hd + d)
+                    q_a.unsafe_store[width=SIMDW](base_r + d, q0 * cos_simd - q1 * sin_simd)
+                    q_a.unsafe_store[width=SIMDW](base_r + half_hd + d, q1 * cos_simd + q0 * sin_simd)
+                    k_a.unsafe_store[width=SIMDW](base_r + d, k0 * cos_simd - k1 * sin_simd)
+                    k_a.unsafe_store[width=SIMDW](base_r + half_hd + d, k1 * cos_simd + k0 * sin_simd)
+                    d += SIMDW
+                while d < half_hd:
+                    var q0s = q_a[base_r + d]
+                    var q1s = q_a[base_r + half_hd + d]
+                    var k0s = k_a[base_r + d]
+                    var k1s = k_a[base_r + half_hd + d]
+                    q_a[base_r + d] = q0s * cos_v - q1s * sin_v
+                    q_a[base_r + half_hd + d] = q1s * cos_v + q0s * sin_v
+                    k_a[base_r + d] = k0s * cos_v - k1s * sin_v
+                    k_a[base_r + half_hd + d] = k1s * cos_v + k0s * sin_v
+                    d += 1
+                hr += 1
             p += 1
 
-    # SSMax scaling
+    # SSMax per-head query scaling (scale * log(n))
     if ssmax_head_scales is not None:
-        var logn = Float32(log(max(Float64(n), 1.0)))
-        var h = 0
-        while h < n_heads:
-            var hs = ssmax_head_scales[h] * logn
-            var hs_simd = SIMD[DType.float32, SIMDW](hs)
-            var t = 0
-            while t + SIMDW <= n * head_dim:
-                var offset = t * n_heads
-                var base = p * n_heads * head_dim  # placeholder, fix below
-                t += SIMDW
-            h += 1
+        var ss = ssmax_head_scales.value()
+        var logn = fast_log(Float32(max(Float64(n), 1.0)))
+        var i3 = 0
+        while i3 < n:
+            var h3 = 0
+            while h3 < n_heads:
+                var s3 = ss[h3] * logn
+                var base3 = h3 * n * head_dim + i3 * head_dim
+                var d3 = 0
+                while d3 + SIMDW <= head_dim:
+                    q_a.unsafe_store[width=SIMDW](
+                        base3 + d3,
+                        q_a.unsafe_load[width=SIMDW](base3 + d3) * SIMD[DType.float32, SIMDW](s3),
+                    )
+                    d3 += SIMDW
+                while d3 < head_dim:
+                    q_a[base3 + d3] *= s3
+                    d3 += 1
+                h3 += 1
+            i3 += 1
 
     # Scaled dot-product attention
     var scores = alloc[Float32](n * n_heads * n + 16)
@@ -482,8 +511,8 @@ def self_attn_block_forward(
 
     var h = 0
     while h < n_heads:
-        var q_h = q_a + h * head_dim
-        var k_h = k_a + h * head_dim
+        var q_h = q_a + h * n * head_dim
+        var k_h = k_a + h * n * head_dim
         var s_h = scores + h * n * n
         gemm_nt(n, n, head_dim, q_h, k_h, s_h)
         var ts = 0
@@ -491,7 +520,7 @@ def self_attn_block_forward(
             s_h[ts] *= scale
             ts += 1
 
-        var ts = 0
+        ts = 0
         while ts < n:
             var mx: Float32 = -1e9
             var s = 0
@@ -513,8 +542,8 @@ def self_attn_block_forward(
                 s += 1
             ts += 1
 
-        var v_h = v_a + h * head_dim
-        var o_h = out_attn + h * head_dim
+        var v_h = v_a + h * n * head_dim
+        var o_h = out_attn + h * n * head_dim
         gemm_nn(n, head_dim, n, attn_w + h * n * n, v_h, o_h)
         h += 1
 
@@ -525,16 +554,16 @@ def self_attn_block_forward(
         while h < n_heads:
             var d = 0
             while d + SIMDW <= head_dim:
-                tmp3.unsafe_store[width=SIMDW](i * d_model + h * head_dim + d, out_attn.unsafe_load[width=SIMDW](i * n_heads * head_dim + h * head_dim + d))
+                tmp3.unsafe_store[width=SIMDW](i * d_model + h * head_dim + d, out_attn.unsafe_load[width=SIMDW](h * n * head_dim + i * head_dim + d))
                 d += SIMDW
             while d < head_dim:
-                tmp3[i * d_model + h * head_dim + d] = out_attn[i * n_heads * head_dim + h * head_dim + d]
+                tmp3[i * d_model + h * head_dim + d] = out_attn[h * n * head_dim + i * head_dim + d]
                 d += 1
             h += 1
         i += 1
 
     # Output projection
-    gemm_nn(n, d_model, d_model, tmp3, w_attn_out, tmp4)
+    gemm_nt(n, d_model, d_model, tmp3, w_attn_out, tmp4)
     i = 0
     while i < n:
         var b = 0
@@ -572,23 +601,25 @@ def self_attn_block_forward(
     # Copy to out
     i = 0
     while i + SIMDW <= n * d_model:
-        out.unsafe_store[width=SIMDW](i, tmp3.unsafe_load[width=SIMDW](i))
+        dst.unsafe_store[width=SIMDW](i, tmp3.unsafe_load[width=SIMDW](i))
         i += SIMDW
     while i < n * d_model:
-        out[i] = tmp3[i]
+        dst[i] = tmp3[i]
         i += 1
 
     # Store K/V if needed
     if need_kv and k_cache is not None and v_cache is not None:
+        var kc = k_cache.value()
+        var vc = v_cache.value()
         var sz = n * d_model
         var si = 0
         while si + SIMDW <= sz:
-            k_cache.unsafe_store[width=SIMDW](si, k_proj.unsafe_load[width=SIMDW](si))
-            v_cache.unsafe_store[width=SIMDW](si, v_proj.unsafe_load[width=SIMDW](si))
+            kc.unsafe_store[width=SIMDW](si, k_proj.unsafe_load[width=SIMDW](si))
+            vc.unsafe_store[width=SIMDW](si, v_proj.unsafe_load[width=SIMDW](si))
             si += SIMDW
         while si < sz:
-            k_cache[si] = k_proj[si]
-            v_cache[si] = v_proj[si]
+            kc[si] = k_proj[si]
+            vc[si] = v_proj[si]
             si += 1
 
     q_proj.unsafe_free()
@@ -611,7 +642,7 @@ def self_attn_block_forward(
 def isab_forward(
     x: Pointer[Float32, MutUntrackedOrigin],
     ind_vectors: Pointer[Float32, MutUntrackedOrigin],
-    out: Pointer[Float32, MutUntrackedOrigin],
+    dst: Pointer[Float32, MutUntrackedOrigin],
     n: Int,
     d_model: Int,
     n_heads: Int,
@@ -631,7 +662,7 @@ def isab_forward(
     w2: Pointer[Float32, MutUntrackedOrigin],
     b2: Pointer[Float32, MutUntrackedOrigin],
     bias_free_ln: Bool,
-    ssmax_head_scales: Pointer[Float32, MutUntrackedOrigin] | None,
+    ssmax_head_scales: Optional[Pointer[Float32, MutUntrackedOrigin]],
     ssmax_elementwise: Bool,
     tmp1: Pointer[Float32, MutUntrackedOrigin],
     tmp2: Pointer[Float32, MutUntrackedOrigin],
@@ -643,7 +674,7 @@ def isab_forward(
     """ISAB: n_inds inducing vectors attend over x, then x attends over inducing."""
     # Stage 1: attn1 — inducing vectors (n_inds) attend over x (n)
     var q_ind = alloc[Float32](n_inds * d_model + 16)
-    gemm_nn(n_inds, d_model, d_model, ind_vectors, w_attn1_in, q_ind)
+    gemm_nt(n_inds, d_model, d_model, ind_vectors, w_attn1_in, q_ind)
     var i = 0
     while i < n_inds:
         var b = 0
@@ -666,7 +697,7 @@ def isab_forward(
         tmp6[si] = x[si]
         si += 1
 
-    # Reshape
+    # Reshape into head-major (n_heads, rows, head_dim) buffers.
     var q_a = alloc[Float32](n_inds * n_heads * head_dim + 16)
     var k_a = alloc[Float32](n * n_heads * head_dim + 16)
     var v_a = alloc[Float32](n * n_heads * head_dim + 16)
@@ -677,10 +708,10 @@ def isab_forward(
         while h < n_heads:
             var d = 0
             while d + SIMDW <= head_dim:
-                q_a.unsafe_store[width=SIMDW](i * n_heads * head_dim + h * head_dim + d, q_ind.unsafe_load[width=SIMDW](i * d_model + h * head_dim + d))
+                q_a.unsafe_store[width=SIMDW](h * n_inds * head_dim + i * head_dim + d, q_ind.unsafe_load[width=SIMDW](i * d_model + h * head_dim + d))
                 d += SIMDW
             while d < head_dim:
-                q_a[i * n_heads * head_dim + h * head_dim + d] = q_ind[i * d_model + h * head_dim + d]
+                q_a[h * n_inds * head_dim + i * head_dim + d] = q_ind[i * d_model + h * head_dim + d]
                 d += 1
             h += 1
         i += 1
@@ -691,38 +722,38 @@ def isab_forward(
         while h < n_heads:
             var d = 0
             while d + SIMDW <= head_dim:
-                k_a.unsafe_store[width=SIMDW](i * n_heads * head_dim + h * head_dim + d, tmp5.unsafe_load[width=SIMDW](i * d_model + h * head_dim + d))
-                v_a.unsafe_store[width=SIMDW](i * n_heads * head_dim + h * head_dim + d, tmp6.unsafe_load[width=SIMDW](i * d_model + h * head_dim + d))
+                k_a.unsafe_store[width=SIMDW](h * n * head_dim + i * head_dim + d, tmp5.unsafe_load[width=SIMDW](i * d_model + h * head_dim + d))
+                v_a.unsafe_store[width=SIMDW](h * n * head_dim + i * head_dim + d, tmp6.unsafe_load[width=SIMDW](i * d_model + h * head_dim + d))
                 d += SIMDW
             while d < head_dim:
-                k_a[i * n_heads * head_dim + h * head_dim + d] = tmp5[i * d_model + h * head_dim + d]
-                v_a[i * n_heads * head_dim + h * head_dim + d] = tmp6[i * d_model + h * head_dim + d]
+                k_a[h * n * head_dim + i * head_dim + d] = tmp5[i * d_model + h * head_dim + d]
+                v_a[h * n * head_dim + i * head_dim + d] = tmp6[i * d_model + h * head_dim + d]
                 d += 1
             h += 1
         i += 1
 
-    # SSMax
+    # SSMax per-head query scaling (scale * log(n))
     if ssmax_head_scales is not None:
-        var logn = Float32(log(max(Float64(n), 1.0)))
-        var h = 0
-        while h < n_heads:
-            var hs = ssmax_head_scales[h] * logn
-            var hs_simd = SIMD[DType.float32, SIMDW](hs)
-            var t = 0
-            while t + SIMDW <= n_inds * head_dim:
-                var base = t * n_heads
-                var i2 = 0
-                while i2 < n_inds:
-                    var d2 = 0
-                    while d2 + SIMDW <= head_dim:
-                        q_a.unsafe_store[width=SIMDW](i2 * n_heads * head_dim + d2, q_a.unsafe_load[width=SIMDW](i2 * n_heads * head_dim + d2) * hs_simd)
-                        d2 += SIMDW
-                    while d2 < head_dim:
-                        q_a[i2 * n_heads * head_dim + d2] = q_a[i2 * n_heads * head_dim + d2] * hs
-                        d2 += 1
-                    i2 += 1
-                t += SIMDW
-            h += 1
+        var ss = ssmax_head_scales.value()
+        var logn = fast_log(Float32(max(Float64(n), 1.0)))
+        var i3 = 0
+        while i3 < n_inds:
+            var h3 = 0
+            while h3 < n_heads:
+                var s3 = ss[h3] * logn
+                var base3 = h3 * n_inds * head_dim + i3 * head_dim
+                var d3 = 0
+                while d3 + SIMDW <= head_dim:
+                    q_a.unsafe_store[width=SIMDW](
+                        base3 + d3,
+                        q_a.unsafe_load[width=SIMDW](base3 + d3) * SIMD[DType.float32, SIMDW](s3),
+                    )
+                    d3 += SIMDW
+                while d3 < head_dim:
+                    q_a[base3 + d3] *= s3
+                    d3 += 1
+                h3 += 1
+            i3 += 1
 
     # Attention
     var scores = alloc[Float32](n_inds * n_heads * n + 16)
@@ -732,8 +763,8 @@ def isab_forward(
 
     var h = 0
     while h < n_heads:
-        var q_h = q_a + h * head_dim
-        var k_h = k_a + h * head_dim
+        var q_h = q_a + h * n_inds * head_dim
+        var k_h = k_a + h * n * head_dim
         var s_h = scores + h * n_inds * n
         gemm_nt(n_inds, n, head_dim, q_h, k_h, s_h)
         var ts = 0
@@ -741,7 +772,7 @@ def isab_forward(
             s_h[ts] *= scale
             ts += 1
 
-        var ts = 0
+        ts = 0
         while ts < n_inds:
             var mx: Float32 = -1e9
             var s = 0
@@ -763,8 +794,8 @@ def isab_forward(
                 s += 1
             ts += 1
 
-        var v_h = v_a + h * head_dim
-        var o_h = out_attn + h * head_dim
+        var v_h = v_a + h * n * head_dim
+        var o_h = out_attn + h * n_inds * head_dim
         gemm_nn(n_inds, head_dim, n, attn_w + h * n_inds * n, v_h, o_h)
         h += 1
 
@@ -775,16 +806,16 @@ def isab_forward(
         while h < n_heads:
             var d = 0
             while d + SIMDW <= head_dim:
-                tmp1.unsafe_store[width=SIMDW](i * d_model + h * head_dim + d, out_attn.unsafe_load[width=SIMDW](i * n_heads * head_dim + h * head_dim + d))
+                tmp1.unsafe_store[width=SIMDW](i * d_model + h * head_dim + d, out_attn.unsafe_load[width=SIMDW](h * n_inds * head_dim + i * head_dim + d))
                 d += SIMDW
             while d < head_dim:
-                tmp1[i * d_model + h * head_dim + d] = out_attn[i * n_heads * head_dim + h * head_dim + d]
+                tmp1[i * d_model + h * head_dim + d] = out_attn[h * n_inds * head_dim + i * head_dim + d]
                 d += 1
             h += 1
         i += 1
 
     # Output projection
-    gemm_nn(n_inds, d_model, d_model, tmp1, w_attn1_out, tmp2)
+    gemm_nt(n_inds, d_model, d_model, tmp1, w_attn1_out, tmp2)
     i = 0
     while i < n_inds:
         var b = 0
@@ -798,7 +829,7 @@ def isab_forward(
 
     # Stage 2: attn2 — x (n) attends over tmp1 (n_inds)
     var q_x = alloc[Float32](n * d_model + 16)
-    gemm_nn(n, d_model, d_model, x, w_attn2_in, q_x)
+    gemm_nt(n, d_model, d_model, x, w_attn2_in, q_x)
     i = 0
     while i < n:
         var b = 0
@@ -820,10 +851,10 @@ def isab_forward(
         while h < n_heads:
             var d = 0
             while d + SIMDW <= head_dim:
-                q_a2.unsafe_store[width=SIMDW](i * n_heads * head_dim + h * head_dim + d, q_x.unsafe_load[width=SIMDW](i * d_model + h * head_dim + d))
+                q_a2.unsafe_store[width=SIMDW](h * n * head_dim + i * head_dim + d, q_x.unsafe_load[width=SIMDW](i * d_model + h * head_dim + d))
                 d += SIMDW
             while d < head_dim:
-                q_a2[i * n_heads * head_dim + h * head_dim + d] = q_x[i * d_model + h * head_dim + d]
+                q_a2[h * n * head_dim + i * head_dim + d] = q_x[i * d_model + h * head_dim + d]
                 d += 1
             h += 1
         i += 1
@@ -834,12 +865,12 @@ def isab_forward(
         while h < n_heads:
             var d = 0
             while d + SIMDW <= head_dim:
-                k_a2.unsafe_store[width=SIMDW](i * n_heads * head_dim + h * head_dim + d, tmp1.unsafe_load[width=SIMDW](i * d_model + h * head_dim + d))
-                v_a2.unsafe_store[width=SIMDW](i * n_heads * head_dim + h * head_dim + d, tmp1.unsafe_load[width=SIMDW](i * d_model + h * head_dim + d))
+                k_a2.unsafe_store[width=SIMDW](h * n_inds * head_dim + i * head_dim + d, tmp1.unsafe_load[width=SIMDW](i * d_model + h * head_dim + d))
+                v_a2.unsafe_store[width=SIMDW](h * n_inds * head_dim + i * head_dim + d, tmp1.unsafe_load[width=SIMDW](i * d_model + h * head_dim + d))
                 d += SIMDW
             while d < head_dim:
-                k_a2[i * n_heads * head_dim + h * head_dim + d] = tmp1[i * d_model + h * head_dim + d]
-                v_a2[i * n_heads * head_dim + h * head_dim + d] = tmp1[i * d_model + h * head_dim + d]
+                k_a2[h * n_inds * head_dim + i * head_dim + d] = tmp1[i * d_model + h * head_dim + d]
+                v_a2[h * n_inds * head_dim + i * head_dim + d] = tmp1[i * d_model + h * head_dim + d]
                 d += 1
             h += 1
         i += 1
@@ -852,8 +883,8 @@ def isab_forward(
 
     h = 0
     while h < n_heads:
-        var q_h = q_a2 + h * head_dim
-        var k_h = k_a2 + h * head_dim
+        var q_h = q_a2 + h * n * head_dim
+        var k_h = k_a2 + h * n_inds * head_dim
         var s_h = scores2 + h * n * n_inds
         gemm_nt(n, n_inds, head_dim, q_h, k_h, s_h)
         var ts = 0
@@ -861,7 +892,7 @@ def isab_forward(
             s_h[ts] *= scale
             ts += 1
 
-        var ts = 0
+        ts = 0
         while ts < n:
             var mx: Float32 = -1e9
             var s = 0
@@ -883,8 +914,8 @@ def isab_forward(
                 s += 1
             ts += 1
 
-        var v_h = v_a2 + h * head_dim
-        var o_h = out_attn2 + h * head_dim
+        var v_h = v_a2 + h * n_inds * head_dim
+        var o_h = out_attn2 + h * n * head_dim
         gemm_nn(n, head_dim, n_inds, attn_w2 + h * n * n_inds, v_h, o_h)
         h += 1
 
@@ -895,16 +926,16 @@ def isab_forward(
         while h < n_heads:
             var d = 0
             while d + SIMDW <= head_dim:
-                tmp3.unsafe_store[width=SIMDW](i * d_model + h * head_dim + d, out_attn2.unsafe_load[width=SIMDW](i * n_heads * head_dim + h * head_dim + d))
+                tmp3.unsafe_store[width=SIMDW](i * d_model + h * head_dim + d, out_attn2.unsafe_load[width=SIMDW](h * n * head_dim + i * head_dim + d))
                 d += SIMDW
             while d < head_dim:
-                tmp3[i * d_model + h * head_dim + d] = out_attn2[i * n_heads * head_dim + h * head_dim + d]
+                tmp3[i * d_model + h * head_dim + d] = out_attn2[h * n * head_dim + i * head_dim + d]
                 d += 1
             h += 1
         i += 1
 
     # Output projection
-    gemm_nn(n, d_model, d_model, tmp3, w_attn2_out, tmp4)
+    gemm_nt(n, d_model, d_model, tmp3, w_attn2_out, tmp4)
     i = 0
     while i < n:
         var b = 0
@@ -941,10 +972,10 @@ def isab_forward(
     # Copy to out
     i = 0
     while i + SIMDW <= n * d_model:
-        out.unsafe_store[width=SIMDW](i, tmp6.unsafe_load[width=SIMDW](i))
+        dst.unsafe_store[width=SIMDW](i, tmp6.unsafe_load[width=SIMDW](i))
         i += SIMDW
     while i < n * d_model:
-        out[i] = tmp6[i]
+        dst[i] = tmp6[i]
         i += 1
 
     q_ind.unsafe_free()
@@ -964,11 +995,50 @@ def isab_forward(
 
 
 # =============================================================================
+# Parameter layout
+# =============================================================================
+
+
+def block_stride(
+    d: Int,
+    d_ff: Int,
+    has_inds: Bool,
+    n_inds: Int,
+    nhead: Int,
+    elementwise: Bool,
+) -> Int:
+    """Parameter count of one attention block in the flat buffer.
+
+    Layout: packed QKV in-projection (weights + biases), out-projection
+    (weights + biases), optional inducing vectors, FFN (w1, b1, w2, b2)
+    and the SSMax scale table.
+    """
+    var s = 3 * d * d + 3 * d
+    s += d * d + d
+    if has_inds:
+        s += n_inds * d
+    s += d * d_ff + d_ff
+    s += d_ff * d + d
+    if elementwise:
+        s += nhead * d
+    else:
+        s += nhead
+    return s
+
+
+# =============================================================================
 # TabICLConfig
 # =============================================================================
 
 
-struct TabICLConfig(Movable):
+struct TabICLConfig(ImplicitlyCopyable, Movable, Writable):
+    """Architecture hyper-parameters unpacked from the int64 dims vector.
+
+    The field order of the vector is fixed by
+    ``shinrin._tabicl._config.TabICLConfig.dims_array``; keep both sides in
+    sync.
+    """
+
     var embed_dim: Int
     var col_feature_group_size: Int
     var col_num_blocks: Int
@@ -1006,8 +1076,8 @@ struct TabICLConfig(Movable):
         self.row_num_cls = Int(dp[8])
         self.row_num_blocks = Int(dp[9])
         self.row_nhead = Int(dp[10])
-        var rrb = Float64(py=parts[11])
-        self.row_rope_base = rrb
+        # rope base is stored rounded to int64 (exact for 100000.0)
+        self.row_rope_base = Float64(py=dims[11])
         self.row_rope_interleaved = Int(dp[12]) == 1
         self.icl_num_blocks = Int(dp[13])
         self.icl_nhead = Int(dp[14])
@@ -1020,20 +1090,22 @@ struct TabICLConfig(Movable):
         self.num_quantiles = Int(dp[21])
         self.out_dim = Int(dp[22])
 
-    @property
-    var col_dim_feedforward: Int:
+    def write_to(mut self, mut writer: Some[Writer]):
+        writer.write(
+            "TabICLConfig(embed_dim=", self.embed_dim,
+            ", icl_dim=", self.icl_dim, ")"
+        )
+
+    def col_dim_feedforward(self) -> Int:
         return self.embed_dim * self.ff_factor
 
-    @property
-    var icl_dim_feedforward: Int:
+    def icl_dim_feedforward(self) -> Int:
         return self.icl_dim * self.ff_factor
 
-    @property
-    var col_head_dim: Int:
+    def col_head_dim(self) -> Int:
         return self.embed_dim // self.col_nhead
 
-    @property
-    var icl_head_dim: Int:
+    def icl_head_dim(self) -> Int:
         return self.icl_dim // self.icl_nhead
 
 
@@ -1044,12 +1116,12 @@ struct TabICLConfig(Movable):
 
 struct TabICLInference(ImplicitlyCopyable, Movable, Writable):
     def write_to(mut self, mut writer: Some[Writer]):
-        writer.write("TabICLInference(cfg=", self.config, ")")
+        writer.write("TabICLInference(P=", self.P, ")")
 
     var config: TabICLConfig
     var P: Int
 
-    # Parameter data (raw pointers from NumPy)
+    # Parameter data (raw pointer from NumPy)
     var params: Pointer[Float32, MutUntrackedOrigin]
 
     # Offset storage
@@ -1067,45 +1139,12 @@ struct TabICLInference(ImplicitlyCopyable, Movable, Writable):
     var _off_decoder_b2: Int
     var _off_ln_w: Int
     var _off_ln_b: Int
-    var _col_block_off_attn_in: List[Int]
-    var _col_block_off_attn_out: List[Int]
-    var _col_block_off_ind_vectors: List[Int]
-    var _col_block_off_ff_w1: List[Int]
-    var _col_block_off_ff_b1: List[Int]
-    var _col_block_off_ff_w2: List[Int]
-    var _col_block_off_ff_b2: List[Int]
-    var _col_block_off_ssmax_scales: List[Int]
-    var _row_block_off_attn_in: List[Int]
-    var _row_block_off_attn_out: List[Int]
-    var _row_block_off_ff_w1: List[Int]
-    var _row_block_off_ff_b1: List[Int]
-    var _row_block_off_ff_w2: List[Int]
-    var _row_block_off_ff_b2: List[Int]
-    var _row_block_off_ssmax_scales: List[Int]
-    var _icl_block_off_attn_in: List[Int]
-    var _icl_block_off_attn_out: List[Int]
-    var _icl_block_off_ff_w1: List[Int]
-    var _icl_block_off_ff_b1: List[Int]
-    var _icl_block_off_ff_w2: List[Int]
-    var _icl_block_off_ff_b2: List[Int]
-    var _icl_block_off_ssmax_scales: List[Int]
 
-    # Workspace buffers
-    var ws_col: Pointer[Float32, MutUntrackedOrigin]
-    var ws_col_size: Int
-    var ws_row: Pointer[Float32, MutUntrackedOrigin]
-    var ws_row_size: Int
-    var ws_icl: Pointer[Float32, MutUntrackedOrigin]
-    var ws_icl_size: Int
-
-    # RoPE freqs
-    var rope_freqs_col: Pointer[Float32, MutUntrackedOrigin]
-    var rope_freqs_icl: Pointer[Float32, MutUntrackedOrigin]
-
-    def __init__(out self, config: PythonObject, param_data: PythonObject) raises:
-        self.config = TabICLConfig(config)
+    def __init__(out self, dims: PythonObject, param_data: PythonObject) raises:
+        self.config = TabICLConfig(dims)
         self.params = ptr_f32(param_data)
         self.P = iface_dim(param_data, 0)
+
 
         var cfg = self.config
         var cur = 0
@@ -1114,23 +1153,18 @@ struct TabICLInference(ImplicitlyCopyable, Movable, Writable):
         self._off_in_linear_w = cur; cur += cfg.col_feature_group_size * cfg.embed_dim
         self._off_in_linear_b = cur; cur += cfg.embed_dim
 
-        # col blocks
+        # col blocks (ISAB: attn1 + attn2 + inducing vectors + FFN + ssmax)
         self._off_col_blocks = cur
         var i = 0
         while i < cfg.col_num_blocks:
-            var base = cur
-            self._col_block_off_attn_in.append(base); base += 3 * cfg.embed_dim * cfg.embed_dim
-            self._col_block_off_attn_out.append(base); base += cfg.embed_dim * cfg.embed_dim
-            self._col_block_off_ind_vectors.append(base); base += cfg.col_num_inds * cfg.embed_dim
-            self._col_block_off_ff_w1.append(base); base += cfg.embed_dim * cfg.col_dim_feedforward
-            self._col_block_off_ff_b1.append(base); base += cfg.col_dim_feedforward
-            self._col_block_off_ff_w2.append(base); base += cfg.col_dim_feedforward * cfg.embed_dim
-            self._col_block_off_ff_b2.append(base); base += cfg.embed_dim
-            if cfg.col_ssmax_elementwise:
-                self._col_block_off_ssmax_scales.append(base); base += cfg.col_nhead * cfg.embed_dim
-            else:
-                self._col_block_off_ssmax_scales.append(base); base += cfg.col_nhead
-            cur = base
+            cur += block_stride(
+                cfg.embed_dim,
+                cfg.col_dim_feedforward(),
+                True,
+                cfg.col_num_inds,
+                cfg.col_nhead,
+                cfg.col_ssmax_elementwise,
+            )
             i += 1
 
         # row_stage: cls_tokens
@@ -1140,18 +1174,14 @@ struct TabICLInference(ImplicitlyCopyable, Movable, Writable):
         self._off_row_blocks = cur
         i = 0
         while i < cfg.row_num_blocks:
-            var base = cur
-            self._row_block_off_attn_in.append(base); base += 3 * cfg.embed_dim * cfg.embed_dim
-            self._row_block_off_attn_out.append(base); base += cfg.embed_dim * cfg.embed_dim
-            self._row_block_off_ff_w1.append(base); base += cfg.embed_dim * cfg.col_dim_feedforward
-            self._row_block_off_ff_b1.append(base); base += cfg.col_dim_feedforward
-            self._row_block_off_ff_w2.append(base); base += cfg.col_dim_feedforward * cfg.embed_dim
-            self._row_block_off_ff_b2.append(base); base += cfg.embed_dim
-            if cfg.col_ssmax_elementwise:
-                self._row_block_off_ssmax_scales.append(base); base += cfg.row_nhead * cfg.embed_dim
-            else:
-                self._row_block_off_ssmax_scales.append(base); base += cfg.row_nhead
-            cur = base
+            cur += block_stride(
+                cfg.embed_dim,
+                cfg.col_dim_feedforward(),
+                False,
+                0,
+                cfg.row_nhead,
+                cfg.col_ssmax_elementwise,
+            )
             i += 1
 
         # icl_stage: y_encoder
@@ -1162,18 +1192,14 @@ struct TabICLInference(ImplicitlyCopyable, Movable, Writable):
         self._off_icl_blocks = cur
         i = 0
         while i < cfg.icl_num_blocks:
-            var base = cur
-            self._icl_block_off_attn_in.append(base); base += 3 * cfg.icl_dim * cfg.icl_dim
-            self._icl_block_off_attn_out.append(base); base += cfg.icl_dim * cfg.icl_dim
-            self._icl_block_off_ff_w1.append(base); base += cfg.icl_dim * cfg.icl_dim_feedforward
-            self._icl_block_off_ff_b1.append(base); base += cfg.icl_dim_feedforward
-            self._icl_block_off_ff_w2.append(base); base += cfg.icl_dim_feedforward * cfg.icl_dim
-            self._icl_block_off_ff_b2.append(base); base += cfg.icl_dim
-            if cfg.icl_ssmax_elementwise:
-                self._icl_block_off_ssmax_scales.append(base); base += cfg.icl_nhead * cfg.icl_dim
-            else:
-                self._icl_block_off_ssmax_scales.append(base); base += cfg.icl_nhead
-            cur = base
+            cur += block_stride(
+                cfg.icl_dim,
+                cfg.icl_dim_feedforward(),
+                False,
+                0,
+                cfg.icl_nhead,
+                cfg.icl_ssmax_elementwise,
+            )
             i += 1
 
         # decoder + ln
@@ -1186,60 +1212,64 @@ struct TabICLInference(ImplicitlyCopyable, Movable, Writable):
 
         self.P = cur
 
-        # Allocate workspace
-        var max_seq = 32768
-        self.ws_col_size = max_seq * cfg.embed_dim * 16
-        self.ws_col = alloc[Float32](self.ws_col_size + 16)
-
-        self.ws_row_size = max_seq * cfg.embed_dim * 16
-        self.ws_row = alloc[Float32](self.ws_row_size + 16)
-
-        self.ws_icl_size = max_seq * cfg.icl_dim * 16
-        self.ws_icl = alloc[Float32](self.ws_icl_size + 16)
-
-        # Precompute RoPE freqs
-        self.rope_freqs_col = alloc[Float32](1024)
-        self.rope_freqs_icl = alloc[Float32](1024)
-        var p = 0
-        while p < 1024:
-            var freq_col = Float32(Float64(p) / (Float64(cfg.embed_dim // cfg.col_nhead) * cfg.row_rope_base))
-            self.rope_freqs_col[p] = freq_col
-            var freq_icl = Float32(Float64(p) / (Float64(cfg.icl_dim // cfg.icl_nhead) * 10000.0))
-            self.rope_freqs_icl[p] = freq_icl
-            p += 1
-
-    def unsafe_free(self):
-        self.ws_col.unsafe_free()
-        self.ws_row.unsafe_free()
-        self.ws_icl.unsafe_free()
-        self.rope_freqs_col.unsafe_free()
-        self.rope_freqs_icl.unsafe_free()
-
     # =====================================================================
     # Python init
     # =====================================================================
 
+    @staticmethod
     def py_init(out self: TabICLInference, args: PythonObject, kwargs: PythonObject) raises:
-        """Initialize from Python: create_inference(config, param_data)."""
-        var cfg = TabICLConfig(args[0])
-        var params = args[1]
-        self = TabICLInference(cfg, params)
+        """Initialize from Python: TabICLInference(dims, param_data)."""
+        _ = kwargs
+        if len(args) != 2:
+            raise Error("TabICLInference(dims, params) expects 2 arguments")
+        self = Self(args[0], args[1])
 
     # =====================================================================
     # param_count
     # =====================================================================
 
-    def param_count(self) -> Int:
-        return self.P
+    @staticmethod
+    def param_count(self_ptr: Pointer[Self, MutAnyOrigin]) raises -> PythonObject:
+        var self = self_ptr[]
+        return Python.int(self.P)
 
     # =====================================================================
     # Main forward pass
     # =====================================================================
 
+    @staticmethod
     def forward(
+        self_ptr: Pointer[Self, MutAnyOrigin],
+        parts: PythonObject,
+    ) raises -> PythonObject:
+        """Run the forward pass.
+
+        ``parts = (col_input, row_input, target)`` where ``col_input`` is
+        ``(n_train, group_size)`` float32, ``row_input`` is ``(max(n_test,
+        1), embed_dim)`` float32 and ``target`` is ``(n_train,)`` int64.
+        Returns a flat float32 NumPy array of ``max(n_test, 1) * out_dim``
+        elements.
+        """
+        var self = self_ptr[]
+        var col_input = ptr_f32(parts[0])
+        var row_input = ptr_f32(parts[1])
+        var target = ptr_i64(parts[2])
+        var n_train = iface_dim(parts[0], 0)
+        var n_test = iface_dim(parts[1], 0)
+        var n_classes = iface_dim(parts[2], 0)
+        var np = np_module()
+        var total = max(n_test, 1) * self.config.out_dim
+        var out_arr = np.empty(Python.tuple(Int(total)), "float32")
+        var output = ptr_f32(out_arr)
+        _ = self.forward_impl(
+            col_input, row_input, target, n_train, n_test, n_classes, output
+        )
+        return out_arr
+
+    def forward_impl(
         mut self,
-        col_input: Pointer[Float32, MutUntrackedOrigin],  # (n_train, group_size)
-        row_input: Pointer[Float32, MutUntrackedOrigin],  # (n_test, embed_dim) — already embedded
+        col_input: Pointer[Float32, MutUntrackedOrigin],  # (n_total, group_size)
+        row_input: Pointer[Float32, MutUntrackedOrigin],  # (n_test, icl_dim)
         target: Pointer[Int, MutUntrackedOrigin],         # (n_train,)
         n_train: Int,
         n_test: Int,
@@ -1252,7 +1282,7 @@ struct TabICLInference(ImplicitlyCopyable, Movable, Writable):
         # ---- ColEmbedding: feature grouping + ISAB blocks ----
         # col_input is (n_train, group_size), apply in_linear to get (n_train, embed_dim)
         var col_embed = alloc[Float32](n_train * cfg.embed_dim + 16)
-        gemm_nn(n_train, cfg.embed_dim, cfg.col_feature_group_size, col_input, self.params + self._off_in_linear_w, col_embed)
+        gemm_nt(n_train, cfg.embed_dim, cfg.col_feature_group_size, col_input, self.params + self._off_in_linear_w, col_embed)
         var i = 0
         while i < n_train:
             var b = 0
@@ -1266,38 +1296,52 @@ struct TabICLInference(ImplicitlyCopyable, Movable, Writable):
 
         # Apply col ISAB blocks (3 blocks)
         var col_cur = col_embed
-        var col_ws = self.ws_col
+        # Per-call scratch: 6 buffers of n_train * embed_dim (reused per block)
+        var col_ws = alloc[Float32](n_train * cfg.embed_dim * 6 + 16)
+        var e = cfg.embed_dim
         var block_idx = 0
         while block_idx < cfg.col_num_blocks:
-            var attn_in = self.params + self._col_block_off_attn_in[block_idx]
-            var attn_out = self.params + self._col_block_off_attn_out[block_idx]
-            var ind_vec = self.params + self._col_block_off_ind_vectors[block_idx]
-            var ff_w1 = self.params + self._col_block_off_ff_w1[block_idx]
-            var ff_b1 = self.params + self._col_block_off_ff_b1[block_idx]
-            var ff_w2 = self.params + self._col_block_off_ff_w2[block_idx]
-            var ff_b2 = self.params + self._col_block_off_ff_b2[block_idx]
-            var ssmax_scales = self.params + self._col_block_off_ssmax_scales[block_idx]
+            # Within-block layout mirrors `block_stride`.
+            var blk = (
+                self._off_col_blocks
+                + block_idx
+                * block_stride(
+                    e, cfg.col_dim_feedforward(), True, cfg.col_num_inds,
+                    cfg.col_nhead, cfg.col_ssmax_elementwise,
+                )
+            )
+            var attn_in = self.params + blk
+            var attn_out = self.params + blk + 3 * e * e + 3 * e
+            var ind_vec = attn_out + e * e + e
+            var ff_w1 = ind_vec + cfg.col_num_inds * e
+            var ff_b1 = ff_w1 + e * cfg.col_dim_feedforward()
+            var ff_w2 = ff_b1 + cfg.col_dim_feedforward()
+            var ff_b2 = ff_w2 + cfg.col_dim_feedforward() * e
+            var ssmax_scales = ff_b2 + e
 
-            # Use workspace offsets: ws_col + block_idx * 6 * d_model
-            var ws_base = col_ws + block_idx * 6 * cfg.embed_dim
+            # Scratch slots of n_train * embed_dim each
+            var slot = n_train * cfg.embed_dim
+            var ws_base = col_ws
             var t1 = ws_base
-            var t2 = ws_base + cfg.embed_dim
-            var t3 = ws_base + 2 * cfg.embed_dim
-            var t4 = ws_base + 3 * cfg.embed_dim
-            var t5 = ws_base + 4 * cfg.embed_dim
-            var t6 = ws_base + 5 * cfg.embed_dim
+            var t2 = ws_base + slot
+            var t3 = ws_base + 2 * slot
+            var t4 = ws_base + 3 * slot
+            var t5 = ws_base + 4 * slot
+            var t6 = ws_base + 5 * slot
 
+            # Bias pointers point at the bias section of the packed in-proj.
             isab_forward(
                 col_cur, ind_vec, col_cur,
-                n_train, cfg.embed_dim, cfg.col_nhead, cfg.col_head_dim, cfg.col_dim_feedforward,
+                n_train, cfg.embed_dim, cfg.col_nhead, cfg.col_head_dim(), cfg.col_dim_feedforward(),
                 cfg.col_num_inds,
-                attn_in, self.params + self._off_in_linear_b, attn_out, self.params + self._off_in_linear_b,
-                attn_in, self.params + self._off_in_linear_b, attn_out, self.params + self._off_in_linear_b,
+                attn_in, attn_in + 3 * cfg.embed_dim * cfg.embed_dim, attn_out, attn_out + cfg.embed_dim * cfg.embed_dim,
+                attn_in, attn_in + 3 * cfg.embed_dim * cfg.embed_dim, attn_out, attn_out + cfg.embed_dim * cfg.embed_dim,
                 ff_w1, ff_b1, ff_w2, ff_b2,
                 cfg.bias_free_ln, ssmax_scales, cfg.col_ssmax_elementwise,
                 t1, t2, t3, t4, t5, t6,
             )
             block_idx += 1
+        col_ws.unsafe_free()
 
         # ---- RowInteraction: cls tokens + transformer blocks ----
         # row_input is (n_test, embed_dim), add cls tokens: (n_test, 1 + num_cls) -> (n_test, embed_dim)
@@ -1320,63 +1364,82 @@ struct TabICLInference(ImplicitlyCopyable, Movable, Writable):
             si += SIMDW
         while si < n_test * cfg.embed_dim:
             row_combined[si] = row_input[si]
-            si += SIMDW
+            si += 1
 
         # Apply row transformer blocks (3 blocks with RoPE)
         var row_cur = row_combined
-        var row_ws = self.ws_row
+        # Per-call scratch: 4 buffers of n_test * embed_dim
+        var row_ws = alloc[Float32](n_test * cfg.embed_dim * 4 + 16)
+        var rope_row = alloc[Float32](1024 + 16)
+        var rp = 0
+        while rp < 1024:
+            rope_row[rp] = Float32(
+                Float64(rp)
+                / (
+                    Float64(cfg.embed_dim // cfg.row_nhead)
+                    * cfg.row_rope_base
+                )
+            )
+            rp += 1
         block_idx = 0
         while block_idx < cfg.row_num_blocks:
-            var attn_in = self.params + self._row_block_off_attn_in[block_idx]
-            var attn_out = self.params + self._row_block_off_attn_out[block_idx]
-            var ff_w1 = self.params + self._row_block_off_ff_w1[block_idx]
-            var ff_b1 = self.params + self._row_block_off_ff_b1[block_idx]
-            var ff_w2 = self.params + self._row_block_off_ff_w2[block_idx]
-            var ff_b2 = self.params + self._row_block_off_ff_b2[block_idx]
-            var ssmax_scales = self.params + self._row_block_off_ssmax_scales[block_idx]
+            var blk = (
+                self._off_row_blocks
+                + block_idx
+                * block_stride(
+                    e, cfg.col_dim_feedforward(), False, 0,
+                    cfg.row_nhead, cfg.col_ssmax_elementwise,
+                )
+            )
+            var attn_in = self.params + blk
+            var attn_out = self.params + blk + 3 * e * e + 3 * e
+            var ff_w1 = attn_out + e * e + e
+            var ff_b1 = ff_w1 + e * cfg.col_dim_feedforward()
+            var ff_w2 = ff_b1 + cfg.col_dim_feedforward()
+            var ff_b2 = ff_w2 + cfg.col_dim_feedforward() * e
+            var ssmax_scales = ff_b2 + e
 
-            var ws_base = row_ws + block_idx * 6 * cfg.embed_dim
-            var t1 = ws_base
-            var t2 = ws_base + cfg.embed_dim
-            var t3 = ws_base + 2 * cfg.embed_dim
-            var t4 = ws_base + 3 * cfg.embed_dim
+            var slot = n_test * cfg.embed_dim
+            var t1 = row_ws
+            var t2 = row_ws + slot
+            var t3 = row_ws + 2 * slot
+            var t4 = row_ws + 3 * slot
 
-            # Use simplified self-attn without ISAB for row blocks
-            # For now, just use the self_attn_block_forward
+            # Simplified per-row self-attention (CLS-token aggregation and
+            # LayerNorm+flatten to icl_dim are not modelled yet).
             self_attn_block_forward(
                 row_cur, row_cur, n_test, cfg.embed_dim, cfg.row_nhead,
-                cfg.embed_dim // cfg.row_nhead, cfg.col_dim_feedforward,
-                attn_in, self.params + self._off_in_linear_b,
-                attn_out, self.params + self._off_in_linear_b,
+                cfg.embed_dim // cfg.row_nhead, cfg.col_dim_feedforward(),
+                attn_in, attn_in + 3 * cfg.embed_dim * cfg.embed_dim,
+                attn_out, attn_out + cfg.embed_dim * cfg.embed_dim,
                 ff_w1, ff_b1, ff_w2, ff_b2,
-                cfg.bias_free_ln, self.rope_freqs_col, ssmax_scales,
+                cfg.bias_free_ln, rope_row, ssmax_scales,
                 cfg.col_ssmax_elementwise,
                 t1, t2, t3, t4,
                 False, None, None,
             )
             block_idx += 1
+        row_ws.unsafe_free()
+        rope_row.unsafe_free()
 
         # ---- ICLearning ----
         # Build class embeddings: for each class, average the col_output rows where target == class
-        var class_embed = alloc[Float32](n_classes * cfg.icl_dim + 16)
+        var class_embed = alloc[Float32](cfg.max_classes * cfg.icl_dim + 16)
         var y_enc_w = self.params + self._off_icl_y_encoder_w
         var y_enc_b = self.params + self._off_icl_y_encoder_b
 
         # Zero out class embed
         si = 0
-        while si + SIMDW <= n_classes * cfg.icl_dim:
+        while si + SIMDW <= cfg.max_classes * cfg.icl_dim:
             class_embed.unsafe_store[width=SIMDW](si, SIMD[DType.float32, SIMDW](0.0))
             si += SIMDW
-        while si < n_classes * cfg.icl_dim:
+        while si < cfg.max_classes * cfg.icl_dim:
             class_embed[si] = 0.0
             si += 1
 
         # Count per class
-        var class_counts = alloc[Int](n_classes + 16)
+        var class_counts = alloc[Int](cfg.max_classes + 16)
         si = 0
-        while si + 8 <= n_classes:
-            class_counts.unsafe_store[width=8](si, SIMD[Int, 8](0))
-            si += 8
         while si < n_classes:
             class_counts[si] = 0
             si += 1
@@ -1385,7 +1448,7 @@ struct TabICLInference(ImplicitlyCopyable, Movable, Writable):
         i = 0
         while i < n_train:
             var c = Int(target[i])
-            if c >= 0 and c < n_classes:
+            if c >= 0 and c < cfg.max_classes:
                 var t = 0
                 while t + SIMDW <= cfg.embed_dim:
                     class_embed.unsafe_store[width=SIMDW](c * cfg.icl_dim + t, class_embed.unsafe_load[width=SIMDW](c * cfg.icl_dim + t) + SIMD[DType.float32, SIMDW](col_embed[i * cfg.embed_dim + t]))
@@ -1397,8 +1460,9 @@ struct TabICLInference(ImplicitlyCopyable, Movable, Writable):
             i += 1
 
         # Average
+        var nc = min(n_classes, cfg.max_classes)
         i = 0
-        while i < n_classes:
+        while i < nc:
             var cnt = Float32(class_counts[i])
             if cnt > 1.0:
                 var inv = 1.0 / cnt
@@ -1411,11 +1475,20 @@ struct TabICLInference(ImplicitlyCopyable, Movable, Writable):
                     t += 1
             i += 1
 
-        # Apply y_encoder linear
-        var y_encoded = alloc[Float32](n_classes * cfg.icl_dim + 16)
-        gemm_nn(n_classes, cfg.icl_dim, cfg.embed_dim, col_embed, y_enc_w, y_encoded)
+        # Apply y_encoder: a one-hot row picks out one weight row, so
+        # y_encoded[c, :] = y_enc_w[c, :] + y_enc_b (OneHotAndLinear).
+        var y_encoded = alloc[Float32](cfg.max_classes * cfg.icl_dim + 16)
+        si = 0
+        while si + SIMDW <= cfg.max_classes * cfg.icl_dim:
+            y_encoded.unsafe_store[width=SIMDW](
+                si, y_enc_w.unsafe_load[width=SIMDW](si)
+            )
+            si += SIMDW
+        while si < cfg.max_classes * cfg.icl_dim:
+            y_encoded[si] = y_enc_w[si]
+            si += 1
         i = 0
-        while i < n_classes:
+        while i < nc:
             var b = 0
             while b + SIMDW <= cfg.icl_dim:
                 y_encoded.unsafe_store[width=SIMDW](i * cfg.icl_dim + b, y_encoded.unsafe_load[width=SIMDW](i * cfg.icl_dim + b) + SIMD[DType.float32, SIMDW](y_enc_b[b]))
@@ -1427,37 +1500,46 @@ struct TabICLInference(ImplicitlyCopyable, Movable, Writable):
 
         # Apply ICL self-attention blocks
         var icl_cur = y_encoded
-        var icl_ws = self.ws_icl
+        # Per-call scratch: 4 buffers of max_classes * icl_dim
+        var icl_ws = alloc[Float32](cfg.max_classes * cfg.icl_dim * 4 + 16)
+        var d_icl = cfg.icl_dim
         block_idx = 0
         while block_idx < cfg.icl_num_blocks:
-            var attn_in = self.params + self._icl_block_off_attn_in[block_idx]
-            var attn_out = self.params + self._icl_block_off_attn_out[block_idx]
-            var ff_w1 = self.params + self._icl_block_off_ff_w1[block_idx]
-            var ff_b1 = self.params + self._icl_block_off_ff_b1[block_idx]
-            var ff_w2 = self.params + self._icl_block_off_ff_w2[block_idx]
-            var ff_b2 = self.params + self._icl_block_off_ff_b2[block_idx]
-            var ssmax_scales = self.params + self._icl_block_off_ssmax_scales[block_idx]
+            var blk = (
+                self._off_icl_blocks
+                + block_idx
+                * block_stride(
+                    d_icl, cfg.icl_dim_feedforward(), False, 0,
+                    cfg.icl_nhead, cfg.icl_ssmax_elementwise,
+                )
+            )
+            var attn_in = self.params + blk
+            var attn_out = self.params + blk + 3 * d_icl * d_icl + 3 * d_icl
+            var ff_w1 = attn_out + d_icl * d_icl + d_icl
+            var ff_b1 = ff_w1 + d_icl * cfg.icl_dim_feedforward()
+            var ff_w2 = ff_b1 + cfg.icl_dim_feedforward()
+            var ff_b2 = ff_w2 + cfg.icl_dim_feedforward() * d_icl
+            var ssmax_scales = ff_b2 + d_icl
 
-            var ws_base = icl_ws + block_idx * 6 * cfg.icl_dim
-            var t1 = ws_base
-            var t2 = ws_base + cfg.icl_dim
-            var t3 = ws_base + 2 * cfg.icl_dim
-            var t4 = ws_base + 3 * cfg.icl_dim
-            var t5 = ws_base + 4 * cfg.icl_dim
-            var t6 = ws_base + 5 * cfg.icl_dim
+            var slot = cfg.max_classes * cfg.icl_dim
+            var t1 = icl_ws
+            var t2 = icl_ws + slot
+            var t3 = icl_ws + 2 * slot
+            var t4 = icl_ws + 3 * slot
 
             self_attn_block_forward(
-                icl_cur, icl_cur, n_classes, cfg.icl_dim, cfg.icl_nhead,
-                cfg.icl_head_dim, cfg.icl_dim_feedforward,
-                attn_in, self.params + self._off_in_linear_b,
-                attn_out, self.params + self._off_in_linear_b,
+                icl_cur, icl_cur, cfg.max_classes, cfg.icl_dim, cfg.icl_nhead,
+                cfg.icl_head_dim(), cfg.icl_dim_feedforward(),
+                attn_in, attn_in + 3 * cfg.icl_dim * cfg.icl_dim,
+                attn_out, attn_out + cfg.icl_dim * cfg.icl_dim,
                 ff_w1, ff_b1, ff_w2, ff_b2,
-                cfg.bias_free_ln, self.rope_freqs_icl, ssmax_scales,
+                cfg.bias_free_ln, None, ssmax_scales,
                 cfg.icl_ssmax_elementwise,
-                t1, t2, t3, t4, t5, t6,
+                t1, t2, t3, t4,
                 False, None, None,
             )
             block_idx += 1
+        icl_ws.unsafe_free()
 
         # Decoder: icl_cur (n_classes, icl_dim) -> output (n_test, out_dim)
         # For each test row, compute attention over class embeddings, then decode
@@ -1471,11 +1553,11 @@ struct TabICLInference(ImplicitlyCopyable, Movable, Writable):
         var ln_w = self.params + self._off_ln_w
         var ln_b = self.params + self._off_ln_b
 
-        # Project: icl_cur @ decoder_w1.T + decoder_b1 -> (n_classes, icl_dim*2)
-        var decoded = alloc[Float32](n_classes * cfg.icl_dim * 2 + 16)
-        gemm_nn(n_classes, cfg.icl_dim * 2, cfg.icl_dim, icl_cur, decoder_w1, decoded)
+        # Project: icl_cur @ decoder_w1.T + decoder_b1 -> (cfg.max_classes, icl_dim*2)
+        var decoded = alloc[Float32](cfg.max_classes * cfg.icl_dim * 2 + 16)
+        gemm_nt(cfg.max_classes, cfg.icl_dim * 2, cfg.icl_dim, icl_cur, decoder_w1, decoded)
         i = 0
-        while i < n_classes:
+        while i < cfg.max_classes:
             var b = 0
             while b + SIMDW <= cfg.icl_dim * 2:
                 decoded.unsafe_store[width=SIMDW](i * cfg.icl_dim * 2 + b, decoded.unsafe_load[width=SIMDW](i * cfg.icl_dim * 2 + b) + SIMD[DType.float32, SIMDW](decoder_b1[b]))
@@ -1487,21 +1569,21 @@ struct TabICLInference(ImplicitlyCopyable, Movable, Writable):
 
         # GELU
         i = 0
-        while i < n_classes:
+        while i < cfg.max_classes:
             var b = 0
             while b + SIMDW <= cfg.icl_dim * 2:
-                decoded.unsafe_store[width=SIMDW](i * cfg.icl_dim * 2 + b, gelu(decoded.unsafe_load[width=SIMDW](i * cfg.icl_dim * 2 + b)))
+                decoded.unsafe_store[width=SIMDW](i * cfg.icl_dim * 2 + b, gelu8(decoded.unsafe_load[width=SIMDW](i * cfg.icl_dim * 2 + b)))
                 b += SIMDW
             while b < cfg.icl_dim * 2:
-                decoded[i * cfg.icl_dim * 2 + b] = gelu(decoded[i * cfg.icl_dim * 2 + b])
+                decoded[i * cfg.icl_dim * 2 + b] = gelu_scalar(decoded[i * cfg.icl_dim * 2 + b])
                 b += 1
             i += 1
 
-        # Final projection: @ decoder_w2.T + decoder_b2 -> (n_classes, out_dim)
-        var logits = alloc[Float32](n_classes * cfg.out_dim + 16)
-        gemm_nn(n_classes, cfg.out_dim, cfg.icl_dim * 2, decoded, decoder_w2, logits)
+        # Final projection: @ decoder_w2.T + decoder_b2 -> (cfg.max_classes, out_dim)
+        var logits = alloc[Float32](cfg.max_classes * cfg.out_dim + 16)
+        gemm_nt(cfg.max_classes, cfg.out_dim, cfg.icl_dim * 2, decoded, decoder_w2, logits)
         i = 0
-        while i < n_classes:
+        while i < cfg.max_classes:
             var b = 0
             while b + SIMDW <= cfg.out_dim:
                 logits.unsafe_store[width=SIMDW](i * cfg.out_dim + b, logits.unsafe_load[width=SIMDW](i * cfg.out_dim + b) + SIMD[DType.float32, SIMDW](decoder_b2[b]))
@@ -1517,10 +1599,19 @@ struct TabICLInference(ImplicitlyCopyable, Movable, Writable):
         # This follows the _aggregate pattern from _model_torch.py
 
         # Compute similarity between test row and class embeddings
-        # row_cur is (n_test, embed_dim), class_embed is (n_classes, icl_dim)
+        # row_cur is (n_test, embed_dim), class_embed is (cfg.max_classes, icl_dim)
         # Need to project test rows to icl_dim space first
+        # NOTE: scaffold projection — the reference model concatenates CLS
+        # tokens and applies a LayerNorm here; we only add the LN bias so the
+        # buffer stays bounds-safe until the staged pipeline is ported.
         var test_proj = alloc[Float32](n_test * cfg.icl_dim + 16)
-        gemm_nn(n_test, cfg.icl_dim, cfg.embed_dim, row_cur, ln_w, test_proj)
+        si = 0
+        while si + SIMDW <= n_test * cfg.icl_dim:
+            test_proj.unsafe_store[width=SIMDW](si, SIMD[DType.float32, SIMDW](0.0))
+            si += SIMDW
+        while si < n_test * cfg.icl_dim:
+            test_proj[si] = 0.0
+            si += 1
         i = 0
         while i < n_test:
             var b = 0
@@ -1532,35 +1623,35 @@ struct TabICLInference(ImplicitlyCopyable, Movable, Writable):
                 b += 1
             i += 1
 
-        # Attention: test_proj (n_test, icl_dim) @ class_embed^T (icl_dim, n_classes) -> (n_test, n_classes)
-        var attn_scores = alloc[Float32](n_test * n_classes + 16)
-        gemm_nt(n_test, n_classes, cfg.icl_dim, test_proj, class_embed, attn_scores)
+        # Attention: test_proj (n_test, icl_dim) @ class_embed^T (icl_dim, cfg.max_classes) -> (n_test, cfg.max_classes)
+        var attn_scores = alloc[Float32](n_test * cfg.max_classes + 16)
+        gemm_nt(n_test, cfg.max_classes, cfg.icl_dim, test_proj, class_embed, attn_scores)
 
         # Softmax over classes for each test row
         i = 0
         while i < n_test:
             var mx: Float32 = -1e9
             var c = 0
-            while c < n_classes:
-                var v = attn_scores[i * n_classes + c]
+            while c < cfg.max_classes:
+                var v = attn_scores[i * cfg.max_classes + c]
                 if v > mx:
                     mx = v
                 c += 1
             var sum_v: Float32 = 0.0
             c = 0
-            while c < n_classes:
-                var e = exp(attn_scores[i * n_classes + c] - mx)
-                attn_scores[i * n_classes + c] = e
+            while c < cfg.max_classes:
+                var e = exp(attn_scores[i * cfg.max_classes + c] - mx)
+                attn_scores[i * cfg.max_classes + c] = e
                 sum_v += e
                 c += 1
             c = 0
-            while c < n_classes:
-                attn_scores[i * n_classes + c] /= sum_v
+            while c < cfg.max_classes:
+                attn_scores[i * cfg.max_classes + c] /= sum_v
                 c += 1
             i += 1
 
-        # Weighted sum of logits: (n_test, n_classes) @ (n_classes, out_dim) -> (n_test, out_dim)
-        gemm_nn(n_test, cfg.out_dim, n_classes, attn_scores, logits, output)
+        # Weighted sum of logits: (n_test, cfg.max_classes) @ (cfg.max_classes, out_dim) -> (n_test, out_dim)
+        gemm_nn(n_test, cfg.out_dim, cfg.max_classes, attn_scores, logits, output)
 
         # Free allocations
         col_embed.unsafe_free()
@@ -1580,80 +1671,16 @@ struct TabICLInference(ImplicitlyCopyable, Movable, Writable):
 # =============================================================================
 
 
-def create_inference(config: PythonObject, param_data: PythonObject) raises -> PythonObject:
-    """Create a TabICLInference instance from Python."""
-    var inst = TabICLInference(config, param_data)
-    return Python.bindings.create_instance(inst)
-
-
-def inference_forward(
-    inst: PythonObject,
-    col_input: PythonObject,
-    row_input: PythonObject,
-    target: PythonObject,
-) raises -> PythonObject:
-    """Run forward pass and return output as NumPy array."""
-    var inference = Python.bindings.get_instance[TabICLInference](inst)
-
-    var cfg = inference.config
-    var n_train = iface_dim(col_input, 0)
-    var n_test = iface_dim(row_input, 0)
-    var n_classes = iface_dim(target, 0)
-
-    # Get data pointers
-    var col_ptr = ptr_f32(col_input)
-    var row_ptr = ptr_f32(row_input)
-    var target_ptr = ptr_i64(target)
-
-    # Allocate output buffer
-    var out_size = n_test * cfg.out_dim
-    var out_buf = alloc[Float32](out_size + 16)
-
-    var status = inference.forward(col_ptr, row_ptr, target_ptr, n_train, n_test, n_classes, out_buf)
-
-    if status != 0:
-        raise Exception("Forward pass failed with status " + String(status))
-
-    # Create NumPy array from buffer
-    var np = np_module()
-    var out_arr = np.frombuffer(out_buf, dtype=np.float32).reshape(n_test, cfg.out_dim)
-    out_buf.unsafe_free()
-
-    return out_arr
-
-
-def inference_size(inst: PythonObject) -> Int:
-    """Return parameter count."""
-    var inference = Python.bindings.get_instance[TabICLInference](inst)
-    return inference.P
-
-
-def inference_delete(inst: PythonObject):
-    """Free inference resources."""
-    var inference = Python.bindings.get_instance[TabICLInference](inst)
-    inference.unsafe_free()
-
-
-def main() raises -> PythonObject:
-    """Create and return the _native_tabicl Python module."""
-    var m = PythonModuleBuilder("_native_tabicl")
-
-    _ = (
-        m.add_type[TabICLInference]("TabICLInference")
-        .def_py_init[TabICLInference.py_init]()
-        .def_method[TabICLInference.forward]("forward")
-        .def_method[TabICLInference.param_count]("param_count")
-    )
-
-    m.add_function("create_inference", create_inference)
-    m.add_function("forward", inference_forward)
-    m.add_function("param_count", inference_size)
-    m.add_function("delete", inference_delete)
-
-    var mod = m.finalize()
-
-    var np = Python.import_module("numpy")
-    var builtins = Python.import_module("builtins")
-    builtins.setattr(mod, "DTYPE", np.dtype(np.float32))
-
-    return mod
+@export
+def PyInit__native_tabicl() abi("C") -> PythonObject:
+    try:
+        var m = PythonModuleBuilder("_native_tabicl")
+        _ = (
+            m.add_type[TabICLInference]("TabICLInference")
+            .def_py_init[TabICLInference.py_init]()
+            .def_method[TabICLInference.forward]("forward")
+            .def_method[TabICLInference.param_count]("param_count")
+        )
+        return m.finalize()
+    except e:
+        abort(String("failed to create module _native_tabicl: ", e))

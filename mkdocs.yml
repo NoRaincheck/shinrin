@@ -34,6 +34,7 @@ nav:
       - GOSDT Optimal Trees: models/gosdt.md
       - TabM: models/tabm.md
       - MLP: models/mlp.md
+      - TabICL: models/tabicl.md
   - Features:
       - TreeSHAP Explanations: features/treeshap-explanations.md
       - ONNX Export: features/onnx-export.md

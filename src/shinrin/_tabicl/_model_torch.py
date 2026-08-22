@@ -766,8 +766,11 @@ class TabICLNet(nn.Module):
 class TabICLTorchModel:
     """Inference wrapper around :class:`TabICLNet` loading converted weights."""
 
-    def __init__(self, config: TabICLConfig, params: dict[str, np.ndarray]) -> None:
+    def __init__(
+        self, config: TabICLConfig, params: dict[str, np.ndarray], device=None
+    ) -> None:
         self.config = config
+        self.device = torch.device(device or "cpu")
         self.net = TabICLNet(config)
         state = {
             name: torch.from_numpy(np.asarray(arr, dtype=np.float32))
@@ -775,16 +778,27 @@ class TabICLTorchModel:
         }
         self.net.load_state_dict(state, strict=True)
         self.net.eval()
+        if self.device.type != "cpu":
+            self.net.to(self.device)
+
+    @staticmethod
+    def _to_numpy(t: Tensor) -> np.ndarray:
+        return t.detach().cpu().numpy()
+
+    def _tensor(self, arr: np.ndarray) -> Tensor:
+        return torch.from_numpy(np.ascontiguousarray(arr, dtype=np.float32)).to(
+            self.device
+        )
 
     @torch.no_grad()
     def representations(self, X: np.ndarray, y_train: np.ndarray) -> np.ndarray:
         """Column embedding + row interaction. Returns (1, T, D) array."""
-        x = torch.from_numpy(np.ascontiguousarray(X, dtype=np.float32)).unsqueeze(0)
-        y = torch.from_numpy(np.asarray(y_train, dtype=np.float32)).unsqueeze(0)
+        x = self._tensor(X).unsqueeze(0)
+        y = self._tensor(y_train).unsqueeze(0)
         train_size = y.shape[1]
         emb = self.net.col_embedder(x, y, train_size)
         rep = self.net.row_interactor(emb)
-        return rep.numpy()
+        return self._to_numpy(rep)
 
     @torch.no_grad()
     def predict_from_representations(
@@ -800,8 +814,8 @@ class TabICLTorchModel:
         (test_size, num_quantiles) raw quantiles for regression.
         """
         cfg = self.config
-        r = torch.from_numpy(np.ascontiguousarray(R, dtype=np.float32))
-        y = torch.from_numpy(np.asarray(y_train, dtype=np.float32))
+        r = self._tensor(R)
+        y = self._tensor(y_train)
         if y.ndim == 1:
             y = y.unsqueeze(0)
         train_size = y.shape[1]
@@ -811,7 +825,7 @@ class TabICLTorchModel:
             out = self.net.icl_predictor.predict_standard(
                 r, y, return_logits=return_logits, temperature=temperature
             ).squeeze(0)
-            return out.numpy()
+            return self._to_numpy(out)
 
         root = fit_hierarchical_tree(R[0, :train_size], y_train, cfg.max_classes)
         probs = self.net.icl_predictor.predict_hierarchical(
@@ -819,7 +833,7 @@ class TabICLTorchModel:
         )
         if return_logits:
             probs = temperature * torch.log(probs + 1e-6)
-        return probs.numpy()
+        return self._to_numpy(probs)
 
     @torch.no_grad()
     def build_cache(self, X: np.ndarray, y_train: np.ndarray) -> dict:
@@ -829,8 +843,8 @@ class TabICLTorchModel:
         training data (post target-addition), and ICL K/V per layer.
         """
         cfg = self.config
-        x = torch.from_numpy(np.ascontiguousarray(X, dtype=np.float32)).unsqueeze(0)
-        y = torch.from_numpy(np.asarray(y_train, dtype=np.float32)).unsqueeze(0)
+        x = self._tensor(X).unsqueeze(0)
+        y = self._tensor(y_train).unsqueeze(0)
         train_size = y.shape[1]
 
         net = self.net
@@ -897,9 +911,7 @@ class TabICLTorchModel:
         fit time); many-class hierarchical prediction bypasses the cache.
         """
         cfg = self.config
-        x = torch.from_numpy(np.ascontiguousarray(X_test, dtype=np.float32)).unsqueeze(
-            0
-        )
+        x = self._tensor(X_test).unsqueeze(0)
         net = self.net
         col = net.col_embedder
 
@@ -931,12 +943,12 @@ class TabICLTorchModel:
         decoded = icl.decoder(r_out).squeeze(0)
 
         if cfg.max_classes == 0:
-            return decoded.numpy()
+            return self._to_numpy(decoded)
         num_classes = int(cache.get("num_classes", decoded.shape[-1]))
         decoded = decoded[:, :num_classes]
         if not return_logits:
             decoded = torch.softmax(decoded / temperature, dim=-1)
-        return decoded.numpy()
+        return self._to_numpy(decoded)
 
     def forward(
         self,
