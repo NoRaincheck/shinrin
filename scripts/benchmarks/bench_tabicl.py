@@ -98,7 +98,9 @@ def bench_case(task: str, n_samples: int, n_features: int, args) -> None:
         "batch_size": args.batch_size,
     }
     model = (
-        TabICLRegressor(**common) if task == "regression" else TabICLClassifier(**common)
+        TabICLRegressor(**common)
+        if task == "regression"
+        else TabICLClassifier(**common)
     )
 
     fit_time = predict_time = fit_std = predict_std = float("nan")
@@ -147,10 +149,10 @@ def _mojo_child(
 ) -> None:
     """Time ONE raw Mojo forward pass and exit.
 
-    Each timed sample therefore runs in a pristine process: the kernels
-    still have a known memory-corruption issue whose manifestation depends
-    on heap layout (see TABICL_BENCHMARK.md), so isolating every forward
-    keeps repeated sampling meaningful.
+    Each timed sample runs in a pristine process: earlier kernel builds
+    suffered heap corruption whose manifestation depended on process state
+    (see TABICL_BENCHMARK.md), so isolation keeps any recurrence contained
+    and survivor counts meaningful.
     """
     import time as _time
 
@@ -172,8 +174,9 @@ def bench_mojo(args) -> None:
 
     The Mojo backend only exposes a single end-to-end ``forward`` and the
     kernels are a reduced scaffold (see TABICL_BENCHMARK.md), so each Mojo
-    cell is timed inside a throwaway subprocess: the sweep survives the
-    memory corruption the kernels still exhibit at larger inputs.
+    cell is timed inside a throwaway subprocess: any recurrence of the
+    (now-fixed) heap corruption stays contained and survivor counts
+    (samples/attempts) stay honest.
     """
     import multiprocessing as mp
 
@@ -210,11 +213,13 @@ def bench_mojo(args) -> None:
         cells = []
 
         # Mojo: one sample per child process; retry until enough samples
-        # survive (crashes are expected and contained) or attempts run out.
+        # survive or attempts run out.
         samples: list[float] = []
+        attempts = 0
         for _ in range(args.repeat * 8):
             if len(samples) >= args.repeat:
                 break
+            attempts += 1
             q = ctx.Queue()
             proc = ctx.Process(
                 target=_mojo_child,
@@ -226,11 +231,12 @@ def bench_mojo(args) -> None:
                 samples.append(float(q.get()))
             else:
                 proc.terminate()
+                if proc.exitcode is None:
+                    proc.join(timeout=60)
         if samples:
             arr = np.asarray(samples)
             cells.append(
-                f"mojo {arr.mean():.3f}s ±{arr.std():.3f} "
-                f"(n={len(samples)}/{args.repeat * 8})"
+                f"mojo {arr.mean():.3f}s ±{arr.std():.3f} (n={len(samples)}/{attempts})"
             )
         else:
             cells.append("mojo CRASHED")
@@ -238,7 +244,10 @@ def bench_mojo(args) -> None:
         X, y_train = _kernel_inputs(n_train, n_test, args.n_features, n_classes)
         for dev, model in torch_models.items():
             cells.append(
-                time_cell(f"torch-{dev}", lambda m=model: m.forward(X, y_train))
+                time_cell(
+                    f"torch-{dev}",
+                    lambda m=model, x=X, y=y_train: m.forward(x, y),
+                )
             )
         print(f"  train {n_train:>5} x test {n_test:<4} " + " | ".join(cells))
 
@@ -284,9 +293,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--quick", action="store_true", help="small grid")
     parser.add_argument("--repeat", type=int, default=3, help="timed repeats")
-    parser.add_argument(
-        "--n-estimators", type=int, default=8, help="ensemble members"
-    )
+    parser.add_argument("--n-estimators", type=int, default=8, help="ensemble members")
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--kv-cache", action="store_true")
     parser.add_argument(
@@ -320,8 +327,10 @@ def main() -> None:
         sizes = [(300, 10), (1000, 10), (1000, 100), (5000, 100)]
     tasks = ["classification", "regression", "mixed categorical"]
 
-    print(f"TabICL benchmark (backend={'torch' if args.torch else 'numpy'}, "
-          f"n_estimators={args.n_estimators}, kv_cache={args.kv_cache})")
+    print(
+        f"TabICL benchmark (backend={'torch' if args.torch else 'numpy'}, "
+        f"n_estimators={args.n_estimators}, kv_cache={args.kv_cache})"
+    )
     for n_samples, n_features in sizes:
         print(f"\n--- dataset {n_samples} x {n_features} ---")
         for task in tasks:
