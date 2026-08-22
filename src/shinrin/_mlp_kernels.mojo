@@ -740,34 +740,95 @@ struct MLPTrainer(ImplicitlyCopyable, Movable, Writable):
             var act = ws.act_ptr(i)
             var der = ws.der_ptr(i)
             var msk = ws.msk_ptr(i)
-            var total = b * fout
-            var idx = 0
-            while idx < total:
-                var zv = z[idx] + bias[idx % fout]
-                if i < n_hidden:
-                    var av = act_apply(self.act_code, zv)
-                    var dv = Float32(1.0)
-                    if use_dropout:
-                        if nbits < 8:
-                            bits = rng.next_u64()
-                            nbits = 64
-                        dv = keep if ((bits >> 56) & 0xFF) >= thresh else 0.0
-                        bits <<= 8
-                        nbits -= 8
-                    msk[idx] = dv
-                    der[idx] = act_deriv(self.act_code, zv)
-                    act[idx] = av * dv
-                else:
-                    msk[idx] = 1.0
-                    der[idx] = 1.0
-                    act[idx] = zv
-                idx += 1
+            var n_hidden_local = self.nl - 1
+            var is_hidden = i < n_hidden_local
+            var row = 0
+            while row < b:
+                var base = row * fout
+                var j = 0
+                # Vectorized fast path: relu/identity without dropout are pure
+                # SIMD ops; other activations still benefit from the layout.
+                while j + SIMDW <= fout:
+                    var idx2 = base + j
+                    if not is_hidden:
+                        var zv2 = (
+                            z.unsafe_load[width=SIMDW](idx2)
+                            + bias.unsafe_load[width=SIMDW](j)
+                        )
+                        msk.unsafe_store[width=SIMDW](idx2, SIMD[DType.float32, SIMDW](1.0))
+                        der.unsafe_store[width=SIMDW](idx2, SIMD[DType.float32, SIMDW](1.0))
+                        act.unsafe_store[width=SIMDW](idx2, zv2)
+                    elif self.act_code == 3 and not use_dropout:
+                        var zv3 = (
+                            z.unsafe_load[width=SIMDW](idx2)
+                            + bias.unsafe_load[width=SIMDW](j)
+                        )
+                        var ones = SIMD[DType.float32, SIMDW](1.0)
+                        var zeros = SIMD[DType.float32, SIMDW](0.0)
+                        var dv3 = SIMD[DType.float32, SIMDW](0.0)
+                        comptime for lane in range(SIMDW):
+                            dv3[lane] = 1.0 if zv3[lane] > 0.0 else 0.0
+                        msk.unsafe_store[width=SIMDW](idx2, ones)
+                        der.unsafe_store[width=SIMDW](idx2, dv3)
+                        act.unsafe_store[width=SIMDW](idx2, max(zv3, zeros))
+                    else:
+                        var l = 0
+                        while l < SIMDW:
+                            var idx3 = idx2 + l
+                            var zv = z[idx3] + bias[j + l]
+                            if not is_hidden:
+                                msk[idx3] = 1.0
+                                der[idx3] = 1.0
+                                act[idx3] = zv
+                            else:
+                                var av = act_apply(self.act_code, zv)
+                                var dv = Float32(1.0)
+                                if use_dropout:
+                                    if nbits < 8:
+                                        bits = rng.next_u64()
+                                        nbits = 64
+                                    dv = keep if ((bits >> 56) & 0xFF) >= thresh else 0.0
+                                    bits <<= 8
+                                    nbits -= 8
+                                msk[idx3] = dv
+                                der[idx3] = act_deriv(self.act_code, zv)
+                                act[idx3] = av * dv
+                            l += 1
+                    j += SIMDW
+                while j < fout:
+                    var idx4 = base + j
+                    var zv = z[idx4] + bias[j]
+                    if not is_hidden:
+                        msk[idx4] = 1.0
+                        der[idx4] = 1.0
+                        act[idx4] = zv
+                    else:
+                        var av = act_apply(self.act_code, zv)
+                        var dv = Float32(1.0)
+                        if use_dropout:
+                            if nbits < 8:
+                                bits = rng.next_u64()
+                                nbits = 64
+                            dv = keep if ((bits >> 56) & 0xFF) >= thresh else 0.0
+                            bits <<= 8
+                            nbits -= 8
+                        msk[idx4] = dv
+                        der[idx4] = act_deriv(self.act_code, zv)
+                        act[idx4] = av * dv
+                    j += 1
+                row += 1
             # stash raw predictions of the final layer in ws.preds
             if i == self.nl - 1:
-                idx = 0
-                while idx < total:
-                    ws.preds[idx] = act[idx]
-                    idx += 1
+                var n_out = b * fout
+                var cpy = 0
+                while cpy + SIMDW <= n_out:
+                    ws.preds.unsafe_store[width=SIMDW](
+                        cpy, act.unsafe_load[width=SIMDW](cpy)
+                    )
+                    cpy += SIMDW
+                while cpy < n_out:
+                    ws.preds[cpy] = act[cpy]
+                    cpy += 1
             i += 1
 
     def forward_chunk(
@@ -1304,7 +1365,15 @@ def run_round(
     Returns the loss SUM over those rows; accumulates every worker's
     gradients into g_out. Deterministic for fixed nthreads and seeds.
     """
-    var T = min(nthreads, nrows_total)
+    var T = nthreads
+    # Scale threads with the round size: spawn/sync costs dominate small
+    # minibatch GEMMs, so give each worker at least ~64 rows.
+    if nrows_total > 0:
+        var by_rows = (nrows_total + 63) // 64
+        if by_rows < T:
+            T = by_rows
+    if nrows_total < 128:
+        T = 1
     if T < 1:
         T = 1
     var rows_per = (nrows_total + T - 1) // T
