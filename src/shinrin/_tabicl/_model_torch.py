@@ -569,7 +569,7 @@ class ColEmbedding(nn.Module):
             if cfg.max_classes > 0:
                 y_emb = self.y_encoder(y_train.float())
             else:
-                y_emb = self.y_encoder(y_train.unsqueeze(-1))
+                y_emb = self.y_encoder(y_train.unsqueeze(-1).float())
             src[..., :train_size, :] = src[..., :train_size, :] + y_emb
             return self.tf_col(src, train_size=train_size)
 
@@ -780,7 +780,7 @@ class TabICLTorchModel:
     def representations(self, X: np.ndarray, y_train: np.ndarray) -> np.ndarray:
         """Column embedding + row interaction. Returns (1, T, D) array."""
         x = torch.from_numpy(np.ascontiguousarray(X, dtype=np.float32)).unsqueeze(0)
-        y = torch.from_numpy(np.asarray(y_train)).unsqueeze(0)
+        y = torch.from_numpy(np.asarray(y_train, dtype=np.float32)).unsqueeze(0)
         train_size = y.shape[1]
         emb = self.net.col_embedder(x, y, train_size)
         rep = self.net.row_interactor(emb)
@@ -801,7 +801,7 @@ class TabICLTorchModel:
         """
         cfg = self.config
         r = torch.from_numpy(np.ascontiguousarray(R, dtype=np.float32))
-        y = torch.from_numpy(np.asarray(y_train))
+        y = torch.from_numpy(np.asarray(y_train, dtype=np.float32))
         if y.ndim == 1:
             y = y.unsqueeze(0)
         train_size = y.shape[1]
@@ -830,7 +830,7 @@ class TabICLTorchModel:
         """
         cfg = self.config
         x = torch.from_numpy(np.ascontiguousarray(X, dtype=np.float32)).unsqueeze(0)
-        y = torch.from_numpy(np.asarray(y_train)).unsqueeze(0)
+        y = torch.from_numpy(np.asarray(y_train, dtype=np.float32)).unsqueeze(0)
         train_size = y.shape[1]
 
         net = self.net

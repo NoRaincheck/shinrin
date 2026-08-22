@@ -13,7 +13,6 @@ backend is selected via the ``backend`` parameter or the
 from __future__ import annotations
 
 from collections import OrderedDict
-from typing import Optional, Union
 
 import numpy as np
 from sklearn.base import BaseEstimator, ClassifierMixin, RegressorMixin
@@ -34,14 +33,16 @@ REGRESSOR_CHECKPOINT = "tabicl-regressor-v2-20260212.ckpt"
 DEFAULT_ALPHAS = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
 
 
-def _softmax(logits: np.ndarray, axis: int = -1, temperature: float = 1.0) -> np.ndarray:
+def _softmax(
+    logits: np.ndarray, axis: int = -1, temperature: float = 1.0
+) -> np.ndarray:
     z = logits / temperature
     z = z - z.max(axis=axis, keepdims=True)
     e = np.exp(z)
     return e / e.sum(axis=axis, keepdims=True)
 
 
-def _detect_feature_mask(X) -> Optional[np.ndarray]:
+def _detect_feature_mask(X) -> np.ndarray | None:
     """Boolean mask of all-NaN columns (used for SHAP-style masking)."""
     if hasattr(X, "columns"):
         mask = X.isna().all(axis=0).to_numpy()
@@ -50,7 +51,7 @@ def _detect_feature_mask(X) -> Optional[np.ndarray]:
         if np.issubdtype(arr.dtype, np.number):
             mask = np.isnan(arr).all(axis=0)
         else:
-            mask = np.array([all(v != v for v in arr[:, i]) for i in range(arr.shape[1])])
+            mask = np.array([np.isnan(arr[:, i]).all() for i in range(arr.shape[1])])
     if not np.any(mask):
         return None
     return mask
@@ -68,7 +69,7 @@ class _TabICLBase(BaseEstimator):
         checkpoint_version: str = CLASSIFIER_CHECKPOINT,
         model_path=None,
         allow_auto_download: bool = True,
-        random_state: Union[int, None] = 42,
+        random_state: int | None = 42,
         verbose: bool = False,
         backend: str = "auto",
     ) -> None:
@@ -191,7 +192,7 @@ class TabICLClassifier(ClassifierMixin, _TabICLBase):
         checkpoint_version: str = CLASSIFIER_CHECKPOINT,
         model_path=None,
         allow_auto_download: bool = True,
-        random_state: Union[int, None] = 42,
+        random_state: int | None = 42,
         verbose: bool = False,
         backend: str = "auto",
     ) -> None:
@@ -231,10 +232,7 @@ class TabICLClassifier(ClassifierMixin, _TabICLBase):
                 f"({self.n_classes_}) exceeds the max number of classes "
                 f"({self.max_classes_}) natively supported by the model."
             )
-        if (
-            self.n_classes_ > self.max_classes_
-            and not self.support_many_classes
-        ):
+        if self.n_classes_ > self.max_classes_ and not self.support_many_classes:
             raise ValueError(
                 f"The number of classes ({self.n_classes_}) exceeds the max "
                 f"number ({self.max_classes_}) natively supported. Enable "
@@ -261,8 +259,7 @@ class TabICLClassifier(ClassifierMixin, _TabICLBase):
             train_data = self.ensemble_generator_.transform(X=None, mode="train")
             for norm_method, (Xs, ys) in train_data.items():
                 self.model_kv_cache_[norm_method] = [
-                    self.model_.build_cache(Xs[i], ys[i])
-                    for i in range(Xs.shape[0])
+                    self.model_.build_cache(Xs[i], ys[i]) for i in range(Xs.shape[0])
                 ]
         return self
 
@@ -290,7 +287,7 @@ class TabICLClassifier(ClassifierMixin, _TabICLBase):
         else:
             for _method, (Xs, ys) in eg.transform(
                 X, mode="both", feature_mask=feature_mask
-            ).items():
+            ).values():
                 for i in range(Xs.shape[0]):
                     R = self.model_.representations(Xs[i], ys[i])
                     outputs.append(
@@ -353,7 +350,7 @@ class TabICLRegressor(RegressorMixin, _TabICLBase):
         checkpoint_version: str = REGRESSOR_CHECKPOINT,
         model_path=None,
         allow_auto_download: bool = True,
-        random_state: Union[int, None] = 42,
+        random_state: int | None = 42,
         verbose: bool = False,
         backend: str = "auto",
     ) -> None:
@@ -401,8 +398,7 @@ class TabICLRegressor(RegressorMixin, _TabICLBase):
             train_data = self.ensemble_generator_.transform(X=None, mode="train")
             for norm_method, (Xs, ys) in train_data.items():
                 self.model_kv_cache_[norm_method] = [
-                    self.model_.build_cache(Xs[i], ys[i])
-                    for i in range(Xs.shape[0])
+                    self.model_.build_cache(Xs[i], ys[i]) for i in range(Xs.shape[0])
                 ]
         return self
 
@@ -425,19 +421,17 @@ class TabICLRegressor(RegressorMixin, _TabICLBase):
         else:
             for _method, (Xs, ys) in eg.transform(
                 X, mode="both", feature_mask=feature_mask
-            ).items():
+            ).values():
                 for i in range(Xs.shape[0]):
                     R = self.model_.representations(Xs[i], ys[i])
-                    outputs.append(
-                        self.model_.predict_from_representations(R, ys[i])
-                    )
+                    outputs.append(self.model_.predict_from_representations(R, ys[i]))
         return np.stack(outputs, axis=0)
 
     def predict(
         self,
         X,
-        output_type: Union[str, list[str]] = "mean",
-        alphas: Optional[list[float]] = None,
+        output_type: str | list[str] = "mean",
+        alphas: list[float] | None = None,
     ):
         """Predict target statistics on the original scale.
 
