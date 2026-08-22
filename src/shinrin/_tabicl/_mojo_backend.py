@@ -25,8 +25,78 @@ import numpy as np
 
 from ._backend import get_tabicl_native
 from ._config import TabICLConfig
+from ._mojo_layout import canonical_tensor_specs, pack_params
 
 SKIP_VALUE = -100.0
+
+
+def expected_layout_offsets(config: TabICLConfig) -> list[int]:
+    """Offsets the native kernel's layout walk must produce for ``config``.
+
+    Derived purely from :func:`canonical_tensor_specs` and compared against
+    ``TabICLInference.layout_offsets()`` at construction time. Element order
+    matches ``_tabicl_kernels.mojo``; bias-free LayerNorms and disabled
+    y-encoders report ``0`` on both sides.
+    """
+    off: dict[str, int] = {}
+    cur = 0
+    for name, shape in canonical_tensor_specs(config):
+        off[name] = cur
+        cur += int(np.prod(shape, dtype=np.int64))
+
+    out = [
+        cur,
+        off["col_embedder.in_linear.weight"],
+        off["col_embedder.in_linear.bias"],
+    ]
+    if config.col_target_aware:
+        out += [
+            off["col_embedder.y_encoder.weight"],
+            off["col_embedder.y_encoder.bias"],
+        ]
+    else:
+        out += [0, 0]
+
+    b0 = off["col_embedder.tf_col.blocks.0.ind_vectors"]
+    a1 = off["col_embedder.tf_col.blocks.0.multihead_attn1.attn.in_proj_weight"]
+    a2 = off["col_embedder.tf_col.blocks.0.multihead_attn2.attn.in_proj_weight"]
+    cls = off["row_interactor.cls_tokens"]
+    # attn1 spans [a1, a2); one block spans [ind_vectors, next ind_vectors).
+    if config.col_num_blocks > 1:
+        b1 = off["col_embedder.tf_col.blocks.1.ind_vectors"]
+        stride = b1 - b0
+    else:
+        stride = cls - b0
+    out += [
+        b0,
+        stride,
+        a2 - a1,  # attn1 section size
+    ]
+
+    r0 = off["row_interactor.tf_row.blocks.0.attn.in_proj_weight"]
+    ln0 = off["icl_predictor.ln.weight"]
+    out += [
+        cls,
+        off["row_interactor.out_ln.weight"],
+        off.get("row_interactor.out_ln.bias", 0),
+        off["row_interactor.tf_row.rope.freqs"],
+        r0,
+        (ln0 - r0) // config.row_num_blocks,  # row block size
+        ln0,
+        off.get("icl_predictor.ln.bias", 0),
+        off["icl_predictor.y_encoder.weight"],
+        off["icl_predictor.y_encoder.bias"],
+        off["icl_predictor.decoder.0.weight"],
+        off["icl_predictor.decoder.0.bias"],
+        off["icl_predictor.decoder.2.weight"],
+        off["icl_predictor.decoder.2.bias"],
+    ]
+    i0 = off["icl_predictor.tf_icl.blocks.0.attn.in_proj_weight"]
+    # The icl blocks are the final section: they span [i0, total).
+    return out + [
+        i0,
+        (out[0] - i0) // config.icl_num_blocks,  # icl block size
+    ]
 
 
 class TabICLMojoModel:
@@ -41,26 +111,52 @@ class TabICLMojoModel:
     """
 
     def __init__(self, config: TabICLConfig, params: dict[str, np.ndarray]) -> None:
+        """Pack ``params`` in canonical layout order and build the native model.
+
+        Raises
+        ------
+        KeyError
+            If the state dict is missing a tensor required by the layout.
+        ValueError
+            If the state dict has unexpected tensors or shape mismatches.
+        RuntimeError
+            If the native kernel's internal offset walk disagrees with the
+            packed buffer length (layout drift between the two sides).
+        """
         self.config = config
-        self._param_data = self._pack_params(params)
-        self._handle: Any = get_tabicl_native().TabICLInference(
+        # Canonical-order packing (single source of truth:
+        # ``_mojo_layout.canonical_tensor_specs``). Missing/unknown/mis-shaped
+        # tensors fail here instead of silently misaligning weights.
+        self._param_data = pack_params(config, params)
+        handle = get_tabicl_native().TabICLInference(
             config.dims_array(), self._param_data
         )
-
-    @staticmethod
-    def _pack_params(params: dict[str, np.ndarray]) -> np.ndarray:
-        """Flatten all parameters into one float32 buffer (sorted by name).
-
-        The native side indexes parameters by offset into this buffer; the
-        ordering therefore must match the layout computed by
-        ``TabICLInference.__init__`` in ``_tabicl_kernels.mojo``, which walks
-        the same sorted names stage by stage.
-        """
-        parts = [
-            np.ascontiguousarray(params[name], dtype=np.float32).ravel()
-            for name in sorted(params)
-        ]
-        return np.concatenate(parts) if parts else np.zeros(0, dtype=np.float32)
+        expected = int(self._param_data.size)
+        got = int(handle.param_count())
+        if got != expected:
+            raise RuntimeError(
+                "native TabICL parameter walk disagrees with the canonical "
+                f"layout: kernel walked {got} floats but the packed buffer "
+                f"holds {expected}; update ``_mojo_layout.py`` and "
+                "``_tabicl_kernels.mojo`` together"
+            )
+        # Exact structural fingerprint: every offset the kernel walked must
+        # equal the offset derived from the canonical spec, so ordering or
+        # sizing drift between the two sides fails loudly right here.
+        raw_offsets = handle.layout_offsets()
+        # ``Python.list`` wraps the payload once; normalize either shape.
+        if len(raw_offsets) == 1 and hasattr(raw_offsets[0], "__len__"):
+            raw_offsets = raw_offsets[0]
+        got_offsets = [int(x) for x in raw_offsets]
+        want_offsets = expected_layout_offsets(config)
+        if got_offsets != want_offsets:
+            raise RuntimeError(
+                "native TabICL layout walk diverged from the canonical spec: "
+                f"kernel offsets {got_offsets} vs spec offsets {want_offsets}; "
+                "update ``_mojo_layout.py`` and ``_tabicl_kernels.mojo`` "
+                "together"
+            )
+        self._handle: Any = handle
 
     # ------------------------------------------------------------------ #
     # end-to-end forward
