@@ -31,6 +31,11 @@ See [CORELS Rule Lists](models/corels.md)
 
 See [GOSDT Optimal Trees](models/gosdt.md)
 
+### TabICL
+
+- `TabICLClassifier` — Tabular in-context learning classifier (TabICLv2)
+- `TabICLRegressor` — Tabular in-context learning regressor (quantile decoder)
+
 ## Explanations
 
 - `TreeExplainer` — SHAP explainer for tree models

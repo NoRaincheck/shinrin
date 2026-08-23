@@ -232,7 +232,7 @@ def test_adam_epoch_decreases_loss():
 
     from shinrin._tabm._mojo_trainer import NativeTrainer, get_tabm_trainer
 
-    native = NativeTrainer(get_tabm_trainer(config))
+    native = NativeTrainer(get_tabm_trainer(config), config)
     state = AdamState(space.total)
     loss = loss_init
     for epoch in range(30):
@@ -273,7 +273,7 @@ def test_lbfgs_final_loss_agreement():
 
     from shinrin._tabm._mojo_trainer import NativeTrainer, get_tabm_trainer
 
-    native = NativeTrainer(get_tabm_trainer(config))
+    native = NativeTrainer(get_tabm_trainer(config), config)
     nit_m, losses_m = native.lbfgs(
         theta.copy(),
         batch,
@@ -290,3 +290,64 @@ def test_lbfgs_final_loss_agreement():
     assert nit_m > 0
     assert final_np < loss_init * 0.5
     assert final_m < loss_init * 0.5
+
+
+def test_predict_with_cache_parity():
+    """predict_with_cache must match forward_avg for the same query data."""
+    config, params, batch = make_case("regression", use_emb=True, seed=42)
+    space = FlatSpace(params)
+    theta = params.flatten()
+    space.scatter(theta, params)
+
+    from shinrin._tabm._mojo_trainer import NativeTrainer, get_tabm_trainer
+
+    native = NativeTrainer(get_tabm_trainer(config), config)
+
+    # Build cache from training data
+    native.build_cache(theta, batch, params)
+
+    # Predict on query data using cache
+    preds_cache = native.predict_with_cache(theta, batch, params)
+
+    # Predict using regular forward_avg
+    preds_normal = native.forward_avg(theta, batch, params)
+
+    # Must match within floating-point tolerance
+    np.testing.assert_allclose(
+        preds_cache,
+        preds_normal,
+        rtol=1e-5,
+        atol=1e-6,
+        err_msg="cache predictions must match forward_avg",
+    )
+
+
+def test_predict_with_cache_vs_numpy():
+    """Cache-based predictions must match NumPy reference implementation."""
+    config, params, batch = make_case("binary", use_emb=False, seed=7)
+    core = TabMCore(config, "binary")
+    space = FlatSpace(params)
+    theta = params.flatten()
+    space.scatter(theta, params)
+
+    # NumPy reference
+    preds_np = core.predict(params, batch)
+
+    from shinrin._tabm._mojo_trainer import NativeTrainer, get_tabm_trainer
+
+    native = NativeTrainer(get_tabm_trainer(config), config)
+
+    # Build cache from training data
+    native.build_cache(theta, batch, params)
+
+    # Predict on query data using cache
+    preds_cache = native.predict_with_cache(theta, batch, params)
+
+    # Must match NumPy reference
+    np.testing.assert_allclose(
+        preds_cache,
+        preds_np,
+        rtol=1e-4,
+        atol=1e-5,
+        err_msg="cache predictions must match NumPy reference",
+    )

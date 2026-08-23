@@ -82,8 +82,12 @@ def get_tabm_trainer(config: TabMConfig) -> Any:
 class NativeTrainer:
     """Thin wrapper providing a stable Python API over the Mojo kernels."""
 
-    def __init__(self, trainer: Any) -> None:
+    def __init__(self, trainer: Any, config: TabMConfig | None = None) -> None:
         self._trainer = trainer
+        self._config = config
+        self._cache_act: np.ndarray | None = None
+        self._cache_off: np.ndarray | None = None
+        self._b_train: int = 0
 
     @staticmethod
     def _data(batch: Batch, config: TabMConfig):
@@ -155,6 +159,108 @@ class NativeTrainer:
         )
         return out
 
+    def build_cache(
+        self,
+        theta: np.ndarray,
+        batch: Batch,
+        params: TabMParams,
+        rows: np.ndarray | None = None,
+    ) -> None:
+        """Build KV-cache from training data.
+
+        After this call, :meth:`predict_with_cache` can be used to make
+        predictions on new query data without re-running the full forward
+        pass over the training set.
+
+        Parameters
+        ----------
+        theta : np.ndarray
+            Flat model parameters.
+        batch : Batch
+            Training data (x_num, x_enc, x_cat, y).
+        params : TabMParams
+            Model configuration.
+        rows : np.ndarray, optional
+            Row indices to cache. Defaults to all rows.
+        """
+        config = params.config
+        x_num, x_enc, x_cat, _ = self._data(batch, config)
+        theta = np.ascontiguousarray(theta, dtype=np.float32)
+        n_rows = len(x_num)
+        if rows is None:
+            rows = np.arange(n_rows, dtype=np.int64)
+        else:
+            rows = np.ascontiguousarray(rows, dtype=np.int64)
+            n_rows = len(rows)
+
+        # Allocate cache buffers: (n_rows * k * db) floats + (nb+16) ints
+        nb = config.n_blocks
+        db = config.d_block
+        cache_size = n_rows * config.k * db
+        self._cache_act = np.empty(cache_size, dtype=np.float32)
+        self._cache_off = np.zeros(nb + 16, dtype=np.int64)
+        self._b_train = n_rows
+
+        self._trainer.build_cache(
+            [
+                theta,
+                x_num,
+                x_enc,
+                x_cat,
+                rows,
+                self._cache_act,
+                self._cache_off,
+            ]
+        )
+
+    def predict_with_cache(
+        self, theta: np.ndarray, batch: Batch, params: TabMParams
+    ) -> np.ndarray:
+        """Predict using a previously built KV-cache.
+
+        Parameters
+        ----------
+        theta : np.ndarray
+            Flat model parameters.
+        batch : Batch
+            Query data (x_num, x_enc, x_cat, y).
+        params : TabMParams
+            Model configuration.
+
+        Returns
+        -------
+        np.ndarray
+            Predictions of shape (n_samples, d_out).
+
+        Raises
+        ------
+        RuntimeError
+            If :meth:`build_cache` has not been called first.
+        """
+        if self._cache_act is None:
+            raise RuntimeError(
+                "predict_with_cache called without build_cache; call build_cache first"
+            )
+        config = params.config
+        x_num, x_enc, x_cat, _ = self._data(batch, config)
+        theta = np.ascontiguousarray(theta, dtype=np.float32)
+        rows = np.arange(len(x_num), dtype=np.int64)
+        out = np.zeros((len(x_num), config.d_out), dtype=np.float32)
+        self._trainer.predict_with_cache(
+            [
+                theta,
+                x_num,
+                x_enc,
+                x_cat,
+                rows,
+                self._cache_act,
+                self._cache_off,
+                int(self._b_train),
+                out,
+            ]
+        )
+        return out
+
     def lbfgs(
         self,
         theta: np.ndarray,
@@ -191,6 +297,29 @@ class NativeTrainer:
         )
         space.scatter(theta, params)
         return n_iter, [float(x) for x in losses[: n_iter + 1]]
+        config = params.config
+        x_num, x_enc, x_cat, y = self._data(batch, config)
+        theta = np.ascontiguousarray(theta, dtype=np.float32)
+        losses = np.zeros(max_iter + 1, dtype=np.float64)
+        n_iter = int(
+            self._trainer.lbfgs_minimize(
+                [
+                    theta,
+                    x_num,
+                    x_enc,
+                    x_cat,
+                    y,
+                    int(max_iter),
+                    float(tol),
+                    int(history_size),
+                    float(alpha),
+                    losses,
+                    int(task),
+                ]
+            )
+        )
+        space.scatter(theta, params)
+        return n_iter, [float(x) for x in losses[: n_iter + 1]]
 
 
 def get_native_trainer(config: TabMConfig | None = None) -> NativeTrainer:
@@ -202,4 +331,4 @@ def get_native_trainer(config: TabMConfig | None = None) -> NativeTrainer:
             d_out=1,
             use_embeddings=False,
         )
-    return NativeTrainer(get_tabm_trainer(config))
+    return NativeTrainer(get_tabm_trainer(config), config)
