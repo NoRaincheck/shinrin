@@ -90,3 +90,29 @@ models = {
 results = full_benchmark(models, X_train, y_train, X_test)
 print_benchmark_report(results)
 ```
+
+## Optimal Rule Lists & Sparse Trees
+
+For interpretable, certifiably optimal models on binary features:
+
+```python
+from shinrin import CorelsClassifier
+
+clf = CorelsClassifier(verbosity=["rulelist"])
+clf.fit(X_binary, y, features=["Age<=25", "Prior-Crimes>3"])
+print(clf.rl())     # provably optimal if/then rule list
+```
+
+For globally optimal sparse trees over continuous features:
+
+```python
+from shinrin import GOSDTClassifier, ThresholdGuessBinarizer
+
+X_bin = ThresholdGuessBinarizer(n_estimators=20, max_depth=2).fit_transform(X, y)
+clf = GOSDTClassifier(regularization=0.05, depth_budget=4)
+clf.fit(X_bin > 0.5, y)
+result = clf.get_result()   # lower_bound == upper_bound certifies optimality
+```
+
+See [CORELS Rule Lists](../models/corels.md) and
+[GOSDT Optimal Trees](../models/gosdt.md) for full parameter references.
