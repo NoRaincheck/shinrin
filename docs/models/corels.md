@@ -77,6 +77,22 @@ from shinrin._corels import load_from_csv
 X, y, features, prediction_name = load_from_csv("compas.csv")
 ```
 
+## Combining with skope-rules (ORDT)
+
+CORELS pairs naturally with shinrin's vendored
+[SkopeRules](https://github.com/scikit-learn-contrib/skope-rules)
+(`from shinrin.rules import SkopeRules`, requires `shinrin[pandas]`):
+let skope-rules mine high-precision threshold rules from a tree ensemble,
+turn each rule into one binary column of a capture matrix, and fit
+`CorelsClassifier(max_card=1)` on it. The result is the provably optimal
+ordered rule list **over the mined pool** (ORDT).
+
+Measured in [ORDT_BENCHMARK](https://github.com/NoRaincheck/shinrin/blob/main/scripts/benchmarks/ORDT_BENCHMARK.md)
+(`just bench-ordt`), this hybrid beats skope-rules alone on every dataset
+tested — up to +2.6pp test accuracy with 2–5-clause lists — and beats
+CORELS' own mining on 3 of 4 datasets without any external binarization,
+since adaptive tree thresholds replace fixed quantile bins.
+
 ## Notes and constraints
 
 - Features must already be binary; binarize continuous data yourself (or use

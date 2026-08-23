@@ -15,7 +15,7 @@ Shinrin (森林, "forest" in Japanese) is a scikit-learn-compatible library for 
 
 Since skope-rules and scikit-garden are no longer actively maintained, this project brings them together under one hardened, production-focused umbrella. The goal is to **harden and speed up production training code while keeping the dependency footprint minimal** — dropping large/expensive dependencies like `shap` and `torch`.
 
-- **Tree ensemble library with extensions** — decision rules, optimal decision trees (CORELS, GOSDT), and Mondrian forests, with built-in TreeSHAP explanations that do *not* rely on the `shap` library, accelerated by Rust and Mojo kernels
+- **Tree ensemble library with extensions** — decision rules, optimal decision trees (CORELS, GOSDT), and Mondrian forests, with built-in TreeSHAP explanations that do *not* rely on the `shap` library, accelerated by Rust and Mojo kernels. Better together: routing skope-rules' mined candidates through CORELS' certified selection (ORDT) outperforms both methods stand-alone
 - **Tabular neural networks without torch** — MLPs and TabM train entirely on NumPy or Mojo kernels; no PyTorch required
 - **Export to standard inference runtimes** — first-class ONNX export for trees, forests, and TabM
 
@@ -123,7 +123,7 @@ See [scripts/benchmarks/TABM_BENCHMARK.md](scripts/benchmarks/TABM_BENCHMARK.md)
 
 See [scripts/benchmarks/GOSDT_BENCHMARK.md](scripts/benchmarks/GOSDT_BENCHMARK.md) for GOSDT vs scikit-learn CART comparisons (`just bench-gosdt`).
 
-See [scripts/benchmarks/ORDT_BENCHMARK.md](scripts/benchmarks/ORDT_BENCHMARK.md) for ORDT — optimal rule-sets from decision trees, combining skope-rules mining with CORELS' certified-optimal selection (`just bench-ordt`).
+See [scripts/benchmarks/ORDT_BENCHMARK.md](scripts/benchmarks/ORDT_BENCHMARK.md) for ORDT — optimal rule-sets from decision trees, combining skope-rules mining with CORELS' certified-optimal selection (`just bench-ordt`). Vendoring both pays off: swapping skope-rules' heuristic vote for CORELS' optimal ordering wins on **every dataset tested** (up to +2.6pp test accuracy) while shrinking models to 2–5-clause rule lists.
 
 To run benchmarks yourself: `python scripts/benchmarks/bench_baselines.py` (or `just bench-backends` for Rust vs Mojo backend comparisons, `just bench-tabm` for TabM backends).
 
