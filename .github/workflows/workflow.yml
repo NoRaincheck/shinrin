@@ -16,7 +16,10 @@ jobs:
         include:
           - platform: ubuntu-latest
             target: x86_64
-          - platform: ubuntu-latest
+          # Build aarch64 natively on an arm64 runner: the rust-cross
+          # manylinux cross-compilation images only ship ancient GCCs
+          # (< 10), which cannot compile the vendored C++20 GOSDT engine.
+          - platform: ubuntu-24.04-arm
             target: aarch64
           - platform: macos-latest
             target: x86_64
