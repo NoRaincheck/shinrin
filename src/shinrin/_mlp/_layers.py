@@ -61,7 +61,9 @@ class MLPConfig:
         self.d_embedding = d_embedding
         self.quantization = quantization
         self.quantization_granularity = (
-            quantization_granularity if quantization != QUANTIZATION_NONE else GRANULARITIES[0]
+            quantization_granularity
+            if quantization != QUANTIZATION_NONE
+            else GRANULARITIES[0]
         )
         self.quantize_output = bool(quantize_output)
 

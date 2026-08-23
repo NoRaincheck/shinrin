@@ -96,9 +96,7 @@ class TabMCore:
         if cfg.quantization_granularity == "per_row":
             if cfg.arch_type == "tabm-packed":
                 # (k, b_in, d_block): rows are the last axis.
-                s = ternary_scales(w.transpose(0, 2, 1), "per_row").transpose(
-                    0, 2, 1
-                )
+                s = ternary_scales(w.transpose(0, 2, 1), "per_row").transpose(0, 2, 1)
             else:
                 s = ternary_scales(w, "per_row")
         else:

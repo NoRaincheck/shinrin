@@ -27,13 +27,13 @@ from __future__ import annotations
 import numpy as np
 
 __all__ = [
+    "GRANULARITIES",
+    "QUANTIZATIONS",
     "QUANTIZATION_NONE",
     "QUANTIZATION_TERNARY",
-    "QUANTIZATIONS",
-    "GRANULARITIES",
-    "validate_quantization",
-    "ternary_scales",
     "ternary_quantize_dequantize",
+    "ternary_scales",
+    "validate_quantization",
 ]
 
 QUANTIZATION_NONE = "none"
@@ -81,7 +81,9 @@ def ternary_scales(w: np.ndarray, granularity: str = "per_row") -> np.ndarray:
     raise ValueError(f"Unknown granularity: {granularity!r}")
 
 
-def ternary_quantize_dequantize(w: np.ndarray, granularity: str = "per_row") -> np.ndarray:
+def ternary_quantize_dequantize(
+    w: np.ndarray, granularity: str = "per_row"
+) -> np.ndarray:
     """Return the ternary approximation of ``w`` used by the forward pass.
 
     The result has the same shape/dtype as ``w`` but every element is one

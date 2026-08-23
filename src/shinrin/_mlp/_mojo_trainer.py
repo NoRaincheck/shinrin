@@ -34,6 +34,8 @@ _LOCK = threading.Lock()
 _TRAINERS: dict[tuple, Any] = {}
 
 _ACT_CODES = {"identity": 0, "logistic": 1, "tanh": 2, "relu": 3}
+
+
 # 0=off, 1=ternary per-row, 2=ternary per-tensor
 def _quant_code(config: MLPConfig) -> int:
     if config.quantization == "none":

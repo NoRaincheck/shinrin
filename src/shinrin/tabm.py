@@ -19,8 +19,8 @@ from sklearn.preprocessing import LabelEncoder
 from sklearn.utils.multiclass import unique_labels
 from sklearn.utils.validation import check_is_fitted, check_X_y, validate_data
 
+from shinrin._quant import QUANTIZATION_TERNARY, validate_quantization
 from shinrin._tabm import _backend as tabm_backend
-from shinrin._quant import validate_quantization
 from shinrin._tabm._layers import TabMConfig, TabMParams
 from shinrin._tabm._model import Batch, TabMCore
 from shinrin._tabm._optim import (
@@ -222,6 +222,15 @@ class _BaseTabM(BaseEstimator):
                 f"solver must be 'adam', 'sgd' or 'lbfgs', got {self.solver!r}"
             )
         validate_quantization(self.quantization, self.quantization_granularity)
+        if self.quantization == QUANTIZATION_TERNARY and float(self.alpha) > 0.0:
+            warnings.warn(
+                "quantization='ternary' with alpha>0 often collapses: L2 decay "
+                "shrinks latent weights into the ternary dead zone where the "
+                "effective weight is zero and no gradient flows. Consider "
+                "alpha=0 for quantized training.",
+                UserWarning,
+                stacklevel=2,
+            )
 
     def _task_code(self) -> int:
         """Native loss code: 0 regression, 1 binary, 2 multiclass."""

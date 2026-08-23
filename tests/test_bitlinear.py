@@ -9,12 +9,12 @@ import pytest
 
 from shinrin._quant import (
     GRANULARITIES,
-    QUANTIZATIONS,
     QUANTIZATION_NONE,
     QUANTIZATION_TERNARY,
-    validate_quantization,
+    QUANTIZATIONS,
     ternary_quantize_dequantize,
     ternary_scales,
+    validate_quantization,
 )
 from shinrin._tabm._layers import TabMConfig
 from shinrin.mlp import MLPClassifier
@@ -48,8 +48,8 @@ def test_scales_shape(granularity):
 def test_scales_absmean_nonzero_rows():
     w = np.random.RandomState(1).randn(5, 8).astype(np.float32)
     s = ternary_scales(w, "per_row")
-    expected = np.abs(w.astype(np.float64)).mean(axis=1, keepdims=True).astype(
-        np.float32
+    expected = (
+        np.abs(w.astype(np.float64)).mean(axis=1, keepdims=True).astype(np.float32)
     )
     np.testing.assert_allclose(s, expected, rtol=1e-6)
 
@@ -177,12 +177,12 @@ def test_mlp_quantized_close_to_full_precision():
 
 def test_mlp_quantize_output_flag():
     X, y = _toy_data()
-    kw = dict(
-        hidden_layer_sizes=(16,),
-        max_iter=300,
-        random_state=0,
-        quantization="ternary",
-    )
+    kw = {
+        "hidden_layer_sizes": (16,),
+        "max_iter": 300,
+        "random_state": 0,
+        "quantization": "ternary",
+    }
     clf_hidden_only = MLPClassifier(**kw).fit(X, y)
     clf_with_output = MLPClassifier(quantize_output=True, **kw).fit(X, y)
     # quantizing the output layer too costs a little accuracy on this
@@ -197,12 +197,12 @@ def test_mlp_quantize_output_flag():
 
 def test_mlp_deterministic_and_picklable():
     X, y = _toy_data()
-    kw = dict(
-        hidden_layer_sizes=(20,),
-        max_iter=60,
-        random_state=7,
-        quantization="ternary",
-    )
+    kw = {
+        "hidden_layer_sizes": (20,),
+        "max_iter": 60,
+        "random_state": 7,
+        "quantization": "ternary",
+    }
     a = MLPClassifier(**kw).fit(X, y)
     b = MLPClassifier(**kw).fit(X, y)
     np.testing.assert_array_equal(a.predict_proba(X), b.predict_proba(X))
@@ -233,15 +233,15 @@ def test_tabm_fit_score_sanity():
 
 def test_tabm_deterministic_and_picklable():
     X, y = _toy_data()
-    kw = dict(
-        hidden_layer_sizes=(16,),
-        k=4,
-        max_iter=50,
-        random_state=3,
-        use_embeddings=False,
-        quantization="ternary",
-        quantization_granularity="per_tensor",
-    )
+    kw = {
+        "hidden_layer_sizes": (16,),
+        "k": 4,
+        "max_iter": 50,
+        "random_state": 3,
+        "use_embeddings": False,
+        "quantization": "ternary",
+        "quantization_granularity": "per_tensor",
+    }
     a = TabMClassifier(**kw).fit(X, y)
     b = TabMClassifier(**kw).fit(X, y)
     np.testing.assert_array_equal(a.predict_proba(X), b.predict_proba(X))

@@ -23,16 +23,16 @@ from sklearn.preprocessing import LabelEncoder
 from sklearn.utils.multiclass import check_classification_targets
 from sklearn.utils.validation import validate_data
 
+from ._quant import (
+    QUANTIZATION_TERNARY,
+    ternary_quantize_dequantize,
+    validate_quantization,
+)
 from ._tabicl._backend import get_tabicl_backend
 from ._tabicl._checkpoint import ensure_npz
 from ._tabicl._config import TabICLConfig
 from ._tabicl._preprocess import EnsembleGenerator, TransformToNumerical
 from ._tabicl._quantile_dist import QuantileToDistribution
-from ._quant import (
-    QUANTIZATION_TERNARY,
-    validate_quantization,
-    ternary_quantize_dequantize,
-)
 
 __all__ = ["TabICLClassifier", "TabICLRegressor"]
 

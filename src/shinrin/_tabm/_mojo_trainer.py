@@ -28,6 +28,7 @@ from ._model import Batch
 _LOCK = threading.Lock()
 _TRAINERS: dict[tuple, Any] = {}
 
+
 # 0=off, 1=ternary per-row, 2=ternary per-tensor
 def _quant_code(config: TabMConfig) -> int:
     if config.quantization == "none":
