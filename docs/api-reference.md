@@ -35,7 +35,6 @@ See [GOSDT Optimal Trees](models/gosdt.md)
 
 - `TabICLClassifier` — Tabular in-context learning classifier (TabICLv2)
 - `TabICLRegressor` — Tabular in-context learning regressor (quantile decoder)
->>>>>>> 39c4029 (fix(tabicl): complete test suite, benchmarks, exports and backend fixes)
 
 ## Explanations
 
