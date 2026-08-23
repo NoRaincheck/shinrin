@@ -28,6 +28,10 @@ VALID_BACKENDS = ("auto", "numpy", "torch", "mojo")
 
 _CACHE: dict[str, Any] = {}
 _MOJO_MODULE = "shinrin._native_tabicl"
+# Separate cache slot for the imported shared library: ``_CACHE`` also maps
+# requested backend names to their resolved strings (see
+# :func:`get_tabicl_backend`), so a plain "mojo" key would collide.
+_NATIVE_CACHE_KEY = "<native-module>"
 
 
 def _torch_available() -> bool:
@@ -104,8 +108,8 @@ def get_tabicl_backend(requested: str | None = None) -> str:
 
 def get_tabicl_native() -> Any:
     """Import and return the native Mojo TabICL module."""
-    if "mojo" in _CACHE:
-        return _CACHE["mojo"]
+    if _NATIVE_CACHE_KEY in _CACHE:
+        return _CACHE[_NATIVE_CACHE_KEY]
     if _mojo_shared_lib() is None:
         try:
             import mojo.importer  # noqa: F401
@@ -116,5 +120,5 @@ def get_tabicl_native() -> Any:
                 "or the 'mojo' package for auto-compilation"
             ) from exc
     module = importlib.import_module(_MOJO_MODULE)
-    _CACHE["mojo"] = module
+    _CACHE[_NATIVE_CACHE_KEY] = module
     return module

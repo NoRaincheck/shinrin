@@ -23,7 +23,7 @@ pointers (float32 data, int64 dims).
 """
 
 from std.os import abort
-from std.math import exp, max
+from std.math import exp, max, sqrt
 from std.memory import alloc
 from std.python import Python, PythonObject
 from std.python.bindings import PythonModuleBuilder
@@ -36,17 +36,21 @@ from shinrin._tk_core import (
     iface_dim,
     np_module,
     ptr_f32,
+    ptr_f64,
     ptr_i64,
 )
 from shinrin._tk_layers import (
     AttnParams,
+    _add_row_bias,
     attention_block_forward,
     attention_block_size,
     attn_params_at,
     isab_forward,
     layer_norm_affine,
+    rope_apply,
 )
 
+alias SKIP_VALUE_F32: Float32 = -100.0
 
 
 # =============================================================================
@@ -128,10 +132,10 @@ struct TabICLConfig(ImplicitlyCopyable, Movable, Writable):
             raise Error(
                 "col_affine=True is not supported by the native TabICL kernel"
             )
-        if self.max_classes <= 0:
-            raise Error(
-                "native TabICL kernel requires classification mode (max_classes > 0)"
-            )
+
+    def y_encoder_in_features(self) -> Int:
+        """Input width of both y-encoders: classes for classification, 1 target."""
+        return max(self.max_classes, 1)
 
     def write_to(mut self, mut writer: Some[Writer]):
         writer.write(
@@ -215,8 +219,9 @@ struct TabICLInference(ImplicitlyCopyable, Movable, Writable):
         self._off_in_linear_b = cur
         cur += e
         if cfg.col_target_aware:
+            var y_in = cfg.y_encoder_in_features()
             self._off_col_y_enc_w = cur
-            cur += e * cfg.max_classes
+            cur += e * y_in
             self._off_col_y_enc_b = cur
             cur += e
         else:
@@ -265,8 +270,9 @@ struct TabICLInference(ImplicitlyCopyable, Movable, Writable):
         else:
             self._off_icl_ln_b = cur
             cur += icl_d
+        var icl_y_in = cfg.y_encoder_in_features()
         self._off_icl_y_encoder_w = cur
-        cur += icl_d * cfg.max_classes
+        cur += icl_d * icl_y_in
         self._off_icl_y_encoder_b = cur
         cur += icl_d
         self._off_decoder_w1 = cur
@@ -425,7 +431,7 @@ struct TabICLInference(ImplicitlyCopyable, Movable, Writable):
                 col_embed.unsafe_store[width=SIMDW](
                     i * e + b,
                     col_embed.unsafe_load[width=SIMDW](i * e + b)
-                    + SIMD[DType.float32, SIMDW](self.params[self._off_in_linear_b + b]),
+                    + self.params.unsafe_load[width=SIMDW](self._off_in_linear_b + b),
                 )
                 b += SIMDW
             while b < e:
@@ -696,6 +702,789 @@ struct TabICLInference(ImplicitlyCopyable, Movable, Writable):
         return 0
 
 
+    # =====================================================================
+    # Stage 1+2: column embedding + row interaction (staged API)
+    # =====================================================================
+
+    def stage_col_impl(
+        mut self,
+        x: Pointer[Float32, MutUntrackedOrigin],       # (n_rows, n_features)
+        target: PythonObject,                            # (train_size,) i64/f32
+        n_rows: Int,
+        train_size: Int,
+        n_features: Int,
+        col_out: Pointer[Float32, MutUntrackedOrigin],  # (n_rows, G, E) t-major
+    ) raises -> Int:
+        """Column embedding stage (torch ColEmbedding.forward).
+
+        Per position g in [0, G): group features, project with in_linear,
+        augment train rows with the target embedding, then run the ISAB
+        blocks whose first attention keys are restricted to the train
+        prefix. Results are scattered into row-major (t, g, e) order.
+        Returns 0 on success.
+        """
+        var cfg = self.config
+        var e = cfg.embed_dim
+        var s = cfg.col_feature_group_size
+        var num_cls = cfg.row_num_cls
+        var G = num_cls + n_features
+        var n_inds = cfg.col_num_inds
+        var chd = cfg.col_head_dim()
+        var cff = cfg.col_dim_feedforward()
+        var is_clf = cfg.max_classes > 0
+        # Both views alias the same buffer; only the view matching the task
+        # type is ever dereferenced.
+        var target_i64 = ptr_i64(target)
+        var target_f32 = ptr_f32(target)
+
+        var pos = alloc[Float32](n_rows * s + 16)
+        var cur = alloc[Float32](n_rows * e + 16)
+        var hidden = alloc[Float32](n_inds * e + 16)
+
+        var g = 0
+        while g < G:
+            if g < num_cls:
+                # Sentinel positions: SkippableLinear maps fully-masked
+                # input rows to exactly SKIP_VALUE (no projection).
+                var fill = n_rows * s
+                var i = 0
+                while i < fill:
+                    pos[i] = SKIP_VALUE_F32
+                    i += 1
+                fill = n_rows * e
+                i = 0
+                while i < fill:
+                    cur[i] = SKIP_VALUE_F32
+                    i += 1
+            else:
+                var h = g - num_cls
+                var t = 0
+                while t < n_rows:
+                    var i = 0
+                    while i < s:
+                        pos[t * s + i] = x[
+                            t * n_features + (h + (1 << i)) % n_features
+                        ]
+                        i += 1
+                    t += 1
+                gemm_nt(
+                    n_rows, e, s, pos, self.params + self._off_in_linear_w, cur
+                )
+                var b = self._off_in_linear_b
+                t = 0
+                while t < n_rows:
+                    var j = 0
+                    while j + SIMDW <= e:
+                        cur.unsafe_store[width=SIMDW](
+                            t * e + j,
+                            cur.unsafe_load[width=SIMDW](t * e + j)
+                            + self.params.unsafe_load[width=SIMDW](b + j),
+                        )
+                        j += SIMDW
+                    while j < e:
+                        cur[t * e + j] += self.params[b + j]
+                        j += 1
+                    t += 1
+
+            # Target-aware term added to TRAIN-row embeddings only
+            # (torch: src[..., :train_size, :] += y_emb).
+            if cfg.col_target_aware:
+                var yw = self.params + self._off_col_y_enc_w
+                var yb = self.params + self._off_col_y_enc_b
+                var t = 0
+                while t < train_size:
+                    if is_clf:
+                        # OneHotAndLinear picks weight COLUMN c of the
+                        # (e, max_classes) row-major matrix: yw[j*mc + c].
+                        var c = Int(target_i64[t])
+                        var j = 0
+                        while j < e:
+                            cur[t * e + j] += yw[j * cfg.max_classes + c] + yb[j]
+                            j += 1
+                    else:
+                        var v = target_f32[t]
+                        var j = 0
+                        while j < e:
+                            cur[t * e + j] += yw[j] * v + yb[j]
+                            j += 1
+                    t += 1
+
+            # ISAB blocks: attn1 keys restricted to the train prefix.
+            var blk = 0
+            while blk < cfg.col_num_blocks:
+                var boff = self._off_col_blocks + blk * self._col_blk_stride
+                var p1 = attn_params_at(
+                    self.params, boff + n_inds * e, e, cff,
+                    cfg.col_nhead, chd, cfg.col_ssmax_kind,
+                    cfg.col_ssmax_n_hidden, cfg.bias_free_ln,
+                )
+                var p2 = attn_params_at(
+                    self.params, boff + n_inds * e + self._col_attn_size,
+                    e, cff, cfg.col_nhead, chd, 0,
+                    cfg.col_ssmax_n_hidden, cfg.bias_free_ln,
+                )
+                attention_block_forward(
+                    self.params + boff, cur, hidden,
+                    n_inds, train_size, e, cfg.col_nhead, chd, cff,
+                    p1, None, False,
+                )
+                attention_block_forward(
+                    cur, hidden, cur,
+                    n_rows, n_inds, e, cfg.col_nhead, chd, cff,
+                    p2, None, False,
+                )
+                blk += 1
+
+            # Scatter this position's embeddings into row-major order.
+            var t = 0
+            while t < n_rows:
+                var src_base = t * e
+                var dst_base = t * G * e + g * e
+                var j = 0
+                while j + SIMDW <= e:
+                    col_out.unsafe_store[width=SIMDW](
+                        dst_base + j,
+                        cur.unsafe_load[width=SIMDW](src_base + j),
+                    )
+                    j += SIMDW
+                while j < e:
+                    col_out[dst_base + j] = cur[src_base + j]
+                    j += 1
+                t += 1
+
+            g += 1
+
+        pos.unsafe_free()
+        cur.unsafe_free()
+        hidden.unsafe_free()
+        return 0
+
+    @staticmethod
+    def gemm_probe(
+        self_ptr: Pointer[Self, MutAnyOrigin],
+        parts: PythonObject,
+    ) raises -> PythonObject:
+        """DEBUG: run gemm_nt(m,n,kk) on raw arrays (A (m,kk), B (n,kk))."""
+        var a_in = ptr_f32(parts[0])
+        var m = iface_dim(parts[0], 0)
+        var kk = iface_dim(parts[0], 1)
+        var b_in = ptr_f32(parts[1])
+        var n = iface_dim(parts[1], 0)
+        var a = alloc[Float32](m * kk + 16)
+        var b = alloc[Float32](n * kk + 16)
+        var c = alloc[Float32](m * n + 16)
+        var i = 0
+        while i < m * kk:
+            a[i] = a_in[i]
+            i += 1
+        i = 0
+        while i < n * kk:
+            b[i] = b_in[i]
+            i += 1
+        gemm_nt(m, n, kk, a, b, c)
+        var np = np_module()
+        var arr = np.empty(m * n)
+        var ob = ptr_f64(arr)
+        i = 0
+        while i < m * n:
+            ob[i] = Float64(c[i])
+            i += 1
+        return arr
+
+    @staticmethod
+    def attn_probe(
+        self_ptr: Pointer[Self, MutAnyOrigin],
+        parts: PythonObject,
+    ) raises -> PythonObject:
+        """DEBUG: run block-0 attn2 step-by-step on (q (R,e), k (K,e)) and
+        return every intermediate, concatenated flat in documented order."""
+        var self = self_ptr[]
+        var cfg = self.config
+        var e = cfg.embed_dim
+        var nh = cfg.col_nhead
+        var chd = cfg.col_head_dim()
+        var cff = cfg.col_dim_feedforward()
+        var q_in = ptr_f32(parts[0])
+        var R = iface_dim(parts[0], 0)
+        var k_in = ptr_f32(parts[1])
+        var K = iface_dim(parts[1], 0)
+        var boff = (
+            self._off_col_blocks + cfg.col_num_inds * e + self._col_attn_size
+        )
+        if len(parts) > 2 and iface_dim(parts[2], 0) > 0:
+            boff = Int(ptr_i64(parts[2])[0])
+        var rope_freqs: Optional[Pointer[Float32, MutUntrackedOrigin]] = None
+        if len(parts) > 3 and iface_dim(parts[3], 0) > 0:
+            rope_freqs = ptr_f32(parts[3])
+        var rope_interleaved = True
+        if len(parts) > 4 and iface_dim(parts[4], 0) > 0:
+            rope_interleaved = Int(ptr_i64(parts[4])[0]) == 1
+        var p = attn_params_at(
+            self.params, boff, e, cff, nh, chd, 0,
+            cfg.col_ssmax_n_hidden, cfg.bias_free_ln,
+        )
+
+        var qn = alloc[Float32](R * e + 16)
+        layer_norm_affine(q_in, qn, R, e, p.ln1_w, p.ln1_b, True, p.ln_has_bias)
+        var kn = alloc[Float32](K * e + 16)
+        layer_norm_affine(k_in, kn, K, e, p.ln1_w, p.ln1_b, True, p.ln_has_bias)
+        var q_proj = alloc[Float32](R * e + 16)
+        var k_proj = alloc[Float32](K * e + 16)
+        var v_proj = alloc[Float32](K * e + 16)
+        # DEBUG: copy weight/bias blocks to fresh buffers first
+        var wcopy = alloc[Float32](3 * e * e + 16)
+        var bcopy = alloc[Float32](3 * e + 16)
+        var wi = 0
+        while wi < 3 * e * e:
+            wcopy[wi] = p.w_qkv[wi]
+            wi += 1
+        var bi2 = 0
+        while bi2 < 3 * e:
+            bcopy[bi2] = p.b_qkv[bi2]
+            bi2 += 1
+        gemm_nt(R, e, e, qn, wcopy, q_proj)
+        # dump raw gemm output before bias
+        var qproj_raw = alloc[Float32](R * e + 16)
+        var ri = 0
+        while ri < R * e:
+            qproj_raw[ri] = q_proj[ri]
+            ri += 1
+        _add_row_bias(q_proj, bcopy, R, e)
+        gemm_nt(K, e, e, kn, wcopy + e * e, k_proj)
+        _add_row_bias(k_proj, bcopy + e, K, e)
+        gemm_nt(K, e, e, kn, wcopy + 2 * e * e, v_proj)
+        _add_row_bias(v_proj, bcopy + 2 * e, K, e)
+
+        var q_a = alloc[Float32](R * nh * chd + 16)
+        var k_a = alloc[Float32](K * nh * chd + 16)
+        var v_a = alloc[Float32](K * nh * chd + 16)
+        var qi = 0
+        while qi < R:
+            var h = 0
+            while h < nh:
+                var dd = 0
+                while dd < chd:
+                    q_a[h * R * chd + qi * chd + dd] = q_proj[qi * e + h * chd + dd]
+                    dd += 1
+                h += 1
+            qi += 1
+        var ki = 0
+        while ki < K:
+            var h = 0
+            while h < nh:
+                var dd = 0
+                while dd < chd:
+                    k_a[h * K * chd + ki * chd + dd] = k_proj[ki * e + h * chd + dd]
+                    v_a[h * K * chd + ki * chd + dd] = v_proj[
+                        ki * e + h * chd + dd
+                    ]
+                    dd += 1
+                h += 1
+            ki += 1
+
+        var out_a = alloc[Float32](R * nh * chd + 16)
+        if rope_freqs is not None:
+            rope_apply(
+                q_a, k_a, R, K, nh, chd,
+                rope_freqs.value(), rope_interleaved,
+            )
+        var scores = alloc[Float32](R * K + 16)
+        var sc_pre = alloc[Float32](R * K + 16)
+        var scale = 1.0 / sqrt(Float32(chd))
+        var h2 = 0
+        while h2 < nh:
+            var q_h = q_a + h2 * R * chd
+            var k_h = k_a + h2 * K * chd
+            var v_h = v_a + h2 * K * chd
+            var o_h = out_a + h2 * R * chd
+            gemm_nt(R, K, chd, q_h, k_h, scores)
+            if h2 == 0:
+                var cp = 0
+                while cp < R * K:
+                    sc_pre[cp] = scores[cp]
+                    cp += 1
+            var ts = 0
+            while ts < R:
+                var base_s = ts * K
+                var mx: Float32 = -3.0e38
+                var s = 0
+                while s < K:
+                    var v = scores[base_s + s] * scale
+                    scores[base_s + s] = v
+                    if v > mx:
+                        mx = v
+                    s += 1
+                var sum_v: Float32 = 0.0
+                s = 0
+                while s < K:
+                    var ev = exp(scores[base_s + s] - mx)
+                    scores[base_s + s] = ev
+                    sum_v += ev
+                    s += 1
+                s = 0
+                while s < K:
+                    scores[base_s + s] /= sum_v
+                    s += 1
+                ts += 1
+            gemm_nn(R, chd, K, scores, v_h, o_h)
+            h2 += 1
+
+        var merged = alloc[Float32](R * e + 16)
+        var mi = 0
+        while mi < R:
+            var hh = 0
+            while hh < nh:
+                var dd = 0
+                while dd < chd:
+                    merged[mi * e + hh * chd + dd] = out_a[
+                        hh * R * chd + mi * chd + dd
+                    ]
+                    dd += 1
+                hh += 1
+            mi += 1
+        var res = alloc[Float32](R * e + 16)
+        gemm_nt(R, e, e, merged, p.w_out, res)
+        _add_row_bias(res, p.b_out, R, e)
+        var dst = alloc[Float32](R * e + 16)
+        mi = 0
+        while mi < R * e:
+            dst[mi] = q_in[mi] + res[mi]
+            mi += 1
+
+        # extra sections: raw params seen by this block + raw q_proj pre-bias
+        # + final q_proj snapshot (corruption bisect)
+        var w_qkv = p.w_qkv
+        var total_params = 3 * e * e + 3 * e + 2 * e + 3 * R * e + R * K
+        var pdump = alloc[Float32](total_params)
+        var pi = 0
+        while pi < 3 * e * e:
+            pdump[pi] = w_qkv[pi]
+            pi += 1
+        var bi = 0
+        while bi < 3 * e:
+            pdump[pi] = p.b_qkv[bi]
+            pi += 1
+            bi += 1
+        var li = 0
+        while li < e:
+            pdump[pi] = p.ln1_w[li]
+            pi += 1
+            li += 1
+        li = 0
+        while li < e:
+            pdump[pi] = p.ln1_b[li]
+            pi += 1
+            li += 1
+        ri = 0
+        while ri < R * e:
+            pdump[pi] = qproj_raw[ri]
+            pi += 1
+            ri += 1
+        ri = 0
+        while ri < R * e:
+            pdump[pi] = q_proj[ri]
+            pi += 1
+            ri += 1
+        # DEBUG: marker write between snapshot and dump loop
+        ri = 0
+        while ri < R * e:
+            pdump[pi] = q_proj[ri]
+            pi += 1
+            ri += 1
+        ri = 0
+        while ri < R * K:
+            pdump[pi] = sc_pre[ri]
+            pi += 1
+            ri += 1
+
+        # dump: qn, kn, q_proj, k_proj, v_proj, q_a, k_a, v_a, scores,
+        #       out_a, merged, res, dst, params
+        var np = np_module()
+        var total = (
+            5 * R * e
+            + 3 * K * e
+            + 2 * R * nh * chd
+            + 2 * K * nh * chd
+            + R * K
+            + total_params
+        )
+        var out_arr = np.empty(total)
+        var ob = ptr_f64(out_arr)
+        var cursor = 0
+        var i2 = 0
+        while i2 < 14:
+            var sz: Int
+            var src_ptr: Pointer[Float32, MutUntrackedOrigin]
+            if i2 == 0:
+                src_ptr = qn
+                sz = R * e
+            elif i2 == 1:
+                src_ptr = kn
+                sz = K * e
+            elif i2 == 2:
+                src_ptr = q_proj
+                sz = R * e
+            elif i2 == 3:
+                src_ptr = k_proj
+                sz = K * e
+            elif i2 == 4:
+                src_ptr = v_proj
+                sz = K * e
+            elif i2 == 5:
+                src_ptr = q_a
+                sz = R * nh * chd
+            elif i2 == 6:
+                src_ptr = k_a
+                sz = K * nh * chd
+            elif i2 == 7:
+                src_ptr = v_a
+                sz = K * nh * chd
+            elif i2 == 8:
+                src_ptr = scores
+                sz = R * K
+            elif i2 == 9:
+                src_ptr = out_a
+                sz = R * nh * chd
+            elif i2 == 10:
+                src_ptr = merged
+                sz = R * e
+            elif i2 == 11:
+                src_ptr = res
+                sz = R * e
+            else:
+                src_ptr = dst
+                sz = R * e
+            if i2 == 13:
+                src_ptr = pdump
+                sz = total_params
+            var j2 = 0
+            while j2 < sz:
+                ob[cursor + j2] = Float64(src_ptr[j2])
+                j2 += 1
+            cursor += sz
+            i2 += 1
+        return out_arr
+
+    @staticmethod
+    def stage_col(
+        self_ptr: Pointer[Self, MutAnyOrigin],
+        parts: PythonObject,
+    ) raises -> PythonObject:
+        """Run the column embedding stage.
+
+        ``parts = (x, target)`` where ``x`` is ``(n_rows, n_features)``
+        float32 and ``target`` is ``(train_size,)`` int64 class labels
+        (classification) or float32 scaled targets (regression). Returns
+        a flat float32 array of ``n_rows * (row_num_cls + n_features) *
+        embed_dim`` values in (row, position, channel) order.
+        """
+        var self = self_ptr[]
+        var x = ptr_f32(parts[0])
+        var n_rows = iface_dim(parts[0], 0)
+        var n_features = iface_dim(parts[0], 1)
+        var train_size = iface_dim(parts[1], 0)
+        var np = np_module()
+        var total = (
+            n_rows * (self.config.row_num_cls + n_features) * self.config.embed_dim
+        )
+        var out_arr = np.empty(Python.tuple(Int(total)), "float32")
+        var col_out = ptr_f32(out_arr)
+        _ = self.stage_col_impl(
+            x, parts[1], n_rows, train_size, n_features, col_out
+        )
+        return out_arr
+
+    # =====================================================================
+    # Stage 2: row interaction (staged API)
+    # =====================================================================
+
+    def stage_row_impl(
+        mut self,
+        col_out: Pointer[Float32, MutUntrackedOrigin],  # (n_rows, G*E)
+        n_rows: Int,
+        n_groups: Int,
+        reps: Pointer[Float32, MutUntrackedOrigin],  # (n_rows, num_cls*E)
+    ) raises -> Int:
+        """Row interaction stage (torch RowInteraction.forward).
+
+        ``col_out`` holds the column-embedding stage output in
+        (row, position, channel) order with position count ``n_groups``.
+        The first ``row_num_cls`` positions of every row are replaced by
+        the learned CLS tokens, the transformer blocks run over each
+        row's ``n_groups`` positions independently (batched over rows;
+        RoPE positions restart at 0 within every row), and the final
+        block's cross-attention aggregates the CLS queries over the full
+        sequence. Results are LayerNormed with ``out_ln`` and returned in
+        (row, cls, channel) order. Returns 0 on success.
+        """
+        var cfg = self.config
+        var e = cfg.embed_dim
+        var cff = cfg.col_dim_feedforward()
+        var rhd = e // cfg.row_nhead
+        var num_cls = cfg.row_num_cls
+        if cfg.icl_dim != num_cls * e:
+            raise Error(
+                "row stage output width (row_num_cls * embed_dim) must "
+                "equal icl_dim for the staged pipeline"
+            )
+        if n_groups <= num_cls:
+            raise Error("n_groups must exceed row_num_cls")
+
+        var cls_tokens = self.params + self._off_cls_tokens
+        var ln_w = self.params + self._off_row_out_ln_w
+        var ln_b = self.params + self._off_row_out_ln_b
+        var has_bias = not cfg.bias_free_ln
+
+        var ge = n_groups * e
+        var ce = num_cls * e
+        var cur = alloc[Float32](ge + 16)
+
+        var rope_freqs = self.params + self._off_rope_freqs
+        var last_blk = cfg.row_num_blocks - 1
+        var t = 0
+        while t < n_rows:
+            # Load this row's positions and replace the CLS slots.
+            var src_base = t * ge
+            var i = 0
+            while i + SIMDW <= ge:
+                cur.unsafe_store[width=SIMDW](
+                    i, col_out.unsafe_load[width=SIMDW](src_base + i)
+                )
+                i += SIMDW
+            while i < ge:
+                cur[i] = col_out[src_base + i]
+                i += 1
+            i = 0
+            while i + SIMDW <= ce:
+                cur.unsafe_store[width=SIMDW](
+                    i, cls_tokens.unsafe_load[width=SIMDW](i)
+                )
+                i += SIMDW
+            while i < ce:
+                cur[i] = cls_tokens[i]
+                i += 1
+
+            # Blocks except the last: full self-attention over positions.
+            var blk = 0
+            while blk < last_blk:
+                var p = attn_params_at(
+                    self.params,
+                    self._off_row_blocks + blk * self._row_attn_size,
+                    e, cff, cfg.row_nhead, rhd, 0,
+                    cfg.col_ssmax_n_hidden, cfg.bias_free_ln,
+                )
+                attention_block_forward(
+                    cur, None, cur, n_groups, n_groups, e,
+                    cfg.row_nhead, rhd, cff, p,
+                    rope_freqs, cfg.row_rope_interleaved,
+                )
+                blk += 1
+
+            # Last block: CLS queries attend to the full sequence.
+            var plast = attn_params_at(
+                self.params,
+                self._off_row_blocks + last_blk * self._row_attn_size,
+                e, cff, cfg.row_nhead, rhd, 0,
+                cfg.col_ssmax_n_hidden, cfg.bias_free_ln,
+            )
+            attention_block_forward(
+                cur, cur, cur, num_cls, n_groups, e,
+                cfg.row_nhead, rhd, cff, plast,
+                rope_freqs, cfg.row_rope_interleaved,
+            )
+
+            layer_norm_affine(cur, cur, num_cls, e, ln_w, ln_b, True, has_bias)
+            var dst_base = t * ce
+            i = 0
+            while i + SIMDW <= ce:
+                reps.unsafe_store[width=SIMDW](
+                    dst_base + i, cur.unsafe_load[width=SIMDW](i)
+                )
+                i += SIMDW
+            while i < ce:
+                reps[dst_base + i] = cur[i]
+                i += 1
+            t += 1
+
+        cur.unsafe_free()
+        return 0
+
+    @staticmethod
+    def stage_row(
+        self_ptr: Pointer[Self, MutAnyOrigin],
+        parts: PythonObject,
+    ) raises -> PythonObject:
+        """Run the row interaction stage.
+
+        ``parts = (col_out, n_groups)`` where ``col_out`` is the flat
+        float32 output of ``stage_col`` ((n_rows, n_groups, embed_dim),
+        row-major) and ``n_groups`` is the position count (= row_num_cls
+        + n_features). Returns a flat float32 array of ``n_rows *
+        row_num_cls * embed_dim`` values in (row, cls, channel) order.
+        """
+        var self = self_ptr[]
+        var col_out = ptr_f32(parts[0])
+        var n_rows = iface_dim(parts[0], 0)
+        var n_groups = Int(ptr_i64(parts[1])[0])
+        var np = np_module()
+        var total = n_rows * self.config.row_num_cls * self.config.embed_dim
+        var out_arr = np.empty(Python.tuple(Int(total)), "float32")
+        var reps = ptr_f32(out_arr)
+        _ = self.stage_row_impl(col_out, n_rows, n_groups, reps)
+        return out_arr
+
+    # =====================================================================
+    # Stage 3: ICL prediction from representations (staged API)
+    # =====================================================================
+
+    def predict_from_representations_impl(
+        mut self,
+        reps: Pointer[Float32, MutUntrackedOrigin],  # (n_rows, icl_dim)
+        target: PythonObject,
+        n_rows: Int,
+        dst: Pointer[Float32, MutUntrackedOrigin],  # (n_rows, out_dim)
+    ) raises -> Int:
+        """ICL stage (torch ICLearning.predict_standard internals).
+
+        Train-row representations are augmented with the encoded targets,
+        every ICL block attends all rows to the train prefix, and the
+        decoder maps the post-LN features to raw (untempered) logits or
+        quantiles for ALL rows; callers slice away the train prefix.
+        Returns 0 on success.
+        """
+        var cfg = self.config
+        var d_icl = cfg.icl_dim
+        var is_clf = cfg.max_classes > 0
+        var target_i64 = ptr_i64(target)
+        var target_f32 = ptr_f32(target)
+        var train_size = iface_dim(target, 0)
+        if train_size <= 0 or train_size > n_rows:
+            raise Error("target length must be within [1, n_rows]")
+
+        # y_encoder: OneHotAndLinear (classification): F.linear means
+        # out[j] = W[j, c] + b[j] with W stored row-major as (icl_dim,
+        # max_classes). The regression Linear(1, icl_dim) scales the single
+        # weight column by the target.
+        var y_enc_w = self.params + self._off_icl_y_encoder_w
+        var y_enc_b = self.params + self._off_icl_y_encoder_b
+        var t = 0
+        while t < train_size:
+            var base = t * d_icl
+            if is_clf:
+                var c = Int(target_i64[t])
+                if c < 0 or c >= cfg.max_classes:
+                    raise Error("class label out of range")
+                var j = 0
+                while j < d_icl:
+                    reps[base + j] += (
+                        y_enc_w[j * cfg.max_classes + c] + y_enc_b[j]
+                    )
+                    j += 1
+            else:
+                var v = target_f32[t]
+                var j = 0
+                while j < d_icl:
+                    reps[base + j] += y_enc_w[j] * v + y_enc_b[j]
+                    j += 1
+            t += 1
+
+        # ICL blocks: plain pre-norm attention whose keys/values are
+        # restricted to the train prefix (torch Encoder.forward with
+        # train_size). Rope/ssmax are unused unless configured.
+        var ihd = cfg.icl_head_dim()
+        var icl_ff = cfg.icl_dim_feedforward()
+        var blk = 0
+        while blk < cfg.icl_num_blocks:
+            var off = self._off_icl_blocks + blk * self._icl_attn_size
+            var p = attn_params_at(
+                self.params, off, d_icl, icl_ff,
+                cfg.icl_nhead, ihd, cfg.icl_ssmax_kind,
+                cfg.icl_ssmax_n_hidden, cfg.bias_free_ln,
+            )
+            attention_block_forward(
+                reps, reps, reps, n_rows, train_size, d_icl,
+                cfg.icl_nhead, ihd, icl_ff, p, None, False,
+            )
+            blk += 1
+
+        # Predictor LayerNorm then the two-layer decoder head.
+        layer_norm_affine(
+            reps, reps, n_rows, d_icl,
+            self.params + self._off_icl_ln_w,
+            self.params + self._off_icl_ln_b,
+            True, not cfg.bias_free_ln,
+        )
+
+        var decoded = alloc[Float32](n_rows * d_icl * 2 + 16)
+        gemm_nt(n_rows, d_icl * 2, d_icl, reps, self.params + self._off_decoder_w1, decoded)
+        t = 0
+        while t < n_rows:
+            var b = 0
+            while b + SIMDW <= d_icl * 2:
+                decoded.unsafe_store[width=SIMDW](
+                    t * d_icl * 2 + b,
+                    decoded.unsafe_load[width=SIMDW](t * d_icl * 2 + b)
+                    + self.params.unsafe_load[width=SIMDW](self._off_decoder_b1 + b),
+                )
+                b += SIMDW
+            while b < d_icl * 2:
+                decoded[t * d_icl * 2 + b] += self.params[self._off_decoder_b1 + b]
+                b += 1
+            t += 1
+        t = 0
+        while t < n_rows * d_icl * 2:
+            decoded[t] = gelu_scalar(decoded[t])
+            t += 1
+
+        gemm_nt(n_rows, cfg.out_dim, d_icl * 2, decoded, self.params + self._off_decoder_w2, dst)
+        t = 0
+        while t < n_rows:
+            var b = 0
+            while b + SIMDW <= cfg.out_dim:
+                dst.unsafe_store[width=SIMDW](
+                    t * cfg.out_dim + b,
+                    dst.unsafe_load[width=SIMDW](t * cfg.out_dim + b)
+                    + self.params.unsafe_load[width=SIMDW](self._off_decoder_b2 + b),
+                )
+                b += SIMDW
+            while b < cfg.out_dim:
+                dst[t * cfg.out_dim + b] += self.params[self._off_decoder_b2 + b]
+                b += 1
+            t += 1
+        decoded.unsafe_free()
+        return 0
+
+    @staticmethod
+    def predict_from_representations(
+        self_ptr: Pointer[Self, MutAnyOrigin],
+        parts: PythonObject,
+    ) raises -> PythonObject:
+        """Run the ICL stage on row representations.
+
+        ``parts = (reps, target)`` where ``reps`` is ``(n_rows, icl_dim)``
+        float32 (the ``stage_row`` output incl. the train prefix),
+        ``target`` is ``(train_size,)`` int64 labels (classification) or
+        float32 scaled targets (regression). Returns a flat float32 array
+        of ``n_rows * out_dim`` RAW decoder outputs in row-major order;
+        callers select the test rows (and class columns) themselves.
+        """
+        var self = self_ptr[]
+        var reps = ptr_f32(parts[0])
+        var n_rows = iface_dim(parts[0], 0)
+        if iface_dim(parts[0], 1) != self.config.icl_dim:
+            raise Error(
+                "representations must have icl_dim columns; got width",
+            )
+        var np = np_module()
+        var total = n_rows * self.config.out_dim
+        var out_arr = np.empty(Python.tuple(Int(total)), "float32")
+        var outp = ptr_f32(out_arr)
+        _ = self.predict_from_representations_impl(
+            reps, parts[1], n_rows, outp
+        )
+        return out_arr
+
+
 # =============================================================================
 # Python bindings
 # =============================================================================
@@ -709,6 +1498,13 @@ def PyInit__native_tabicl() abi("C") -> PythonObject:
             m.add_type[TabICLInference]("TabICLInference")
             .def_py_init[TabICLInference.py_init]()
             .def_method[TabICLInference.forward]("forward")
+            .def_method[TabICLInference.stage_col]("stage_col")
+            .def_method[TabICLInference.stage_row]("stage_row")
+            .def_method[TabICLInference.predict_from_representations](
+                "predict_from_representations"
+            )
+            .def_method[TabICLInference.attn_probe]("attn_probe")
+            .def_method[TabICLInference.gemm_probe]("gemm_probe")
             .def_method[TabICLInference.param_count]("param_count")
             .def_method[TabICLInference.layout_offsets]("layout_offsets")
         )

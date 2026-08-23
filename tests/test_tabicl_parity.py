@@ -202,28 +202,64 @@ def test_estimator_default_checkpoint_names_match_plan():
 
 
 # ---------------------------------------------------------------------------
-# Mojo kernels: opt-in construction/shape smoke (NOT numeric parity yet)
+# Mojo kernels: numeric parity vs the torch reference (opt-in)
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.skipif(
-    os.environ.get("SHINRIN_TABICL_PARITY_MOJO") != "1",
-    reason="set SHINRIN_TABICL_PARITY_MOJO=1 with `just build-tabicl-mojo`; "
-    "the Mojo kernels are an experimental scaffold without numeric parity",
-)
-def test_mojo_smoke_shapes():
+def _run_mojo_parity(cfg_dict: dict, y: np.ndarray) -> None:
     from shinrin._tabicl._mojo_backend import TabICLMojoModel
 
-    config = TabICLConfig.from_dict({**TINY_CLASSIFIER})
-    from _tabicl_fixture import make_params
+    try:
+        from _tabicl_fixture import make_params
+    except ImportError:
+        pytest.skip("fixture helper unavailable")
 
-    params = make_params(TINY_CLASSIFIER, seed=0)
+    config = TabICLConfig.from_dict(cfg_dict)
+    params = make_params(cfg_dict, seed=0)
     try:
         model = TabICLMojoModel(config, params)
     except ImportError:
         pytest.skip("native module not built")
-    assert model.param_count > 0
-    X = np.random.randn(20, 4).astype(np.float32)
+    ref = TabICLTorchModel(config, params)
+
+    rng = np.random.RandomState(11)
+    n_train = y.shape[0]
+    n_test = 7
+    X = rng.randn(n_train + n_test, 5).astype(np.float32)
+
+    rep_m = model.representations(X, y)
+    rep_t = ref.representations(X, y)
+    np.testing.assert_allclose(rep_m, rep_t, rtol=5e-4, atol=5e-5)
+
+    logits_m = model.predict_from_representations(rep_m, y, return_logits=True)
+    logits_t = ref.predict_from_representations(rep_t, y, return_logits=True)
+    assert logits_m.shape == logits_t.shape
+    np.testing.assert_allclose(logits_m, logits_t, rtol=5e-4, atol=5e-5)
+
+    fwd_m = model.forward(X, y, return_logits=True)
+    fwd_t = ref.forward(X, y, return_logits=True)
+    assert fwd_m.shape == fwd_t.shape
+    np.testing.assert_allclose(fwd_m, fwd_t, rtol=5e-4, atol=5e-5)
+
+    # staged API must not mutate its inputs
+    rep_copy = rep_m.copy()
+    model.predict_from_representations(rep_m, y)
+    np.testing.assert_array_equal(rep_m, rep_copy)
+
+
+@pytest.mark.skipif(
+    os.environ.get("SHINRIN_TABICL_PARITY_MOJO") != "1",
+    reason="set SHINRIN_TABICL_PARITY_MOJO=1 with `just build-tabicl-mojo`",
+)
+def test_mojo_classifier_staged_parity():
     y = np.arange(12) % TINY_CLASSIFIER["max_classes"]
-    out = model.forward(X, y)
-    assert out.size == max(X.shape[0] - len(y), 1) * config.out_dim
+    _run_mojo_parity(TINY_CLASSIFIER, y)
+
+
+@pytest.mark.skipif(
+    os.environ.get("SHINRIN_TABICL_PARITY_MOJO") != "1",
+    reason="set SHINRIN_TABICL_PARITY_MOJO=1 with `just build-tabicl-mojo`",
+)
+def test_mojo_regressor_staged_parity():
+    rng = np.random.RandomState(3)
+    _run_mojo_parity(TINY_REGRESSOR, rng.randn(12).astype(np.float32))

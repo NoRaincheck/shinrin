@@ -1,25 +1,19 @@
 #!/usr/bin/env python3
-"""Benchmark TabICL inference: NumPy vs torch backends.
+"""Benchmark TabICL inference across compute backends.
 
 Times ``TabICLClassifier`` / ``TabICLRegressor`` fit (preprocessing +
 optional KV-cache build) and predict (ensemble forward passes) separately
-on synthetic datasets. The upstream ``tabicl`` package can be compared
-with ``--with-upstream`` when the benchmark extra is installed:
+on synthetic datasets, for the ``numpy``, ``torch`` or ``mojo`` backend.
+The upstream ``tabicl`` package can be compared with ``--with-upstream``
+when the benchmark extra is installed:
 
     uv sync --extra tabicl-bench
 
-With ``--mojo`` the raw end-to-end forward pass of the native Mojo kernels
-is timed against the torch backend (CPU and MPS where available) on the
-real classifier checkpoint weights. The Mojo kernels are still a reduced
-scaffold — they read only the first feature group of the training rows,
-skip test-row encoding, and aggregate ICL into class embeddings instead of
-attending over train rows — so those numbers are throughput indicators for
-the current kernels, not like-for-like backend comparisons (see
-``scripts/benchmarks/TABICL_BENCHMARK.md``).
+Examples:
 
-Usage:
-    python scripts/benchmarks/bench_tabicl.py [--quick] [--repeat N]
-        [--with-upstream] [--kv-cache] [--mojo]
+    python scripts/benchmarks/bench_tabicl.py --quick --backend numpy
+    python scripts/benchmarks/bench_tabicl.py --backend torch
+    python scripts/benchmarks/bench_tabicl.py --backend mojo --quick
 """
 
 from __future__ import annotations
@@ -80,7 +74,7 @@ def _timed(fn, repeats: int, warmup: bool = True):
 
 
 def bench_case(task: str, n_samples: int, n_features: int, args) -> None:
-    backend = "numpy" if not args.torch else "torch"
+    backend = args.backend
     n_test = min(1000, max(200, n_samples // 10))
     if task == "regression":
         X, y = make_regression(n_samples + n_test, n_features)
@@ -125,131 +119,6 @@ def bench_case(task: str, n_samples: int, n_features: int, args) -> None:
         f"predict {predict_time:7.3f}s ±{predict_std:.3f}  "
         f"score {score:.3f}  [{backend}]"
     )
-
-
-KERNEL_SIZES = ((300, 150), (500, 200), (2000, 200), (5000, 500))
-
-
-def _kernel_inputs(
-    n_train: int, n_test: int, n_features: int, n_classes: int
-) -> tuple[np.ndarray, np.ndarray]:
-    """Deterministic synthetic input shared by the parent and child processes."""
-    rng = np.random.RandomState(7)
-    X = rng.randn(n_train + n_test, n_features).astype(np.float32)
-    y_train = rng.randint(0, max(int(n_classes), 2), size=n_train)
-    return X, y_train
-
-
-def _mojo_child(
-    n_train: int,
-    n_test: int,
-    n_features: int,
-    n_classes: int,
-    out_q,
-) -> None:
-    """Time ONE raw Mojo forward pass and exit.
-
-    Each timed sample runs in a pristine process: earlier kernel builds
-    suffered heap corruption whose manifestation depended on process state
-    (see TABICL_BENCHMARK.md), so isolation keeps any recurrence contained
-    and survivor counts meaningful.
-    """
-    import time as _time
-
-    from shinrin._tabicl._checkpoint import CLASSIFIER_V2, ensure_npz
-    from shinrin._tabicl._config import TabICLConfig
-    from shinrin._tabicl._mojo_backend import TabICLMojoModel
-
-    X, y_train = _kernel_inputs(n_train, n_test, n_features, n_classes)
-    _, config_dict, params = ensure_npz(filename=CLASSIFIER_V2)
-    model = TabICLMojoModel(TabICLConfig.from_dict(config_dict), params)
-
-    t0 = _time.perf_counter()
-    model.forward(X, y_train)
-    out_q.put(_time.perf_counter() - t0)
-
-
-def bench_mojo(args) -> None:
-    """Raw end-to-end forward timings: Mojo kernels vs torch (CPU/MPS).
-
-    The Mojo backend only exposes a single end-to-end ``forward`` and the
-    kernels are a reduced scaffold (see TABICL_BENCHMARK.md), so each Mojo
-    cell is timed inside a throwaway subprocess: any recurrence of the
-    (now-fixed) heap corruption stays contained and survivor counts
-    (samples/attempts) stay honest.
-    """
-    import multiprocessing as mp
-
-    import torch
-
-    from shinrin._tabicl._checkpoint import CLASSIFIER_V2, ensure_npz
-    from shinrin._tabicl._config import TabICLConfig
-    from shinrin._tabicl._model_torch import TabICLTorchModel
-
-    _, config_dict, params = ensure_npz(filename=CLASSIFIER_V2)
-    config = TabICLConfig.from_dict(config_dict)
-    n_classes = max(int(config.max_classes), 2)
-
-    devices = ["cpu"]
-    if torch.backends.mps.is_available():
-        devices.append("mps")
-    torch_models = {
-        dev: TabICLTorchModel(config, params, device=dev) for dev in devices
-    }
-
-    def time_cell(label: str, fn) -> str:
-        try:
-            mean, std = _timed(fn, args.repeat)
-        except Exception as exc:  # noqa: BLE001 - report and continue
-            return f"{label} FAILED ({exc})"
-        return f"{label} {mean:.3f}s ±{std:.3f}"
-
-    ctx = mp.get_context("spawn")
-    print(
-        f"\nTabICL kernel benchmark (raw forward, "
-        f"n_features={args.n_features}, repeat={args.repeat})"
-    )
-    for n_train, n_test in KERNEL_SIZES:
-        cells = []
-
-        # Mojo: one sample per child process; retry until enough samples
-        # survive or attempts run out.
-        samples: list[float] = []
-        attempts = 0
-        for _ in range(args.repeat * 8):
-            if len(samples) >= args.repeat:
-                break
-            attempts += 1
-            q = ctx.Queue()
-            proc = ctx.Process(
-                target=_mojo_child,
-                args=(n_train, n_test, args.n_features, n_classes, q),
-            )
-            proc.start()
-            proc.join(timeout=600)
-            if proc.exitcode == 0 and not q.empty():
-                samples.append(float(q.get()))
-            else:
-                proc.terminate()
-                if proc.exitcode is None:
-                    proc.join(timeout=60)
-        if samples:
-            arr = np.asarray(samples)
-            cells.append(
-                f"mojo {arr.mean():.3f}s ±{arr.std():.3f} (n={len(samples)}/{attempts})"
-            )
-        else:
-            cells.append("mojo CRASHED")
-
-        X, y_train = _kernel_inputs(n_train, n_test, args.n_features, n_classes)
-        for dev, model in torch_models.items():
-            cells.append(
-                time_cell(
-                    f"torch-{dev}",
-                    lambda m=model, x=X, y=y_train: m.forward(x, y),
-                )
-            )
-        print(f"  train {n_train:>5} x test {n_test:<4} " + " | ".join(cells))
 
 
 def bench_upstream(task: str, n_samples: int, n_features: int, args) -> None:
@@ -297,18 +166,10 @@ def main() -> None:
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--kv-cache", action="store_true")
     parser.add_argument(
-        "--torch", action="store_true", help="benchmark the torch backend"
-    )
-    parser.add_argument(
-        "--mojo",
-        action="store_true",
-        help="raw forward-pass timings: Mojo kernels vs torch (CPU/MPS)",
-    )
-    parser.add_argument(
-        "--n-features",
-        type=int,
-        default=100,
-        help="features per row for --mojo kernel timings",
+        "--backend",
+        choices=("numpy", "torch", "mojo"),
+        default="numpy",
+        help="compute backend to benchmark",
     )
     parser.add_argument(
         "--with-upstream",
@@ -317,10 +178,6 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    if args.mojo:
-        bench_mojo(args)
-        return
-
     if args.quick:
         sizes = [(300, 10)]
     else:
@@ -328,7 +185,7 @@ def main() -> None:
     tasks = ["classification", "regression", "mixed categorical"]
 
     print(
-        f"TabICL benchmark (backend={'torch' if args.torch else 'numpy'}, "
+        f"TabICL benchmark (backend={args.backend}, "
         f"n_estimators={args.n_estimators}, kv_cache={args.kv_cache})"
     )
     for n_samples, n_features in sizes:

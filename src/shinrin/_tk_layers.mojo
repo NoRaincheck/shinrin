@@ -95,24 +95,29 @@ def ssmax_apply(
     ``n_keys`` is the attention source length (torch ``src_len``): the
     scale always uses log(n_keys) regardless of how many query rows there
     are, matching ``attn.ssmax_layer(q, src_len)`` in the reference.
+
+    ``q`` uses the head-major blocked layout produced by
+    ``attention_block_forward``: element (h, r, d) lives at
+    ``h * q_rows * head_dim + r * head_dim + d``, matching torch's
+    ``(..., n_heads, seq, head_dim)`` tensor after ``transpose(-3, -2)``.
     """
     if kind == 0:
         return
     var logn = fast_log(Float32(max(n_keys, 1)))
-    var row_stride = n_heads * head_dim
+    var row_stride = head_dim
 
     if kind == 1:
-        var r = 0
-        while r < q_rows:
-            var h = 0
-            while h < n_heads:
-                var s = ssmax[h] * logn
+        var h = 0
+        while h < n_heads:
+            var s = ssmax[h] * logn
+            var r = 0
+            while r < q_rows:
                 var d = 0
                 while d < head_dim:
-                    q[r * row_stride + h * head_dim + d] *= s
+                    q[h * q_rows * head_dim + r * head_dim + d] *= s
                     d += 1
-                h += 1
-            r += 1
+                r += 1
+            h += 1
         return
 
     var elementwise = kind == 3 or kind == 5
@@ -131,17 +136,18 @@ def ssmax_apply(
 
     if kind <= 3:
         # SSMaxMLP: static per-head (or per-head-dim) multipliers.
-        var r = 0
-        while r < q_rows:
-            var h = 0
-            while h < n_heads:
+        var h = 0
+        while h < n_heads:
+            var r = 0
+            while r < q_rows:
+                var base = h * q_rows * head_dim + r * head_dim
                 var d = 0
                 while d < head_dim:
                     var s = scales[h * head_dim + d] if elementwise else scales[h]
-                    q[r * row_stride + h * head_dim + d] *= s
+                    q[base + d] *= s
                     d += 1
-                h += 1
-            r += 1
+                r += 1
+            h += 1
         scales.unsafe_free()
         return
 
@@ -160,7 +166,7 @@ def ssmax_apply(
     while r < q_rows:
         var h = 0
         while h < n_heads:
-            var qp = q + r * row_stride + h * head_dim
+            var qp = q + h * q_rows * head_dim + r * head_dim
             var j = 0
             while j < hidden:
                 var acc: Float32 = 0.0
@@ -219,39 +225,50 @@ def _rope_rotate_rows(
     freqs: Pointer[Float32, MutUntrackedOrigin],
     interleaved: Bool,
 ):
-    """Rotate one (rows, n_heads*head_dim) buffer; position of row r is r.
+    """Rotate one head-major blocked ``(n_heads, rows, head_dim)`` buffer;
+    the rotary position of row ``r`` is ``r``.
 
-    Matches torch ``RotaryEmbedding.rotate`` with ``positions=arange`` and
-    float32 trig: theta = p * freqs[j] for pair j.
+    Replicates torch ``RotaryEmbedding.rotate`` (float32 trig) exactly,
+    INCLUDING its interleaved-mode angle quirk: because cos/sin are built
+    from ``cat([freqs, freqs])`` while pairs are interleaved, element ``d``
+    uses angle ``r * freqs[d % (head_dim/2)]`` — odd elements do NOT use
+    their pair's angle. The non-interleaved path is the classic half-split
+    rotation. Element (h, r, d) lives at ``h*rows*head_dim + r*head_dim + d``
+    (torch's ``(..., n_heads, seq, head_dim)`` after ``transpose(-3,-2)``).
     """
     var hf = (head_dim + 1) // 2
-    var row_stride = n_heads * head_dim
-    var r = 0
-    while r < rows:
-        var h = 0
-        while h < n_heads:
-            var base = r * row_stride + h * head_dim
+    var h = 0
+    while h < n_heads:
+        var r = 0
+        while r < rows:
+            var base = h * rows * head_dim + r * head_dim
             var j = 0
             while j < hf:
-                var ang = Float32(r) * freqs[j]
-                var c = cos(ang)
-                var s = sin(ang)
                 if interleaved:
                     var d0 = base + 2 * j
+                    var a0 = Float32(r) * freqs[(2 * j) % hf]
+                    var a1 = Float32(r) * freqs[(2 * j + 1) % hf]
+                    var c0 = cos(a0)
+                    var s0 = sin(a0)
+                    var c1 = cos(a1)
+                    var s1 = sin(a1)
                     var x0 = x[d0]
                     var x1 = x[d0 + 1]
-                    x[d0] = x0 * c - x1 * s
-                    x[d0 + 1] = x1 * c + x0 * s
+                    x[d0] = x0 * c0 - x1 * s0
+                    x[d0 + 1] = x1 * c1 + x0 * s1
                 else:
                     var d0 = base + j
                     var d1 = base + hf + j
+                    var ang = Float32(r) * freqs[j]
+                    var c = cos(ang)
+                    var s = sin(ang)
                     var x0 = x[d0]
                     var x1 = x[d1]
                     x[d0] = x0 * c - x1 * s
                     x[d1] = x1 * c + x0 * s
                 j += 1
-            h += 1
-        r += 1
+            r += 1
+        h += 1
 
 
 def rope_apply(
@@ -522,9 +539,9 @@ def attention_block_forward(
     var v_proj = alloc[Float32](k_rows * d + 16)
     gemm_nt(q_rows, d, d, qn, p.w_qkv, q_proj)
     _add_row_bias(q_proj, p.b_qkv, q_rows, d)
-    gemm_nt(k_rows, d, d, kn, p.w_qkv + d, k_proj)
+    gemm_nt(k_rows, d, d, kn, p.w_qkv + d * d, k_proj)
     _add_row_bias(k_proj, p.b_qkv + d, k_rows, d)
-    gemm_nt(k_rows, d, d, kn, p.w_qkv + 2 * d, v_proj)
+    gemm_nt(k_rows, d, d, kn, p.w_qkv + 2 * d * d, v_proj)
     _add_row_bias(v_proj, p.b_qkv + 2 * d, k_rows, d)
 
     # -- head-major reshape ------------------------------------------------

@@ -6,11 +6,11 @@ architecture hyper-parameters (:meth:`TabICLConfig.dims_array`) and the state
 dict into contiguous buffers, then drives a bound ``TabICLInference`` type.
 
 .. note::
-   The kernels currently expose a single end-to-end :meth:`TabICLMojoModel
-   .forward` pass. The staged ``representations`` /
-   ``predict_from_representations`` / KV-cache API used by the Torch and NumPy
-   backends is not implemented yet; those methods raise
-   :class:`NotImplementedError` until the kernels reach numeric parity.
+   Inference runs as three staged kernel calls — ``stage_col`` (column
+   embedding), ``stage_row`` (row interaction) and
+   ``predict_from_representations`` (in-context learning + decoder) —
+   composed by :meth:`TabICLMojoModel.forward`. KV-cache methods are not
+   implemented yet.
 
 Build the shared library with::
 
@@ -162,6 +162,14 @@ class TabICLMojoModel:
     # end-to-end forward
     # ------------------------------------------------------------------ #
 
+    @staticmethod
+    def _prepare_target(cfg: TabICLConfig, y_train: np.ndarray) -> np.ndarray:
+        """Canonical target buffer for the kernels: int64 labels for
+        classification, float32 values for regression."""
+        if cfg.max_classes > 0:
+            return np.ascontiguousarray(y_train, dtype=np.int64)
+        return np.ascontiguousarray(y_train, dtype=np.float32)
+
     def forward(
         self,
         X: np.ndarray,
@@ -169,7 +177,7 @@ class TabICLMojoModel:
         return_logits: bool = True,
         temperature: float = 0.9,
     ) -> np.ndarray:
-        """Run the native end-to-end forward pass.
+        """Run the native end-to-end forward pass (staged composition).
 
         Parameters
         ----------
@@ -184,36 +192,53 @@ class TabICLMojoModel:
         """
         cfg = self.config
         x = np.ascontiguousarray(X, dtype=np.float32)
-        n_train = int(np.asarray(y_train).shape[0])
-        n_test = x.shape[0] - n_train
-
-        group_size = cfg.col_feature_group_size
-        col_input = np.ascontiguousarray(x[:n_train, :group_size], dtype=np.float32)
-        row_input = np.zeros((max(n_test, 1), cfg.embed_dim), dtype=np.float32)
-        target = np.asarray(y_train, dtype=np.int64)
-
-        out = np.asarray(
-            self._handle.forward([col_input, row_input, target]), dtype=np.float32
+        y = self._prepare_target(cfg, np.asarray(y_train))
+        reps = self.representations(x, y)
+        return self.predict_from_representations(
+            reps, y, return_logits=return_logits, temperature=temperature
         )
-        if n_test:
-            out = out[: n_test * cfg.out_dim].reshape(n_test, cfg.out_dim)
-        else:
-            out = out[:0]
-
-        if cfg.max_classes > 0 and not return_logits and out.size:
-            out = np.exp(out) / np.sum(np.exp(out), axis=-1, keepdims=True)
-        return out
 
     # ------------------------------------------------------------------ #
-    # staged API (pending native parity work)
+    # staged API
     # ------------------------------------------------------------------ #
 
     def representations(self, X: np.ndarray, y_train: np.ndarray) -> np.ndarray:
-        """Column embedding + row interaction (not implemented natively yet)."""
-        raise NotImplementedError(
-            "The Mojo backend does not implement the staged inference API yet; "
-            "use TabICLMojoModel.forward() or the 'numpy'/'torch' backends."
+        """Column embedding + row interaction. Returns (1, T, D) array."""
+        cfg = self.config
+        x = np.ascontiguousarray(X, dtype=np.float32)
+        if x.ndim != 2:
+            raise ValueError(f"X must be 2-D (rows, features); got {x.shape}")
+        target = self._prepare_target(cfg, np.asarray(y_train))
+        if target.ndim != 1:
+            raise ValueError("y_train must be 1-D")
+        n_rows, n_features = x.shape
+        train_size = target.shape[0]
+        if not 0 < train_size <= n_rows:
+            raise ValueError(f"train_size {train_size} must be within [1, {n_rows}]")
+
+        g_total = cfg.row_num_cls + n_features
+        col = np.asarray(self._handle.stage_col([x, target]), dtype=np.float32)
+        expected = n_rows * g_total * cfg.embed_dim
+        if col.size != expected:
+            raise ValueError(
+                f"stage_col returned {col.size} floats, expected {expected}"
+            )
+
+        reps = np.asarray(
+            self._handle.stage_row(
+                [
+                    col.reshape(n_rows, g_total * cfg.embed_dim),
+                    np.array([g_total], dtype=np.int64),
+                ]
+            ),
+            dtype=np.float32,
         )
+        expected = n_rows * cfg.icl_dim
+        if reps.size != expected:
+            raise ValueError(
+                f"stage_row returned {reps.size} floats, expected {expected}"
+            )
+        return reps.reshape(1, n_rows, cfg.icl_dim)
 
     def predict_from_representations(
         self,
@@ -222,11 +247,46 @@ class TabICLMojoModel:
         return_logits: bool = True,
         temperature: float = 0.9,
     ) -> np.ndarray:
-        """ICL-stage decoding (not implemented natively yet)."""
-        raise NotImplementedError(
-            "The Mojo backend does not implement the staged inference API yet; "
-            "use TabICLMojoModel.forward() or the 'numpy'/'torch' backends."
-        )
+        """Run the ICL stage on row representations.
+
+        Returns ``(test_size, num_classes)`` logits/probabilities for
+        classification or ``(test_size, out_dim)`` raw quantiles for
+        regression.
+        """
+        cfg = self.config
+        # The kernel y-encodes the train prefix in place; give it a private
+        # copy so caller-visible ``R`` is never mutated.
+        r = np.array(R, dtype=np.float32, copy=True, order="C").reshape(-1, cfg.icl_dim)
+        y = self._prepare_target(cfg, np.asarray(y_train))
+        if y.ndim != 1:
+            raise ValueError("y_train must be 1-D")
+        train_size = y.shape[0]
+        if not 0 < train_size <= r.shape[0]:
+            raise ValueError(
+                f"train_size {train_size} must be within [1, {r.shape[0]}]"
+            )
+
+        if cfg.max_classes > 0 and len(np.unique(y_train)) > cfg.max_classes:
+            raise NotImplementedError(
+                "many-class hierarchical prediction is not supported by the "
+                "Mojo backend yet; use the 'numpy'/'torch' backends"
+            )
+
+        out_all = np.asarray(
+            self._handle.predict_from_representations([r, y]), dtype=np.float32
+        ).reshape(r.shape[0], cfg.out_dim)
+        out = out_all[train_size:]
+
+        if cfg.max_classes == 0:
+            return out
+        logits = out[:, : len(np.unique(y_train))]
+        if return_logits:
+            return logits
+        scaled = logits / temperature
+        scaled = scaled - scaled.max(axis=-1, keepdims=True)
+        probs = np.exp(scaled)
+        probs /= probs.sum(axis=-1, keepdims=True)
+        return probs
 
     def build_cache(self, X: np.ndarray, y_train: np.ndarray) -> dict:
         """KV-cache construction (not implemented natively yet)."""
