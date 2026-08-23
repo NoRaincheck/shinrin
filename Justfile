@@ -51,6 +51,10 @@ test-mlp-mojo: build-mlp-mojo
 bench-mlp:
     uv run python scripts/benchmarks/bench_mlp.py
 
+# Benchmark ternary (BitLinear) quantization vs full precision
+bench-bitlinear:
+    uv run python scripts/benchmarks/bench_bitlinear.py
+
 # Build the TabICL Mojo native extension (shinrin._native_tabicl)
 build-tabicl-mojo:
     uv run mojo build src/shinrin/_tabicl_kernels.mojo --emit shared-lib -I src -o src/shinrin/_native_tabicl.so
