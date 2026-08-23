@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import numpy as np
 
+from shinrin._quant import QUANTIZATION_NONE, validate_quantization
+
 
 def _rsqrt_uniform(rng: np.random.RandomState, size: tuple[int, ...], d: int):
     return rng.uniform(-(d**-0.5), d**-0.5, size=size).astype(np.float32)
@@ -67,9 +69,12 @@ class TabMConfig:
         use_embeddings: bool = True,
         bins: list[np.ndarray] | None = None,
         d_embedding: int = 8,
+        quantization: str = QUANTIZATION_NONE,
+        quantization_granularity: str = "per_row",
     ) -> None:
         if arch_type not in ("tabm", "tabm-mini", "tabm-packed"):
             raise ValueError(f"Unknown arch_type: {arch_type!r}")
+        validate_quantization(quantization, quantization_granularity)
         self.n_num_features = n_num_features
         self.cat_cardinalities = list(cat_cardinalities)
         self.d_out = d_out
@@ -81,6 +86,10 @@ class TabMConfig:
         self.use_embeddings = use_embeddings
         self.bins = bins
         self.d_embedding = d_embedding
+        self.quantization = quantization
+        self.quantization_granularity = (
+            quantization_granularity if quantization != QUANTIZATION_NONE else "per_row"
+        )
 
     @property
     def n_cat_features(self) -> int:

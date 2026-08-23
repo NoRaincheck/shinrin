@@ -23,6 +23,11 @@ from sklearn.preprocessing import LabelEncoder
 from sklearn.utils.multiclass import check_classification_targets
 from sklearn.utils.validation import validate_data
 
+from ._quant import (
+    QUANTIZATION_TERNARY,
+    ternary_quantize_dequantize,
+    validate_quantization,
+)
 from ._tabicl._backend import get_tabicl_backend
 from ._tabicl._checkpoint import ensure_npz
 from ._tabicl._config import TabICLConfig
@@ -43,6 +48,35 @@ def _softmax(
     z = z - z.max(axis=axis, keepdims=True)
     e = np.exp(z)
     return e / e.sum(axis=axis, keepdims=True)
+
+
+def _ternary_post_training_quantize(
+    params: dict[str, np.ndarray], granularity: str
+) -> dict[str, np.ndarray]:
+    """Experimental BitLinear PTQ of a TabICL state dict.
+
+    Every 2-D ``*.weight`` tensor except the fused attention QKV
+    projections (``*in_proj_weight``) is replaced by its absmean ternary
+    approximation: MLP linears and attention output projections degrade
+    gracefully while naively ternarizing Q/K/V destroys accuracy
+    (~chance level), so those stay full precision. Biases, norms, class
+    tokens and rotary tables stay full precision too. Applied once at
+    load time so all backends share identical weights.
+    """
+    out: dict[str, np.ndarray] = {}
+    for key, arr in params.items():
+        if (
+            isinstance(arr, np.ndarray)
+            and arr.ndim == 2
+            and key.endswith("weight")
+            and "in_proj_weight" not in key
+        ):
+            out[key] = ternary_quantize_dequantize(
+                np.asarray(arr, dtype=np.float32), granularity
+            ).astype(arr.dtype, copy=False)
+        else:
+            out[key] = arr
+    return out
 
 
 def _concat_chunks(chunks: list[np.ndarray]) -> np.ndarray:
@@ -98,7 +132,10 @@ class _TabICLBase(BaseEstimator):
         backend: str = "auto",
         batch_size: int = 8,
         device=None,
+        quantization: str = "none",
+        quantization_granularity: str = "per_row",
     ) -> None:
+        validate_quantization(quantization, quantization_granularity)
         self.norm_methods = norm_methods
         self.feat_shuffle_method = feat_shuffle_method
         self.outlier_threshold = outlier_threshold
@@ -110,6 +147,8 @@ class _TabICLBase(BaseEstimator):
         self.backend = backend
         self.batch_size = batch_size
         self.device = device
+        self.quantization = quantization
+        self.quantization_granularity = quantization_granularity
 
     # -- backend handling ---------------------------------------------------
 
@@ -130,6 +169,17 @@ class _TabICLBase(BaseEstimator):
             model_path=self.model_path,
             allow_auto_download=self.allow_auto_download,
         )
+        if self.quantization == QUANTIZATION_TERNARY:
+            params = _ternary_post_training_quantize(
+                params, self.quantization_granularity
+            )
+            warnings.warn(
+                "Ternary post-training quantization of TabICL checkpoints is "
+                "experimental and can degrade accuracy substantially "
+                "(attention Q/K/V projections are kept full precision).",
+                UserWarning,
+                stacklevel=2,
+            )
         self.model_config_ = config_dict
         config = TabICLConfig.from_dict(config_dict)
         if backend_name == "torch":
@@ -248,6 +298,8 @@ class TabICLClassifier(ClassifierMixin, _TabICLBase):
         random_state: int | None = 42,
         verbose: bool = False,
         backend: str = "auto",
+        quantization: str = "none",
+        quantization_granularity: str = "per_row",
     ) -> None:
         super().__init__(
             norm_methods=norm_methods,
@@ -261,6 +313,8 @@ class TabICLClassifier(ClassifierMixin, _TabICLBase):
             backend=backend,
             batch_size=batch_size,
             device=device,
+            quantization=quantization,
+            quantization_granularity=quantization_granularity,
         )
         self.n_estimators = n_estimators
         self.class_shuffle_method = class_shuffle_method
@@ -443,6 +497,8 @@ class TabICLRegressor(RegressorMixin, _TabICLBase):
         random_state: int | None = 42,
         verbose: bool = False,
         backend: str = "auto",
+        quantization: str = "none",
+        quantization_granularity: str = "per_row",
     ) -> None:
         super().__init__(
             norm_methods=norm_methods,
@@ -456,6 +512,8 @@ class TabICLRegressor(RegressorMixin, _TabICLBase):
             backend=backend,
             batch_size=batch_size,
             device=device,
+            quantization=quantization,
+            quantization_granularity=quantization_granularity,
         )
         self.n_estimators = n_estimators
         self.kv_cache = kv_cache

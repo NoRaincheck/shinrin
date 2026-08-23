@@ -9,6 +9,8 @@ loosely (shuffle RNGs differ between backends).
 
 from __future__ import annotations
 
+import os
+
 import numpy as np
 import pytest
 
@@ -282,3 +284,81 @@ def test_lbfgs_final_loss_agreement():
     assert nit_m > 0
     assert final_np < loss_init * 0.5
     assert final_m < loss_init * 0.5
+
+
+# ---------------------------------------------------------------------------
+# ternary (BitLinear) quantization parity
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("granularity", ["per_row", "per_tensor"])
+def test_quantized_loss_grad_parity(granularity):
+    """Deterministic loss/grad parity with ternary quantization enabled.
+
+    Both backends derive the absmean scales in float64, so the effective
+    ternary weights are bit-identical; remaining differences are float32
+    GEMM accumulation noise only.
+    """
+    config, params, batch = make_case("regression", use_emb=True)
+    config.quantization = "ternary"
+    config.quantization_granularity = granularity
+    core = MLPCore(config, "regression")
+    space, theta = _flatten(config, params)
+
+    loss_np, grads_np = core.loss_and_grads(params, batch)
+    g_np = space.flatten_grads(grads_np)
+
+    trainer = get_native_trainer(config)
+    loss_m, grad_m = trainer.loss_grad(theta, batch, config, task=0)
+
+    assert loss_np == pytest.approx(float(loss_m), rel=1e-4)
+    np.testing.assert_allclose(g_np, np.asarray(grad_m), rtol=1e-3, atol=1e-5)
+
+
+@pytest.mark.parametrize("granularity", ["per_row", "per_tensor"])
+def test_quantized_effective_weights_ternary(granularity):
+    """The Mojo forward must consume {-1, 0, +1} * gamma weights."""
+    config, params, batch = make_case("regression", use_emb=False)
+    config.quantization = "ternary"
+    config.quantization_granularity = granularity
+    trainer = get_native_trainer(config)
+    theta = params.flatten()
+    out_m = np.empty((batch.n_samples, config.d_out), dtype=np.float32)
+    trainer.forward(theta, batch, config, out=out_m)
+
+    core = MLPCore(config, "regression")
+    out_np = core.forward(params, batch)[0]
+    np.testing.assert_allclose(out_np, out_m, rtol=1e-4, atol=1e-5)
+
+
+def test_quantized_training_curve_close():
+    """QAT trajectories agree loosely: identical math, chaotic rounding.
+
+    Ternary level flips caused by backend float noise amplify over many
+    epochs, so the loss curves are compared with a wide tolerance (the
+    deterministic loss+grad tests above pin the exact semantics).
+    """
+    from shinrin import MLPClassifier
+
+    rng = np.random.RandomState(0)
+    X = rng.randn(200, 6).astype(np.float32)
+    y = (X[:, 0] + X[:, 1] > 0).astype(np.float32)
+
+    curves = {}
+    for backend in ("numpy", "mojo"):
+        clf = MLPClassifier(
+            hidden_layer_sizes=(16,),
+            max_iter=40,
+            random_state=3,
+            solver="adam",
+            quantization="ternary",
+        )
+        if backend == "mojo":
+            os.environ["SHINRIN_MLP_BACKEND"] = "mojo"
+        try:
+            clf.fit(X, y)
+        finally:
+            os.environ.pop("SHINRIN_MLP_BACKEND", None)
+        curves[backend] = np.asarray(clf.loss_curve_)
+
+    np.testing.assert_allclose(curves["mojo"], curves["numpy"], rtol=0.2, atol=5e-3)

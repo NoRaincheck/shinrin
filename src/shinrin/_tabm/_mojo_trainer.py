@@ -10,8 +10,8 @@ methods operate directly on NumPy buffers:
 - ``forward_avg(parts)``: k-member-averaged predictions into a preallocated array
 
 ``dims = [k, n_blocks, d_block, d_out, n_num_features, d_enc, d_cat,
-use_embeddings, d_embedding]`` and ``bins`` holds the per-feature bin
-counts.
+use_embeddings, d_embedding, quant_code]`` and ``bins`` holds the
+per-feature bin counts.
 """
 
 from __future__ import annotations
@@ -29,6 +29,13 @@ _LOCK = threading.Lock()
 _TRAINERS: dict[tuple, Any] = {}
 
 
+# 0=off, 1=ternary per-row, 2=ternary per-tensor
+def _quant_code(config: TabMConfig) -> int:
+    if config.quantization == "none":
+        return 0
+    return 2 if config.quantization_granularity == "per_tensor" else 1
+
+
 def _dims_vector(config: TabMConfig) -> np.ndarray:
     return np.array(
         [
@@ -41,6 +48,7 @@ def _dims_vector(config: TabMConfig) -> np.ndarray:
             sum(config.cat_cardinalities),
             1 if config.use_embeddings else 0,
             config.d_embedding,
+            _quant_code(config),
         ],
         dtype=np.int64,
     )
@@ -68,6 +76,7 @@ def get_tabm_trainer(config: TabMConfig) -> Any:
         config.use_embeddings,
         config.d_embedding,
         tuple(config.bin_counts),
+        (config.quantization, config.quantization_granularity),
     )
     with _LOCK:
         trainer = _TRAINERS.get(key)

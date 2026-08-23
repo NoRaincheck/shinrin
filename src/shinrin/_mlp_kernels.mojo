@@ -26,7 +26,7 @@ Task codes: 0 regression, 1 binary, 2 multiclass.
 """
 
 from std.os import abort
-from std.math import abs, exp, log, pow, sqrt
+from std.math import abs, exp, floor, log, pow, sqrt
 from std.memory import alloc
 from std.io import Writer
 from std.python import Python, PythonObject
@@ -211,6 +211,26 @@ def saxpy(dst: Pointer[Float32, MutUntrackedOrigin], src: Pointer[Float32, MutUn
 # =============================================================================
 # GEMM kernels (row-major, SIMD over columns) -- same as _tabm_kernels.mojo
 # =============================================================================
+
+
+# -----------------------------------------------------------------------------
+# Ternary (BitLinear) quantization helpers
+# -----------------------------------------------------------------------------
+
+
+@always_inline
+def round_half_even(x: Float32) -> Float32:
+    # Matches np.round's half-to-even rule on the clipped [-1, 1] domain.
+    var y = floor(x)
+    var frac = x - y
+    if frac > 0.5:
+        y += 1.0
+    elif frac == 0.5:
+        # Bump only when the floor is odd; Int % keeps the sign of the
+        # dividend, so odd negatives still compare non-zero.
+        if Int(y) % 2 != 0:
+            y += 1.0
+    return y
 
 
 @always_inline
@@ -516,6 +536,12 @@ struct MLPTrainer(ImplicitlyCopyable, Movable, Writable):
     var offs: Pointer[Int, MutUntrackedOrigin]
     var n_offs: Int
     var P: Int
+    # BitLinear ternary quantization (0=none, 1=per_row, 2=per_tensor).
+    # ``qw`` holds dequantized effective weights at the same offsets as
+    # theta; refreshed whenever theta changes.
+    var quant: Int
+    var quant_out: Bool
+    var qw: Optional[Pointer[Float32, MutUntrackedOrigin]]
 
     def __init__(out self, dims: PythonObject, layersizes: PythonObject, bins: PythonObject) raises:
         var dp = ptr_i64(dims)
@@ -584,6 +610,17 @@ struct MLPTrainer(ImplicitlyCopyable, Movable, Writable):
             cur += fan_out  # l{i}_b
         self.P = cur
 
+        self.quant = 0
+        self.quant_out = False
+        self.qw = None
+        if len(dims) > 6:
+            self.quant = Int(dp[6])
+            if self.quant < 0 or self.quant > 2:
+                raise Error("dims[6] must be a quantization code in {0, 1, 2}")
+            if len(dims) > 7:
+                self.quant_out = Int(dp[7]) == 1
+            self.qw = alloc[Float32](self.P + 16)
+
     @staticmethod
     def py_init(out self: MLPTrainer, args: PythonObject, kwargs: PythonObject) raises:
         _ = kwargs
@@ -626,6 +663,91 @@ struct MLPTrainer(ImplicitlyCopyable, Movable, Writable):
     @always_inline
     def fan_out(self, i: Int) -> Int:
         return Int(self.layersizes[i + 1])
+
+    @always_inline
+    def layer_quantized(self, i: Int) -> Bool:
+        """Whether layer ``i``'s weight matrix is ternary-quantized.
+
+        Mirrors MLPConfig.layer_is_quantized: hidden layers only, unless
+        the output layer was explicitly included.
+        """
+        if self.quant == 0:
+            return False
+        if i == self.nl - 1:
+            return self.quant_out
+        return True
+
+    @always_inline
+    def weight_for_fwd(
+        self, theta: Pointer[Float32, MutUntrackedOrigin], i: Int
+    ) -> Pointer[Float32, MutUntrackedOrigin]:
+        """Weight pointer for forward/input-gradient GEMMs of layer ``i``.
+
+        Quantized layers read from the refreshed scratch buffer; gradient
+        accumulation always uses the latent theta weights (STE).
+        """
+        if self.layer_quantized(i):
+            return self.qw.value() + self.off_w(i)
+        return theta + self.off_w(i)
+
+    def refresh_quantized(
+        self, theta: Pointer[Float32, MutUntrackedOrigin]
+    ):
+        """Recompute ternary effective weights into ``qw``.
+
+        Must be called whenever the latent weights change (after each Adam
+        round / L-BFGS candidate step) and before any GEMM consumes them.
+        Single-threaded by design: it runs before workers are spawned.
+        Scale = mean(|W|) per output row (per_row) or over the whole
+        matrix (per_tensor); rounding is half-to-even, matching np.round.
+        """
+        if self.quant == 0:
+            return
+        var i = 0
+        while i < self.nl:
+            if self.layer_quantized(i):
+                var fin = self.fan_in(i)
+                var fout = self.fan_out(i)
+                var src = theta + self.off_w(i)
+                var dst = self.qw.value() + self.off_w(i)
+                if self.quant == 2:
+                    self._quant_fill(src, dst, fin * fout)
+                else:
+                    var r = 0
+                    while r < fout:
+                        self._quant_fill(src + r * fin, dst + r * fin, fin)
+                        r += 1
+            i += 1
+
+    @always_inline
+    def _quant_fill(
+        self,
+        src: Pointer[Float32, MutUntrackedOrigin],
+        dst: Pointer[Float32, MutUntrackedOrigin],
+        count: Int,
+    ):
+        # Ternary quantize-dequantize ``count`` contiguous values with a
+        # single absmean scale. The mean accumulates in float64 to match
+        # shinrin._quant.ternary_scales bit-for-bit (summation-order
+        # independence), then rounds down to float32.
+        var s: Float64 = 0.0
+        var t = 0
+        while t < count:
+            var v = src[t]
+            s += Float64(v if v >= 0 else -v)
+            t += 1
+        var gamma = Float32(s / Float64(count))
+        if gamma < 1e-12:
+            gamma = 1e-12
+        t = 0
+        while t < count:
+            var q = src[t] / gamma
+            if q > 1.0:
+                q = 1.0
+            elif q < -1.0:
+                q = -1.0
+            dst[t] = round_half_even(q) * gamma
+            t += 1
 
     # -- forward -----------------------------------------------------------------
 
@@ -727,7 +849,7 @@ struct MLPTrainer(ImplicitlyCopyable, Movable, Writable):
         while i < self.nl:
             var fin = self.fan_in(i)
             var fout = self.fan_out(i)
-            var w = theta + self.off_w(i)
+            var w = self.weight_for_fwd(theta, i)
             var bias = theta + self.off_b(i)
             # input to this layer
             var inp: Pointer[Float32, MutUntrackedOrigin] = ws.h
@@ -967,7 +1089,10 @@ struct MLPTrainer(ImplicitlyCopyable, Movable, Writable):
         while i >= 0:
             var fin = self.fan_in(i)
             var fout = self.fan_out(i)
-            var w = theta + self.off_w(i)
+            # Input-gradients use the effective (possibly quantized)
+            # weights; gradient accumulation below stays on the latent
+            # theta weights — the straight-through-estimator contract.
+            var w = self.weight_for_fwd(theta, i)
             var inp: Pointer[Float32, MutUntrackedOrigin] = ws.h
             if i > 0:
                 inp = ws.act_ptr(i - 1)
@@ -1178,6 +1303,7 @@ struct MLPTrainer(ImplicitlyCopyable, Movable, Writable):
     def forward(self_ptr: Pointer[Self, MutAnyOrigin], parts: PythonObject) raises -> PythonObject:
         var self = self_ptr[]
         var theta = ptr_f32(parts[0])
+        self.refresh_quantized(theta)
         var x_num = ptr_f32(parts[1])
         var x_enc = ptr_f32(parts[2])
         var x_cat = ptr_f32(parts[3])
@@ -1415,6 +1541,9 @@ def k_full_loss_grad(
     nthreads: Int,
 ) -> Float64:
     """Parallel chunked forward/backward over all N rows; mean loss."""
+    # L-BFGS re-evaluates this after every candidate step, so refreshing
+    # here keeps qw in sync with the current latent weights.
+    tr.refresh_quantized(theta)
     vec_zero(grad, tr.P)
     var chunk = 8192
     var rows_cap = (chunk + nthreads - 1) // nthreads
@@ -1480,6 +1609,9 @@ def k_adam_epoch(
     nthreads: Int,
 ) -> Tuple[Float64, Int]:
     var rng = Rng(seed)
+    # Quantized effective weights must track theta, which changes after
+    # every Adam round below.
+    tr.refresh_quantized(theta)
     var idx = alloc[Int](N)
     var i = 0
     while i < N:
@@ -1523,6 +1655,7 @@ def k_adam_epoch(
         batch_loss = batch_loss / Float64(nb_rows) + l2_term
         t += 1
         adam_update(theta, m, v, g, tr.P, alpha, lr, 1.0 - pow(0.9, Float64(t)), 1.0 - pow(0.999, Float64(t)))
+        tr.refresh_quantized(theta)
         weighted += batch_loss * Float64(nb_rows)
         start = be
     for t3 in range(nthreads):

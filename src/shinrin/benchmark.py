@@ -299,6 +299,115 @@ def full_benchmark(
     return all_results
 
 
+def ablation_benchmark(
+    models: dict[str, Any],
+    X_train: np.ndarray,
+    y_train: np.ndarray,
+    X_test: np.ndarray,
+    y_test: np.ndarray,
+    n_repeats_predict: int = 100,
+) -> dict[str, dict[str, Any]]:
+    """Measure fit time and held-out quality for a set of model variants.
+
+    The intended use is *ablation* benchmarks: pass the same estimator
+    with one feature toggled — e.g. an MLP without quantization next to
+    ``quantization='ternary'`` variants (BitLinear) — to quantify the
+    before/after cost of the feature on speed and quality.
+
+    Parameters
+    ----------
+    models : dict of str → estimator instance
+        Mapping of variant names to unfitted estimators. Every entry is
+        fitted exactly once on ``(X_train, y_train)``; use distinct
+        instances per variant.
+    X_train : ndarray of shape (n_samples, n_features)
+        Training data.
+    y_train : ndarray of shape (n_samples,) or (n_samples, n_outputs)
+        Training targets.
+    X_test : ndarray of shape (n_test_samples, n_features)
+        Held-out data used for the quality measurement.
+    y_test : ndarray of shape (n_test_samples,) or (n_test_samples, n_outputs)
+        Held-out targets.
+    n_repeats_predict : int
+        Number of prediction repeats for the timing average.
+
+    Returns
+    -------
+    dict
+        Mapping of variant names to metrics with keys:
+        - ``fit_time``: wall-clock ``fit()`` seconds
+        - ``predict_time``: mean prediction seconds over ``n_repeats_predict``
+        - ``train_score``: estimator ``score`` on the training data
+        - ``test_score``: estimator ``score`` on the held-out data
+
+    Examples
+    --------
+    >>> from shinrin import MLPClassifier
+    >>> from shinrin.benchmark import ablation_benchmark
+    >>> import numpy as np
+    >>> rng = np.random.RandomState(0)
+    >>> X = rng.randn(200, 4).astype(np.float32)
+    >>> y = ((X[:, 0] + X[:, 1]) > 0).astype(np.int64)
+    >>> variants = {
+    ...     "fp": MLPClassifier(hidden_layer_sizes=(8,), max_iter=50),
+    ...     "ternary": MLPClassifier(
+    ...         hidden_layer_sizes=(8,), max_iter=50, quantization="ternary"
+    ...     ),
+    ... }
+    >>> results = ablation_benchmark(variants, X[:150], y[:150], X[150:], y[150:])
+    >>> sorted(results)  # doctest: +SKIP
+    ['fp', 'ternary']
+    """
+    results = {}
+    for name, model in models.items():
+        start = time.perf_counter()
+        model.fit(X_train, y_train)
+        fit_time = time.perf_counter() - start
+
+        predict_times = []
+        for _ in range(n_repeats_predict):
+            start = time.perf_counter()
+            model.predict(X_test)
+            predict_times.append(time.perf_counter() - start)
+
+        results[name] = {
+            "fit_time": float(fit_time),
+            "predict_time": float(np.mean(predict_times)),
+            "train_score": float(model.score(X_train, y_train)),
+            "test_score": float(model.score(X_test, y_test)),
+        }
+    return results
+
+
+def print_ablation_report(results: dict[str, dict[str, Any]]) -> None:
+    """Print an ablation table with deltas against the first variant.
+
+    Parameters
+    ----------
+    results : dict
+        Output from :func:`ablation_benchmark`.
+    """
+    names = list(results)
+    if not names:
+        return
+    baseline = results[names[0]]
+
+    print("=" * 72)
+    print("  Ablation Report (baseline: first row)")
+    print("=" * 72)
+    header = f"{'variant':<20} {'fit':>10} {'Δfit':>9} {'test score':>12} {'Δscore':>9}"
+    print(header)
+    print("-" * 72)
+    for name, m in results.items():
+        d_fit = m["fit_time"] / max(baseline["fit_time"], 1e-12)
+        d_score = m["test_score"] - baseline["test_score"]
+        print(
+            f"{name:<20} {m['fit_time']:>8.3f}s {d_fit:>8.2f}x "
+            f"{m['test_score']:>12.4f} {d_score:>+9.4f}"
+        )
+    print("=" * 72)
+
+
 def print_benchmark_report(results: dict[str, dict[str, Any]]) -> None:
     """Print a formatted benchmark report.
 

@@ -36,6 +36,13 @@ _TRAINERS: dict[tuple, Any] = {}
 _ACT_CODES = {"identity": 0, "logistic": 1, "tanh": 2, "relu": 3}
 
 
+# 0=off, 1=ternary per-row, 2=ternary per-tensor
+def _quant_code(config: MLPConfig) -> int:
+    if config.quantization == "none":
+        return 0
+    return 2 if config.quantization_granularity == "per_tensor" else 1
+
+
 def _dims_vector(config: MLPConfig) -> np.ndarray:
     return np.array(
         [
@@ -45,6 +52,8 @@ def _dims_vector(config: MLPConfig) -> np.ndarray:
             1 if config.use_embeddings else 0,
             config.d_embedding,
             _ACT_CODES[config.activation],
+            _quant_code(config),
+            1 if config.quantize_output else 0,
         ],
         dtype=np.int64,
     )
@@ -67,6 +76,8 @@ def get_native_trainer(config: MLPConfig) -> NativeTrainer:
         config.activation,
         tuple(config.layer_sizes),
         tuple(config.bin_counts),
+        config.quantization,
+        config.quantization_granularity,
     )
     with _LOCK:
         trainer = _TRAINERS.get(key)

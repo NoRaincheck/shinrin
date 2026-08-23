@@ -53,3 +53,5 @@ See [GOSDT Optimal Trees](models/gosdt.md)
 - `benchmark_model_size()` — Measure model size
 - `full_benchmark()` — Run all benchmarks
 - `print_benchmark_report()` — Print formatted results
+- `ablation_benchmark()` — Fit time and held-out quality per model variant (e.g. with vs without ternary quantization)
+- `print_ablation_report()` — Print an ablation table with deltas against the baseline variant

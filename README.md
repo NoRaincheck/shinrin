@@ -20,12 +20,12 @@ Shinrin also includes **TabM** — a parameter-efficient ensemble MLP for tabula
 - **Mondrian Trees & Forests** — Full scikit-learn API compatibility
 - **CORELS Optimal Rule Lists** — Certifiably optimal rule lists for binary data (`CorelsClassifier`), vendored from pycorels with bundled mini-GMP (no system dependency)
 - **GOSDT Optimal Sparse Decision Trees** — Globally optimized sparse decision trees with reference-ensemble guesses (`GOSDTClassifier`, `ThresholdGuessBinarizer`), vendored from gosdt-guesses; runs single-threaded with no TBB/GMP system dependencies
-- **Tabular Neural Networks** — scikit-learn compatible `MLPClassifier`/`MLPRegressor` and `TabMClassifier`/`TabMRegressor` with optional PLE embeddings and Mojo-accelerated training
+- **Tabular Neural Networks** — scikit-learn compatible `MLPClassifier`/`MLPRegressor` and `TabMClassifier`/`TabMRegressor` with optional PLE embeddings, training-aware ternary weight quantization (BitLinear), and Mojo-accelerated training
 - **TabM Neural Networks** — Parameter-efficient ensemble MLPs for tabular data with BatchEnsemble-style multiplicative adapters (ICLR 2025)
 - **TabICL** — Tabular in-context learning foundation model (torch/NumPy/Mojo backends)
 - **TreeSHAP Explanations** — `TreeExplainer` for single trees and forests with `explanation()` visualization helper
 - **ONNX Export** — Export trained trees, forests, and TabM models to ONNX format for deployment
-- **Benchmarking** — Built-in utilities for training speed, prediction speed, and model size
+- **Benchmarking** — Built-in utilities for training speed, prediction speed, model size, and before/after feature ablations
 - **Rust & Mojo Bindings** — Performance-critical code in Rust via PyO3 and Mojo kernels
 
 ## Quick Start
