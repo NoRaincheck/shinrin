@@ -15,7 +15,7 @@ use numpy::{
     PyArray1, PyArray2, PyArray3, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2,
     PyUntypedArrayMethods,
 };
-use pyo3::exceptions::{PyKeyError, PyMemoryError, PyTypeError, PyValueError};
+use pyo3::exceptions::{PyKeyError, PyMemoryError, PyRuntimeError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyTuple, PyType};
 
@@ -2801,6 +2801,252 @@ fn corels_predict_wrap<'py>(
 }
 
 // =============================================================================
+// GOSDT (vendored gosdt-guesses) bindings
+//
+// The vendored C++ engine lives in `src/shinrin/_gosdt/cpp` and is compiled
+// into this extension by `build.rs` together with a serial TBB shim and the
+// bundled mini-gmp. This replaces upstream's pybind11 module (_libgosdt).
+// =============================================================================
+
+mod gosdt_bridge {
+    use std::ffi::c_void;
+    use std::os::raw::{c_char, c_int, c_uchar};
+
+    #[repr(C)]
+    pub struct GosdtResult {
+        pub model: *mut c_char,
+        pub graph_size: usize,
+        pub n_iterations: usize,
+        pub lower_bound: f64,
+        pub upper_bound: f64,
+        pub model_loss: f64,
+        pub time_elapsed: f64,
+        pub status: c_int,
+    }
+
+    extern "C" {
+        pub fn shinrin_gosdt_fit(
+            regularization: f32,
+            upperbound_guess: f32,
+            time_limit: u32,
+            model_limit: u32,
+            verbose: c_int,
+            diagnostics: c_int,
+            depth_budget: c_uchar,
+            reference_lb: c_int,
+            look_ahead: c_int,
+            similar_support: c_int,
+            cancellation: c_int,
+            feature_transform: c_int,
+            rule_list: c_int,
+            non_binary: c_int,
+            trace_path: *const c_char,
+            tree_path: *const c_char,
+            profile_path: *const c_char,
+            xy: *const u8,
+            rows: usize,
+            cols: usize,
+            costs: *const f32,
+            n_classes: usize,
+            n_original_features: usize,
+            map_sizes: *const usize,
+            map_indices: *const usize,
+            reference: *const u8,
+            reference_cols: usize,
+            out: *mut GosdtResult,
+            error_message: *mut *mut c_char,
+        ) -> c_int;
+
+        pub fn shinrin_gosdt_free(p: *mut c_void);
+    }
+}
+
+/// Fit an optimal sparse decision tree using the vendored GOSDT engine.
+/// Returns a dict mirroring upstream's `GOSDTResult` attributes.
+#[pyfunction]
+#[pyo3(signature = (regularization, upperbound_guess, time_limit, model_limit,
+                    verbose, diagnostics, depth_budget, reference_lb, look_ahead,
+                    similar_support, cancellation, feature_transform, rule_list,
+                    non_binary, trace_path, tree_path, profile_path, xy, costs,
+                    feature_map, reference))]
+#[allow(clippy::too_many_arguments)]
+#[allow(clippy::type_complexity)]
+fn gosdt_fit<'py>(
+    py: Python<'py>,
+    regularization: f32,
+    upperbound_guess: f32,
+    time_limit: u32,
+    model_limit: u32,
+    verbose: bool,
+    diagnostics: bool,
+    depth_budget: u8,
+    reference_lb: bool,
+    look_ahead: bool,
+    similar_support: bool,
+    cancellation: bool,
+    feature_transform: bool,
+    rule_list: bool,
+    non_binary: bool,
+    trace_path: Option<&str>,
+    tree_path: Option<&str>,
+    profile_path: Option<&str>,
+    xy: PyReadonlyArray2<u8>,
+    costs: PyReadonlyArray2<f32>,
+    feature_map: Vec<Vec<i64>>,
+    reference: Option<PyReadonlyArray2<u8>>,
+) -> PyResult<Bound<'py, PyDict>> {
+    let rows = xy.shape()[0];
+    let cols = xy.shape()[1];
+    let xy_view = xy.as_array();
+    let xy = xy_view
+        .as_slice()
+        .ok_or_else(|| PyValueError::new_err("xy array must be C-contiguous"))?;
+    let n_classes = costs.shape()[0];
+    let costs_view = costs.as_array();
+    let costs = costs_view
+        .as_slice()
+        .ok_or_else(|| PyValueError::new_err("cost matrix must be C-contiguous"))?;
+
+    let n_original_features = feature_map.len();
+    let mut map_sizes: Vec<usize> = Vec::with_capacity(n_original_features);
+    let mut map_indices: Vec<usize> = Vec::new();
+    for original in &feature_map {
+        map_sizes.push(original.len());
+        for index in original {
+            if *index < 0 {
+                return Err(PyValueError::new_err(
+                    "feature_map indices must be non-negative",
+                ));
+            }
+            map_indices.push(*index as usize);
+        }
+    }
+
+    let to_cstring = |s: Option<&str>| -> PyResult<std::ffi::CString> {
+        match s {
+            None => Ok(std::ffi::CString::default()),
+            Some(v) => std::ffi::CString::new(v)
+                .map_err(|_| PyValueError::new_err("paths must not contain NUL bytes")),
+        }
+    };
+    let trace_c = to_cstring(trace_path)?;
+    let tree_c = to_cstring(tree_path)?;
+    let profile_c = to_cstring(profile_path)?;
+
+    let (reference_ptr, reference_cols);
+    let reference_flat: Option<std::vec::Vec<u8>> = match &reference {
+        Some(r) => {
+            let r_view = r.as_array();
+            let flat = r_view
+                .as_slice()
+                .ok_or_else(|| PyValueError::new_err("reference array must be C-contiguous"))?
+                .to_vec();
+            reference_cols = r.shape()[1];
+            Some(flat)
+        }
+        None => {
+            reference_cols = 0;
+            None
+        }
+    };
+    if let Some(flat) = &reference_flat {
+        reference_ptr = flat.as_ptr();
+    } else {
+        reference_ptr = std::ptr::null();
+    }
+
+    let mut result = gosdt_bridge::GosdtResult {
+        model: std::ptr::null_mut(),
+        graph_size: 0,
+        n_iterations: 0,
+        lower_bound: 0.0,
+        upper_bound: 0.0,
+        model_loss: 0.0,
+        time_elapsed: 0.0,
+        status: 4,
+    };
+    let mut error_message: *mut std::os::raw::c_char = std::ptr::null_mut();
+
+    let rc = unsafe {
+        gosdt_bridge::shinrin_gosdt_fit(
+            regularization,
+            upperbound_guess,
+            time_limit,
+            model_limit,
+            verbose as i32,
+            diagnostics as i32,
+            depth_budget,
+            reference_lb as i32,
+            look_ahead as i32,
+            similar_support as i32,
+            cancellation as i32,
+            feature_transform as i32,
+            rule_list as i32,
+            non_binary as i32,
+            trace_c.as_ptr(),
+            tree_c.as_ptr(),
+            profile_c.as_ptr(),
+            xy.as_ptr(),
+            rows,
+            cols,
+            costs.as_ptr(),
+            n_classes,
+            n_original_features,
+            map_sizes.as_ptr(),
+            map_indices.as_ptr(),
+            reference_ptr,
+            reference_cols,
+            &mut result,
+            &mut error_message,
+        )
+    };
+
+    // Own the model string immediately so it is freed on every exit path.
+    struct ModelGuard(*mut std::os::raw::c_char);
+    impl Drop for ModelGuard {
+        fn drop(&mut self) {
+            unsafe { gosdt_bridge::shinrin_gosdt_free(self.0.cast()) };
+        }
+    }
+    let error_guard = ModelGuard(error_message);
+    let _ = error_guard; // freed on scope exit
+
+    match rc {
+        0 => {}
+        1 => {
+            let message = if error_message.is_null() {
+                "GOSDT optimization failed".to_string()
+            } else {
+                unsafe { std::ffi::CStr::from_ptr(error_message) }
+                    .to_string_lossy()
+                    .into_owned()
+            };
+            return Err(PyRuntimeError::new_err(message));
+        }
+        _ => return Err(PyMemoryError::new_err("gosdt: out of memory")),
+    }
+
+    let model_guard = ModelGuard(result.model);
+
+    let dict = PyDict::new(py);
+    dict.set_item(
+        "model",
+        unsafe { std::ffi::CStr::from_ptr(result.model) }
+            .to_string_lossy()
+            .as_ref(),
+    )?;
+    dict.set_item("graph_size", result.graph_size)?;
+    dict.set_item("n_iterations", result.n_iterations)?;
+    dict.set_item("lowerbound", result.lower_bound)?;
+    dict.set_item("upperbound", result.upper_bound)?;
+    dict.set_item("model_loss", result.model_loss)?;
+    dict.set_item("time", result.time_elapsed)?;
+    dict.set_item("status", result.status)?;
+    drop(model_guard);
+    Ok(dict)
+}
+
+// =============================================================================
 // Module
 // =============================================================================
 
@@ -2820,6 +3066,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(corels_gmp_enabled, m)?)?;
     m.add_function(wrap_pyfunction!(corels_fit_wrap_end, m)?)?;
     m.add_function(wrap_pyfunction!(corels_predict_wrap, m)?)?;
+    m.add_function(wrap_pyfunction!(gosdt_fit, m)?)?;
     m.add("DTYPE", numpy::dtype::<f32>(m.py()))?;
     m.add("DOUBLE", numpy::dtype::<f64>(m.py()))?;
     Ok(())

@@ -85,3 +85,26 @@ below and in the LICENSE files kept alongside the vendored code.
    src/shinrin/_corels/cpp/minigmp/LICENSE).
 
    Copyright 1991-2023 Free Software Foundation, Inc.
+
+8. gosdt-guesses (BSD-3-Clause)
+   https://github.com/ubc-systopia/gosdt-guesses
+
+   Vendored into `src/shinrin/_gosdt/`: the GOSDT C++ engine
+   ("Fast Sparse Decision Tree Optimization via Reference Ensembles",
+   AAAI 2022; "Generalized and Scalable Optimal Sparse Decision Trees",
+   ICML 2020) and its Python layer. Upstream's pybind11 module is replaced
+   by PyO3 bindings in `src/lib.rs`; oneTBB container types are replaced by
+   serial shims written for shinrin (`cpp/tbbshim/`, no TBB code) and the
+   engine runs single-threaded; GOSDT's global `Queue` class is renamed
+   `GosdtQueue` to avoid a linker symbol collision with CORELS' `Queue`.
+
+   Copyright (c) 2020-2024, UBC Systopia Lab.
+   License: BSD-3-Clause (see src/shinrin/_gosdt/LICENSE)
+
+9. nlohmann/json (MIT)
+   https://github.com/nlohmann/json
+
+   Vendored single header v3.11.3 at `src/shinrin/_gosdt/cpp/nlohmann/`.
+
+   Copyright (c) 2013-2022 Niels Lohmann.
+   License: MIT (see src/shinrin/_gosdt/cpp/nlohmann/LICENSE.MIT)

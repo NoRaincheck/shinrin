@@ -43,11 +43,57 @@ fn main() {
     // archives strictly left-to-right see consumers before providers.
     cxx.compile("shinrin_corels");
 
+    // ------------------------------------------------------------------
+    // Vendored GOSDT engine ("Fast Sparse Decision Tree Optimization via
+    // Reference Ensembles") + serial TBB shim + C ABI bridge. GOSDT
+    // unconditionally includes <gmp.h>, so the mini-gmp shim is always in
+    // scope here (the mpn_logical.c additions live in the plain-C build).
+    let corels_cpp_dir = PathBuf::from("src/shinrin/_corels/cpp");
+    let gosdt_dir = PathBuf::from("src/shinrin/_gosdt/cpp");
+    let libgosdt_include = gosdt_dir.join("libgosdt/include");
+    let mut gosdt = cc::Build::new();
+    gosdt.cpp(true)
+        .std("c++20")
+        .define("GMP", None)
+        .include(corels_cpp_dir.join("gmpshim"))
+        .include(gosdt_dir.join("tbbshim"))
+        .include(&gosdt_dir)
+        .include(&libgosdt_include)
+        .flag_if_supported("-O3")
+        .warnings(false);
+
+    for name in [
+        "libgosdt/src/bitmask.cpp",
+        "libgosdt/src/bitset.cpp",
+        "libgosdt/src/configuration.cpp",
+        "libgosdt/src/dataset.cpp",
+        "libgosdt/src/diagnosis/false_convergence.cpp",
+        "libgosdt/src/diagnosis/non_convergence.cpp",
+        "libgosdt/src/diagnosis/trace.cpp",
+        "libgosdt/src/dispatch/dispatch.cpp",
+        "libgosdt/src/extraction/models.cpp",
+        "libgosdt/src/gosdt.cpp",
+        "libgosdt/src/graph.cpp",
+        "libgosdt/src/local_state.cpp",
+        "libgosdt/src/message.cpp",
+        "libgosdt/src/model.cpp",
+        "libgosdt/src/optimizer.cpp",
+        "libgosdt/src/queue.cpp",
+        "libgosdt/src/task.cpp",
+        "bridge_gosdt.cpp",
+    ] {
+        gosdt.file(gosdt_dir.join(name));
+    }
+
+    gosdt.compile("shinrin_gosdt");
+
     // mini-gmp: GMP's portable mpz_t implementation, vendored from the
     // official 6.3.0 tarball (see minigmp/README.md). Provides the GMP
-    // API without any system dependency.
+    // API (plus the mpn logical ops in gmpshim/mpn_logical.c) without any
+    // system dependency.
     let mut c = cc::Build::new();
     c.file(cpp_dir.join("minigmp/mini-gmp.c"))
+        .file(corels_cpp_dir.join("gmpshim/mpn_logical.c"))
         .flag_if_supported("-O3")
         .warnings(false);
     c.compile("shinrin_minigmp");
