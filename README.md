@@ -11,9 +11,15 @@
 
 Shinrin (森林, "forest" in Japanese) is a scikit-learn-compatible library for decision tree and forest models and tabular neural networks, with Rust and Mojo bindings for performance and ONNX export support.
 
-Since skope-rules and scikit-garden are no longer actively maintained, this project aims to bring them together with extensions for tree models — including SHAP explanations, ONNX export, and benchmarking utilities.
+## Motivation
 
-Shinrin also includes **TabM** — a parameter-efficient ensemble MLP for tabular data (ICLR 2025) that trains an ensemble of *k* members jointly through BatchEnsemble-style multiplicative adapters, matching ensemble accuracy at a fraction of the training cost. Training runs entirely on NumPy or Mojo kernels — PyTorch is not required.
+Since skope-rules and scikit-garden are no longer actively maintained, this project brings them together under one hardened, production-focused umbrella. The goal is to **harden and speed up production training code while keeping the dependency footprint minimal** — dropping large/expensive dependencies like `shap` and `torch`.
+
+- **Tree ensemble library with extensions** — decision rules, optimal decision trees (CORELS, GOSDT), and Mondrian forests, with built-in TreeSHAP explanations that do *not* rely on the `shap` library, accelerated by Rust and Mojo kernels
+- **Tabular neural networks without torch** — MLPs and TabM train entirely on NumPy or Mojo kernels; no PyTorch required
+- **Export to standard inference runtimes** — first-class ONNX export for trees, forests, and TabM
+
+**Roadmap:** better Mojo extension support — including Metal GPU acceleration — and stabilizing the Mojo backend to parity-level reliability.
 
 ## Features
 
