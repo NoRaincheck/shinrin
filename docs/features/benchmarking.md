@@ -78,6 +78,7 @@ results documents:
 
 | Script | Comparison | Results doc (`scripts/benchmarks/`) |
 |---|---|---|
+| `bench_all.py` | All algorithms across a suite of synthetic + real datasets (fit/predict/score) | `ALL_MODELS_BENCHMARK.md`, published at [Benchmark Results](benchmark-results.md) |
 | `bench_gosdt.py` | GOSDT pipeline vs scikit-learn CART (speed, accuracy, tree size, optimality gap) | `GOSDT_BENCHMARK.md` |
 | `bench_corels.py` | CORELS fit times, mini-GMP vs no-GMP builds | printed |
 | `bench_mlp.py` | sklearn vs shinrin MLP backends (NumPy/Mojo/PLE) | `MLP_BENCHMARK.md` |
@@ -85,3 +86,5 @@ results documents:
 | `bench_tabm.py` | TabM NumPy/Mojo/PyTorch | `TABM_BENCHMARK.md` |
 
 Run them with `just bench-gosdt`, `just bench-mlp`, `just bench-backends`, etc.
+`just bench-all` runs `bench_all.py`, which measures every algorithm on every
+dataset in the suite and republishes the results page.

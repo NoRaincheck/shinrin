@@ -67,6 +67,10 @@ bench-gosdt:
 bench-backends: build-mojo
     uv run python scripts/benchmarks/bench_backends.py
 
+# Benchmark all shinrin algorithms across the dataset suite (~45 min; --smoke for a quick pass)
+bench-all:
+    uv run python scripts/benchmarks/bench_all.py
+
 # ---------- Test ----------
 
 # Run Python and Rust tests

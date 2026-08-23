@@ -39,6 +39,7 @@ nav:
       - TreeSHAP Explanations: features/treeshap-explanations.md
       - ONNX Export: features/onnx-export.md
       - Benchmarking: features/benchmarking.md
+      - Benchmark Results: features/benchmark-results.md
   - API Reference: api-reference.md
   - Contributing: contributing.md
 
