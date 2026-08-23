@@ -2549,6 +2549,8 @@ mod corels_bridge {
         ) -> f64;
 
         fn shinrin_corels_free_ints(p: *mut c_void);
+
+        pub fn shinrin_corels_gmp_enabled() -> c_int;
     }
 
     /// Frees arrays returned by `shinrin_corels_end` on scope exit.
@@ -2657,6 +2659,13 @@ fn corels_fit_wrap_begin(
 #[pyfunction]
 fn corels_fit_wrap_loop(max_num_nodes: usize) -> PyResult<bool> {
     Ok(unsafe { cb::shinrin_corels_loop(max_num_nodes) } != 0)
+}
+
+/// Whether the vendored CORELS was compiled with the GMP (mini-gmp) bit
+/// vector implementation, as opposed to its word-array fallback.
+#[pyfunction]
+fn corels_gmp_enabled() -> PyResult<bool> {
+    Ok(unsafe { cb::shinrin_corels_gmp_enabled() } != 0)
 }
 
 #[pyfunction]
@@ -2808,6 +2817,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyPartialFitTreeBuilder>()?;
     m.add_function(wrap_pyfunction!(corels_fit_wrap_begin, m)?)?;
     m.add_function(wrap_pyfunction!(corels_fit_wrap_loop, m)?)?;
+    m.add_function(wrap_pyfunction!(corels_gmp_enabled, m)?)?;
     m.add_function(wrap_pyfunction!(corels_fit_wrap_end, m)?)?;
     m.add_function(wrap_pyfunction!(corels_predict_wrap, m)?)?;
     m.add("DTYPE", numpy::dtype::<f32>(m.py()))?;

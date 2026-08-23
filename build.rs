@@ -1,16 +1,25 @@
 use std::path::PathBuf;
 
 fn main() {
+    println!("cargo:rerun-if-env-changed=SHINRIN_CORELS_NO_GMP");
+    // Setting SHINRIN_CORELS_NO_GMP=1 builds CORELS without -DGMP, using
+    // its word-array bit-vector fallback (useful for benchmarking the
+    // mini-gmp path against upstream's no-GMP configuration).
+    let no_gmp = std::env::var("SHINRIN_CORELS_NO_GMP").is_ok_and(|v| v != "0");
+
     let cpp_dir = PathBuf::from("src/shinrin/_corels/cpp");
 
-    // C++ CORELS engine + bridge. Compiled with -DGMP, with a shim include
-    // dir placed first so `#include <gmp.h>` resolves to the vendored
-    // mini-gmp rather than a system libgmp.
+    // C++ CORELS engine + bridge. Compiled with -DGMP (unless disabled via
+    // SHINRIN_CORELS_NO_GMP), with a shim include dir placed first so
+    // `#include <gmp.h>` resolves to the vendored mini-gmp rather than a
+    // system libgmp.
     let mut cxx = cc::Build::new();
     cxx.cpp(true)
-        .std("c++11")
-        .define("GMP", None)
-        .include(cpp_dir.join("gmpshim"))
+        .std("c++11");
+    if !no_gmp {
+        cxx.define("GMP", None);
+    }
+    cxx.include(cpp_dir.join("gmpshim"))
         .include(cpp_dir.join("corels"))
         .include(cpp_dir.join("mining"))
         .include(&cpp_dir)

@@ -379,4 +379,14 @@ void shinrin_corels_free_ints(void* p) {
     free(p);
 }
 
+/* 1 when the engine was compiled with the GMP (mini-gmp) bit vectors,
+ * 0 when using the word-array fallback. */
+int shinrin_corels_gmp_enabled(void) {
+#ifdef GMP
+    return 1;
+#else
+    return 0;
+#endif
+}
+
 } // extern "C"
