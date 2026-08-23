@@ -12,6 +12,8 @@ backend is selected via the ``backend`` parameter or the
 
 from __future__ import annotations
 
+import importlib.util
+import warnings
 from collections import OrderedDict
 from typing import Any
 
@@ -114,8 +116,10 @@ class _TabICLBase(BaseEstimator):
     def _resolve_backend(self) -> str:
         return get_tabicl_backend(self.backend)
 
-    def _load_model(self) -> None:
-        backend_name = self._resolve_backend()
+    def _load_model(self, backend_name: str | None = None) -> None:
+        if backend_name is None:
+            backend_name = self._resolve_backend()
+        self.backend_ = backend_name
         if self.device is not None and backend_name != "torch":
             raise ValueError(
                 f"device={self.device!r} is only supported by the 'torch' "
@@ -289,6 +293,21 @@ class TabICLClassifier(ClassifierMixin, _TabICLBase):
                 f"number ({self.max_classes_}) natively supported. Enable "
                 "support_many_classes for mixed-radix/hierarchical prediction."
             )
+        if (
+            self.n_classes_ > self.max_classes_
+            and self.support_many_classes
+            and getattr(self, "backend_", None) == "mojo"
+        ):
+            # The Mojo kernels do not implement hierarchical many-class
+            # prediction; transparently fall back to a backend that does.
+            fallback = "torch" if importlib.util.find_spec("torch") else "numpy"
+            warnings.warn(
+                f"Mojo backend does not support {self.n_classes_} classes "
+                f"(max {self.max_classes_}); falling back to the {fallback!r} "
+                "backend for this fit.",
+                stacklevel=2,
+            )
+            self._load_model(backend_name=fallback)
 
         self.X_encoder_ = TransformToNumerical(verbose=self.verbose)
         X = self.X_encoder_.fit_transform(X)

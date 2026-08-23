@@ -245,6 +245,39 @@ def test_invalid_backend_env_raises(clf_model_path, monkeypatch):
         _make_clf(clf_model_path, backend=None).fit(X, y)
 
 
+def _mojo_native_available() -> bool:
+    try:
+        from _tabicl_fixture import make_params
+
+        from shinrin._tabicl._config import TabICLConfig
+        from shinrin._tabicl._mojo_backend import TabICLMojoModel
+    except ImportError:
+        return False
+    config = TabICLConfig.from_dict(TINY_CLASSIFIER)
+    try:
+        TabICLMojoModel(config, make_params(TINY_CLASSIFIER, seed=0))
+    except ImportError:
+        return False
+    return True
+
+
+@pytest.mark.skipif(
+    not _mojo_native_available(),
+    reason="native module not built (`just build-tabicl-mojo`)",
+)
+def test_classifier_many_classes_mojo_fallback(clf_model_path):
+    """Mojo + more classes than max_classes warns and reloads torch/numpy."""
+    n_classes = TINY_CLASSIFIER["max_classes"] + 3
+    X_train, y_train, X_test, y_test = _dataset(n_classes=n_classes, seed=3)
+    clf = _make_clf(clf_model_path, backend="mojo")
+    with pytest.warns(UserWarning, match="falling back"):
+        clf.fit(X_train, y_train)
+    assert clf.backend_ in ("torch", "numpy")
+    proba = clf.predict_proba(X_test)
+    assert proba.shape == (len(X_test), n_classes)
+    assert clf.score(X_test, y_test) >= 1.0 / n_classes - 0.2
+
+
 def test_missing_checkpoint_no_download(tmp_path):
     X, y = np.random.randn(20, 3), np.zeros(20, dtype=int)
     clf = TabICLClassifier(
