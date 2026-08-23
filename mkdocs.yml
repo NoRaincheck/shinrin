@@ -57,6 +57,7 @@ markdown_extensions:
       custom_checkbox: true
   - attr_list
   - md_in_html
+  - admonition
   - toc:
       permalink: true
 

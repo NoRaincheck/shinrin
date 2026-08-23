@@ -67,9 +67,25 @@ lo, hi = reg.predict(X_test, output_type="quantiles",
 | `checkpoint_version` | `str` | v2 file | Checkpoint file name in the HF repo |
 | `model_path` | `path` | `None` | Local directory holding the checkpoint |
 | `allow_auto_download` | `bool` | `True` | Download the checkpoint when missing |
+| `quantization` | `str` | `"none"` | Experimental: `"ternary"` approximates checkpoint weights at load time (post-training, see below) |
+| `quantization_granularity` | `str` | `"per_row"` | Absmean scale per output row (`"per_row"`) or per matrix (`"per_tensor"`) |
 | `device` | `str` | `None` | Torch device (`"cuda"`); torch backend only |
 | `random_state` | `int` | `42` | Seed for ensemble shuffling |
 | `backend` | `str` | `"auto"` | `auto`, `torch`, `numpy` or `mojo` |
+
+## Experimental: ternary post-training quantization
+
+`quantization="ternary"` approximates the checkpoint at load time: every
+2-D weight except the fused attention QKV projections is replaced by its
+absmean ternary dequantization (biases, norms, class tokens and rotary
+tables stay full precision), so all backends see identical weights.
+This is *post-training* quantization of a frozen in-context transformer —
+unlike the training-aware BitLinear mode of the MLP/TabM trainers it
+incurs substantial accuracy loss, so it ships flagged experimental with
+a `UserWarning` and should be treated as a storage/parity experiment,
+not a speedup (predict-time FLOPs are unchanged). Measured numbers:
+[BITLINEAR_BENCHMARK.md](https://github.com/NoRaincheck/shinrin/blob/main/scripts/benchmarks/BITLINEAR_BENCHMARK.md)
+(BitLinear benchmarks, TabICL section).
 
 ## Backends
 

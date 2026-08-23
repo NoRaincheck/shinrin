@@ -11,6 +11,7 @@ early stopping) and fitted attributes, while adding:
 - an optional piecewise-linear (PLE) embedding for numerical features,
   following the TabM embedding recipe
 - dropout and automatic categorical-feature detection
+- optional training-aware ternary weight quantization (BitLinear)
 
 ## MLPRegressor / MLPClassifier
 
@@ -61,6 +62,9 @@ within float32 noise, so existing tuning transfers directly.
 | `use_quantile` | `bool` | `False` | Quantile transform on numeric features |
 | `use_asinh` | `bool` | `False` | Inverse hyperbolic sine transform |
 | `use_scaler` | `bool` | `False` | Standard scaling |
+| `quantization` | `str` | `"none"` | `"ternary"` enables BitLinear-style training-aware ternary weight quantization (see below) |
+| `quantization_granularity` | `str` | `"per_row"` | Absmean scale per output row (`"per_row"`) or per matrix (`"per_tensor"`) |
+| `quantize_output` | `bool` | `False` | Also quantize the output layer (default keeps it full precision) |
 | `categorical_indices` | `list[int]` | `None` | Force columns (by integer index) categorical |
 | `categorical_cardinality_threshold` | `int` | `32` | Max unique values for auto-detection; `0` disables |
 
@@ -116,6 +120,35 @@ Categorical columns (detected by cardinality or forced via
 `categorical_indices`) bypass the numeric pipeline and feed one-hot
 blocks straight into the network. Encode string columns as integer codes
 before fitting.
+
+## Ternary quantization (BitLinear)
+
+`quantization="ternary"` enables training-aware quantization in the
+style of BitNet b1.58: the forward pass uses each weight matrix's ternary
+approximation `round(clip(W / gamma, -1, 1)) * gamma` with
+`gamma = mean(|W|)` (absmean), so effective weights live in
+`{-1, 0, +1} * gamma` (~1.58 bits/weight), while gradients flow through
+the quantization to the latent float32 weights (straight-through
+estimator). Hidden layers are quantized; the output layer stays full
+precision unless `quantize_output=True`.
+
+```python
+model = MLPClassifier(
+    hidden_layer_sizes=(128, 64),
+    max_iter=200,
+    random_state=0,
+    quantization="ternary",
+    quantization_granularity="per_row",   # or "per_tensor"
+).fit(X, y)
+```
+
+- Works identically on the NumPy and Mojo backends; absmean scales are
+  accumulated in float64 on both sides so they match bit-for-bit.
+- Expect ~1–35% slower fits (one absmean pass per weight per refresh)
+  and roughly a third of effective weights collapsing to exactly zero.
+- Regression quality typically holds at full-precision parity; validate
+  classification tasks before shipping — see the measured ablations in
+  [BITLINEAR_BENCHMARK.md](https://github.com/NoRaincheck/shinrin/blob/main/scripts/benchmarks/BITLINEAR_BENCHMARK.md).
 
 ## Backends
 

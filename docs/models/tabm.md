@@ -60,6 +60,8 @@ model.fit(X, y)
 | `use_scaler` | `bool` | `True` | Standard scaling |
 | `categorical_indices` | `list[int]` | `None` | Force columns (by integer index) to be treated as categorical |
 | `categorical_cardinality_threshold` | `int` | `32` | Max unique values for automatic categorical detection; `0` disables auto-detection |
+| `quantization` | `str` | `"none"` | `"ternary"` enables BitLinear-style training-aware ternary weight quantization of the shared backbone blocks (see below) |
+| `quantization_granularity` | `str` | `"per_row"` | Absmean scale per output row (`"per_row"`) or per matrix (`"per_tensor"`) |
 
 ### Attributes
 
@@ -143,6 +145,33 @@ model = TabMRegressor(
 ```
 
 Fitted bin edges are exposed via `model.preprocessor_.bins_`.
+
+### Ternary quantization (BitLinear)
+
+`quantization="ternary"` quantizes the shared backbone block weights
+with the absmean ternary approximation (`{-1, 0, +1} * gamma`,
+`gamma = mean(|W|)`) during training, in the style of BitNet b1.58.
+Embeddings, adapters, biases and the head stay at full precision;
+straight-through gradients keep updating the latent float32 weights.
+All arch types (`tabm`, `tabm-mini`, `tabm-packed`) and both backends
+are supported, with bit-identical scales between NumPy and Mojo.
+
+```python
+model = TabMClassifier(
+    k=32,
+    max_iter=200,
+    random_state=0,
+    alpha=0.0,                          # recommended when quantizing
+    quantization="ternary",
+    quantization_granularity="per_row",  # or "per_tensor"
+)
+```
+
+!!! warning "Set `alpha=0` for quantized training"
+    L2 decay (`alpha > 0`) shrinks the latent weights into the ternary
+    dead zone where the effective weight is zero and no gradient flows,
+    which often collapses training. The estimator emits a `UserWarning`
+    at fit time when this combination is detected.
 
 ## Backends
 
