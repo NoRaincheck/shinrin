@@ -21,6 +21,8 @@ from __future__ import annotations
 
 import numpy as np
 
+from shinrin._quant import GRANULARITIES, QUANTIZATION_NONE, validate_quantization
+
 ACTIVATIONS = ("identity", "logistic", "tanh", "relu")
 
 
@@ -39,11 +41,15 @@ class MLPConfig:
         use_embeddings: bool = False,
         bins: list[np.ndarray] | None = None,
         d_embedding: int = 8,
+        quantization: str = QUANTIZATION_NONE,
+        quantization_granularity: str = "per_row",
+        quantize_output: bool = False,
     ) -> None:
         if activation not in ACTIVATIONS:
             raise ValueError(f"Unknown activation: {activation!r}")
         if len(layer_sizes) < 2:
             raise ValueError("layer_sizes needs at least input and output widths")
+        validate_quantization(quantization, quantization_granularity)
         self.n_num_features = n_num_features
         self.cat_cardinalities = list(cat_cardinalities)
         self.d_out = d_out
@@ -53,6 +59,11 @@ class MLPConfig:
         self.use_embeddings = use_embeddings
         self.bins = bins
         self.d_embedding = d_embedding
+        self.quantization = quantization
+        self.quantization_granularity = (
+            quantization_granularity if quantization != QUANTIZATION_NONE else GRANULARITIES[0]
+        )
+        self.quantize_output = bool(quantize_output)
 
     @property
     def n_layers(self) -> int:
@@ -64,6 +75,18 @@ class MLPConfig:
         if self.bins is None:
             return []
         return [len(b) - 1 for b in self.bins]
+
+    def layer_is_quantized(self, i: int) -> bool:
+        """Whether backbone weight matrix ``i`` is ternary-quantized.
+
+        The output layer is kept at full precision unless explicitly
+        requested via ``quantize_output``.
+        """
+        if self.quantization == QUANTIZATION_NONE:
+            return False
+        if i == self.n_layers - 1:
+            return self.quantize_output
+        return True
 
     @property
     def d_enc(self) -> int:

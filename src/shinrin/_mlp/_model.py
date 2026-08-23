@@ -19,6 +19,10 @@ from __future__ import annotations
 
 import numpy as np
 
+from shinrin._quant import (
+    QUANTIZATION_NONE,
+    ternary_quantize_dequantize,
+)
 from shinrin._tabm._model import Batch
 
 from ._layers import MLPConfig, MLPParams
@@ -66,6 +70,18 @@ class MLPCore:
         self.config = config
         self.task = task
 
+    def effective_weight(self, w: np.ndarray, i: int) -> np.ndarray:
+        """Weight matrix used by the forward pass of layer ``i``.
+
+        With ternary quantization this is the BitLinear-style absmean
+        ternary approximation; gradients keep flowing to the latent
+        ``w`` (straight-through estimator).
+        """
+        cfg = self.config
+        if cfg.quantization == QUANTIZATION_NONE or not cfg.layer_is_quantized(i):
+            return w
+        return ternary_quantize_dequantize(w, cfg.quantization_granularity)
+
     # -- forward -------------------------------------------------------------
 
     def forward(
@@ -92,8 +108,11 @@ class MLPCore:
         use_dropout = cfg.dropout > 0.0 and train and rng is not None
         n_hidden = cfg.n_layers - 1
         for i in range(cfg.n_layers):
-            w, b = params.arrays[f"l{i}_w"], params.arrays[f"l{i}_b"]
-            z = h @ w.T + b[None, :]
+            # BitLinear: quantize-dequantize for the forward pass only; the
+            # latent weights remain the optimizer's target (STE backward).
+            w_eff = self.effective_weight(params.arrays[f"l{i}_w"], i)
+            b = params.arrays[f"l{i}_b"]
+            z = h @ w_eff.T + b[None, :]
             if i < n_hidden:
                 a, deriv = _activate(z, cfg.activation)
                 mask_scale = None
@@ -188,17 +207,21 @@ class MLPCore:
             if i > 0:
                 # Multiply by the incoming activation's derivative (and the
                 # inverted dropout mask) of layer i-1, whose outputs feed
-                # layer i.
+                # layer i. Input-gradients use the same effective (possibly
+                # quantized) weights as the forward pass — the STE contract.
                 deriv, mask_scale = caches[i - 1][1], caches[i - 1][2]
-                da = da @ params.arrays[f"l{i}_w"] * deriv
+                w_eff = self.effective_weight(params.arrays[f"l{i}_w"], i)
+                da = da @ w_eff * deriv
                 if mask_scale is not None:
                     keep, mask = mask_scale
                     da = da * mask * keep
 
         if pl.size:
             # Gradient wrt the embedding output = dz_0 @ W_0 (the embedding
-            # feeds layer 0's input directly).
-            d_in_grad = da @ params.arrays["l0_w"]
+            # feeds layer 0's input directly); quantized like every other
+            # input-gradient when BitLinear is enabled.
+            w0_eff = self.effective_weight(params.arrays["l0_w"], 0)
+            d_in_grad = da @ w0_eff
             self._embed_backward(params, batch, pl, d_in_grad, grads)
         return grads
 

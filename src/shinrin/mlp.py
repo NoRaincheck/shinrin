@@ -30,6 +30,7 @@ from sklearn.utils.validation import check_is_fitted, check_X_y, validate_data
 
 from shinrin._mlp._layers import ACTIVATIONS, MLPConfig, MLPParams
 from shinrin._mlp._model import Batch, MLPCore
+from shinrin._quant import validate_quantization
 from shinrin._tabm._optim import AdamState, FlatSpace, lbfgs_minimize
 from shinrin._tabm._transforms import (
     AsinhTransform,
@@ -281,6 +282,8 @@ class _BaseMLP(BaseEstimator):
         use_quantile=False,
         use_asinh=False,
         use_scaler=False,
+        quantization="none",
+        quantization_granularity="per_row",
         categorical_indices=None,
         categorical_cardinality_threshold=32,
     ):
@@ -315,6 +318,8 @@ class _BaseMLP(BaseEstimator):
         self.use_quantile = use_quantile
         self.use_asinh = use_asinh
         self.use_scaler = use_scaler
+        self.quantization = quantization
+        self.quantization_granularity = quantization_granularity
         self.categorical_indices = categorical_indices
         self.categorical_cardinality_threshold = categorical_cardinality_threshold
 
@@ -340,6 +345,7 @@ class _BaseMLP(BaseEstimator):
             raise ValueError("batch_size must be an int or 'auto'")
         if not 0.0 <= self.dropout < 1.0:
             raise ValueError("dropout must be in [0, 1)")
+        validate_quantization(self.quantization, self.quantization_granularity)
 
     def _hidden_dims(self) -> list[int]:
         sizes = self.hidden_layer_sizes
@@ -381,6 +387,8 @@ class _BaseMLP(BaseEstimator):
             use_embeddings=self.use_embeddings,
             bins=list(pre.bins_) if pre.bins_ else None,
             d_embedding=int(self.d_embedding),
+            quantization=self.quantization,
+            quantization_granularity=self.quantization_granularity,
         )
 
     def _split_validation(self, X, y, stratify=None):
@@ -685,6 +693,12 @@ class MLPClassifier(ClassifierMixin, _BaseMLP):
       projection with ReLU (the TabM embedding recipe). Recommended
       together with ``use_asinh=True, use_scaler=True``.
     - ``dropout``: dropout probability applied after every hidden layer.
+    - ``quantization="ternary"``: BitNet-style training-aware ternary
+      weight quantization (BitLinear). Latent float32 weights are trained
+      while the forward pass uses their ``{-1, 0, +1} * gamma`` absmean
+      approximation (straight-through gradients); the output layer stays
+      at full precision. ``quantization_granularity`` selects the scale
+      granularity (``"per_row"`` or ``"per_tensor"``).
     - automatic categorical detection (cardinality threshold) with
       one-hot encoding; force columns via ``categorical_indices``.
 
@@ -833,7 +847,7 @@ class MLPRegressor(RegressorMixin, _BaseMLP):
 
     Same parameters and attributes as scikit-learn's regressor; see
     :class:`MLPClassifier` for the shinrin extensions (PLE embeddings,
-    dropout, categorical detection).
+    dropout, ternary quantization, categorical detection).
 
     Examples
     --------
