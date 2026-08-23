@@ -1,9 +1,13 @@
+<div align="center">
+
 # Shinrin
 
-![shinrin](shinrin.png)
+<img src="shinrin.png" alt="Shinrin" width="180"/>
 
 [![PyPI - Version](https://img.shields.io/pypi/v/shinrin.svg)](https://pypi.org/project/shinrin/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
+</div>
 
 Shinrin (森林, "forest" in Japanese) is a scikit-learn-compatible library for decision tree and forest models and tabular neural networks, with Rust and Mojo bindings for performance and ONNX export support.
 
