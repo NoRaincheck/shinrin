@@ -5,11 +5,11 @@ This package vendors scikit-garden (BSD-3), skope-rules (BSD-3) and pycorels
 
 Optional dependencies:
     scikit-learn  – required for all tree/forest estimators
-    pandas        – required for SkopeRules
+    pandas        – required for SkopeRules and OrdtClassifier
 
 Install optional dependencies with:
     pip install shinrin[sklearn]   – for tree/forest models
-    pip install shinrin[pandas]    – for SkopeRules
+    pip install shinrin[pandas]    – for SkopeRules / OrdtClassifier
     pip install shinrin[full]      – all optional dependencies
 """
 
@@ -34,6 +34,7 @@ __all__ = [
     "MondrianTreeClassifier",
     "MondrianTreeRegressor",
     "NumericBinarizer",
+    "OrdtClassifier",
     "RandomForestQuantileRegressor",
     "RandomForestRegressor",
     "Rule",
@@ -64,6 +65,7 @@ _IMPORT_MAP: dict[str, tuple[str, str]] = {
     "CorelsClassifier": ("shinrin._corels.corels", "CorelsClassifier"),
     "GOSDTClassifier": ("shinrin._gosdt.classifier", "GOSDTClassifier"),
     "NumericBinarizer": ("shinrin._gosdt.binarizer", "NumericBinarizer"),
+    "OrdtClassifier": ("shinrin._ordt", "OrdtClassifier"),
     "ExtraTreesRegressor": ("shinrin._skgarden.forest", "ExtraTreesRegressor"),
     "MLPClassifier": ("shinrin.mlp", "MLPClassifier"),
     "MLPRegressor": ("shinrin.mlp", "MLPRegressor"),

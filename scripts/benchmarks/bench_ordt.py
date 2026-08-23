@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """Benchmark ORDT: Optimal Rule-sets from Decision Trees.
 
-ORDT is a two-stage extension of skope-rules that combines rule mining from
-decision-tree ensembles with CORELS' certified-optimal selection:
+Benchmarks shinrin's ``OrdtClassifier`` estimator - a variant of SkopeRules
+that combines rule mining from decision-tree ensembles with CORELS'
+certified-optimal selection:
 
-1. mine   : SkopeRules harvests high-precision threshold-conjunction rules
-            (root-to-leaf paths) from bagged classification/regression trees,
-            scored by out-of-bag precision/recall. Unlike stock skope-rules,
-            near-duplicate rules are kept - CORELS decides what matters.
+1. mine   : skope-rules machinery harvests high-precision threshold-conjunction
+            rules (root-to-leaf paths) from bagged classification/regression
+            trees, scored by out-of-bag precision/recall. Unlike stock
+            skope-rules, near-duplicate rules are kept - CORELS decides what
+            matters.
 2. select : every surviving rule becomes one binary column of a "capture
             matrix" Z (Z[i, j] = 1 iff rule j fires on sample i). CORELS is
             fit with max_card=1, so each antecedent of the optimal rule list
@@ -34,7 +36,6 @@ from __future__ import annotations
 
 import argparse
 import os
-import re
 import time
 import warnings
 from typing import Any
@@ -55,185 +56,9 @@ except ImportError as exc:  # pragma: no cover
         "Run: uv run --extra pandas python scripts/benchmarks/bench_ordt.py"
     ) from exc
 
-from shinrin import CorelsClassifier
+from shinrin import CorelsClassifier, OrdtClassifier
 from shinrin._corels import load_from_csv
 from shinrin.rules import SkopeRules
-
-_TERM_RE = re.compile(r"^(\S+) (<=|>=|<|>|==) (\S+)$")
-
-
-def _feat_index(name: str) -> int:
-    """Column index from a feature token ("x12" or skope-internal "__C__12")."""
-    match = re.search(r"(\d+)$", name)
-    if match is None:
-        raise ValueError(f"cannot extract column index from {name!r}")
-    return int(match.group(1))
-
-
-def _rule_mask(rule: str, X: np.ndarray) -> np.ndarray:
-    """Evaluate a skope-rules query string ("x3 <= 2.5 and x0 > 1") on X."""
-    mask = np.ones(X.shape[0], dtype=bool)
-    for term in rule.split(" and "):
-        match = _TERM_RE.match(term.strip())
-        if match is None:
-            raise ValueError(f"unparseable rule term: {term!r} in {rule!r}")
-        name, op, rhs = match.groups()
-        lhs = X[:, _feat_index(name)]
-        if op == "==":
-            if not _is_number(rhs):  # degenerate "c == c" always-true rule
-                continue
-            mask &= lhs == float(rhs)
-        elif op == "<=":
-            mask &= lhs <= float(rhs)
-        elif op == ">":
-            mask &= lhs > float(rhs)
-        elif op == "<":
-            mask &= lhs < float(rhs)
-        else:  # >=
-            mask &= lhs >= float(rhs)
-    return mask
-
-
-def _is_number(token: str) -> bool:
-    try:
-        float(token)
-    except ValueError:
-        return False
-    return True
-
-
-class OrdtClassifier:
-    """Optimal Rule-set from Decision Trees (skope mining -> CORELS select).
-
-    Parameters mirror the two stages: ``n_estimators``/``max_depth``/
-    ``precision_min``/``recall_min``/``max_samples`` feed SkopeRules;
-    ``max_rules`` caps the pool handed to CORELS (top by OOB F1 after
-    deduplicating identical capture sets); ``c``/``min_support``/``n_iter``
-    configure CORELS with ``max_card=1``.
-    """
-
-    def __init__(
-        self,
-        n_estimators: int = 10,
-        max_depth: int = 3,
-        precision_min: float = 0.5,
-        recall_min: float = 0.01,
-        max_samples: float = 0.8,
-        max_rules: int = 150,
-        c: float = 0.01,
-        min_support: float = 0.01,
-        n_iter: int = 10000,
-        random_state: int = 0,
-    ):
-        self.n_estimators = n_estimators
-        self.max_depth = max_depth
-        self.precision_min = precision_min
-        self.recall_min = recall_min
-        self.max_samples = max_samples
-        self.max_rules = max_rules
-        self.c = c
-        self.min_support = min_support
-        self.n_iter = n_iter
-        self.random_state = random_state
-
-    def fit(self, X: np.ndarray, y: np.ndarray) -> OrdtClassifier:
-        X = np.asarray(X, dtype=np.float64)
-
-        # --- stage 1: mine candidate rules ---------------------------------
-        t0 = time.perf_counter()
-        miner = SkopeRules(
-            feature_names=[f"x{i}" for i in range(X.shape[1])],
-            n_estimators=self.n_estimators,
-            max_depth=self.max_depth,
-            precision_min=self.precision_min,
-            recall_min=self.recall_min,
-            max_samples=self.max_samples,
-            # keep near-duplicates: CORELS, not similarity heuristics,
-            # decides which pool members earn a slot in the final list
-            max_depth_duplication=None,
-            random_state=self.random_state,
-        )
-        miner.fit(np.ascontiguousarray(X), y.astype(np.int64))
-        raw_pool = miner.rules_without_feature_names_
-        pretty_pool = miner.rules_
-        mine_s = time.perf_counter() - t0
-        n_raw = len(raw_pool)
-
-        # --- stage 2: build capture matrix and select optimally -------------
-        masks, f1s, labels, rules = [], [], [], []
-        for (rule_str, scores), (pretty_str, _) in zip(raw_pool, pretty_pool):
-            prec, rec = scores[0], scores[1]
-            f1 = 2 * prec * rec / (prec + rec) if (prec + rec) > 0 else 0.0
-            mask = _rule_mask(rule_str, X)
-            if not mask.any() or mask.all():
-                continue  # degenerate columns carry no information
-            masks.append(mask)
-            f1s.append(f1)
-            labels.append(pretty_str)
-            rules.append(rule_str)
-        n_valid = len(masks)
-
-        if n_valid == 0:
-            raise RuntimeError(
-                "ORDT mined no usable rules; relax precision_min/recall_min"
-            )
-
-        stacked = np.stack(masks)  # (n_candidates, n_samples)
-        order = np.argsort(-np.asarray(f1s), kind="stable")
-        sorted_rows = stacked[order].astype(np.uint8)
-        # first occurrence in F1-desc order keeps the best-scoring duplicate
-        _, first = np.unique(sorted_rows, axis=0, return_index=True)
-        keep = order[np.sort(first)][: self.max_rules]
-
-        Z = np.ascontiguousarray(stacked[keep].T.astype(np.uint8))
-        self.pool_labels_ = [labels[i] for i in keep]
-        self.pool_rules_ = [rules[i] for i in keep]
-        self.stats_ = {"mined": n_raw, "usable": n_valid, "selected": len(keep)}
-
-        corels = CorelsClassifier(
-            c=self.c,
-            min_support=self.min_support,
-            max_card=1,
-            n_iter=self.n_iter,
-            verbosity=[],
-        )
-        t0 = time.perf_counter()
-        corels.fit(Z, np.asarray(y).astype(np.uint8), features=self.pool_labels_)
-        select_s = time.perf_counter() - t0
-
-        self.corels_ = corels
-        self.mine_s_, self.select_s_ = mine_s, select_s
-        return self
-
-    def predict(self, X: np.ndarray) -> np.ndarray:
-        X = np.asarray(X, dtype=np.float64)
-        Z = np.stack([_rule_mask(r, X) for r in self.pool_rules_], axis=1).astype(
-            np.uint8
-        )
-        return self.corels_.predict(Z)
-
-    def score(self, X: np.ndarray, y: np.ndarray) -> float:
-        return accuracy_score(y, self.predict(X))
-
-    def list_rules(self) -> list[tuple[str, bool]]:
-        """Readable ordered rule list: (label, prediction); negated pool
-        members are prefixed with NOT."""
-        out = []
-        for entry in self.corels_.rl().rules:
-            ants = entry["antecedents"]
-            if not ants:
-                continue  # default catch-all clause
-            idx = ants[0]
-            label = self.pool_labels_[abs(idx) - 1]
-            out.append(
-                (("NOT " + label) if idx < 0 else label, bool(entry["prediction"]))
-            )
-        return out
-
-    def complexity(self) -> tuple[int, int]:
-        """(number of clauses, number of rules in the learned list)."""
-        entries = [r for r in self.corels_.rl().rules if r["antecedents"]]
-        return sum(len(r["antecedents"]) for r in entries), len(entries)
 
 
 def compas_data() -> tuple[np.ndarray, np.ndarray]:

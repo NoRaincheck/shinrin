@@ -15,6 +15,8 @@
 ### CORELS Optimal Rule Lists
 
 - `CorelsClassifier` — Certifiably optimal rule lists for binary data
+- `OrdtClassifier` — Optimal rule-sets from decision trees (skope-rules
+  mining + CORELS selection; variant of `SkopeRules`)
 - `RuleList` — Learned rule list (via `shinrin._corels`)
 - `load_from_csv` — Load binary CSV datasets (via `shinrin._corels`)
 

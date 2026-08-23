@@ -1,8 +1,9 @@
 # ORDT Benchmarks
 
-**ORDT (Optimal Rule-sets from Decision Trees)** — a two-stage extension of
-skope-rules that replaces its heuristic rule voting with CORELS' certified
-optimal selection:
+**ORDT (Optimal Rule-sets from Decision Trees)** — ships as
+[`shinrin.OrdtClassifier`](../../../docs/models/corels.md#ordtclassifier), a
+variant of skope-rules that replaces its heuristic rule voting with CORELS'
+certified optimal selection:
 
 1. **mine** — the vendored `SkopeRules` harvests root-to-leaf threshold
    conjunctions from bagged classification/regression trees and scores them by
