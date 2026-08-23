@@ -647,7 +647,7 @@ class TreeExplainer:
             The generated axes.
         """
         try:
-            import matplotlib.pyplot as plt  # ty: ignore[unresolved-import]
+            import matplotlib.pyplot as plt
         except ImportError:
             raise ImportError(
                 "matplotlib is required for summary_plot. "

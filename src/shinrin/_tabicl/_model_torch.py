@@ -52,7 +52,7 @@ class RotaryEmbedding(nn.Module):
         frq = raw_freqs.to(torch.float32)
         freqs = torch.outer(
             pos,
-            frq,  # ty: ignore[invalid-argument-type]
+            frq,
         )  # (T, hd/2)
         original_dtype = x.dtype
         x_f = x.to(torch.float32)
@@ -399,26 +399,20 @@ class SetTransformer(nn.Module):
         for idx, block in enumerate(self.blocks):
             if use_cache:
                 hidden_k, hidden_v = cache_list[idx]
-                out = block.multihead_attn2(  # ty: ignore[call-non-callable]
-                    out, cached_kv=(hidden_k, hidden_v)
-                )
+                out = block.multihead_attn2(out, cached_kv=(hidden_k, hidden_v))
             else:
                 *batch, _, d_model = out.shape
                 ind_vecs = block.ind_vectors
-                n_inds = ind_vecs.shape[0]  # ty: ignore[not-subscriptable]
-                ind = ind_vecs.expand(  # ty: ignore[call-non-callable, no-matching-overload]
-                    *batch, n_inds, d_model
-                )
-                hidden = block.multihead_attn1(  # ty: ignore[call-non-callable]
+                n_inds = ind_vecs.shape[0]
+                ind = ind_vecs.expand(*batch, n_inds, d_model)
+                hidden = block.multihead_attn1(
                     ind, out[..., :train_size, :], out[..., :train_size, :]
                 )
-                _, k_proj, v_proj = block.multihead_attn2(  # ty: ignore[call-non-callable]
+                _, k_proj, v_proj = block.multihead_attn2(
                     out, hidden, hidden, need_kv=True
                 )
                 cache_list[idx] = (k_proj, v_proj)
-                out = block.multihead_attn2(  # ty: ignore[call-non-callable]
-                    out, hidden, hidden
-                )
+                out = block.multihead_attn2(out, hidden, hidden)
             if skip_mask.any():
                 out[skip_mask] = SKIP_VALUE
         return out
@@ -487,7 +481,7 @@ class OneHotAndLinear(nn.Linear):
         super().__init__(num_classes, embed_dim)
         self.num_classes = num_classes
 
-    def forward(self, src: Tensor) -> Tensor:  # ty: ignore[invalid-method-override]
+    def forward(self, src: Tensor) -> Tensor:
         one_hot = F.one_hot(src.long(), self.num_classes).to(src.dtype)
         return F.linear(one_hot.float(), self.weight, self.bias).to(src.dtype)
 
@@ -499,7 +493,7 @@ class SkippableLinear(nn.Linear):
         super().__init__(in_features, out_features)
         self.skip_value = SKIP_VALUE
 
-    def forward(self, src: Tensor) -> Tensor:  # ty: ignore[invalid-method-override]
+    def forward(self, src: Tensor) -> Tensor:
         out = F.linear(src, self.weight, self.bias)
         skip_mask = (src == self.skip_value).all(dim=-1)
         if skip_mask.any():
@@ -927,9 +921,7 @@ class TabICLTorchModel:
         out = col.in_linear(features)
         for idx, block in enumerate(col.tf_col.blocks):
             hidden_k, hidden_v = cache["col"][idx]
-            out = block.multihead_attn2(  # ty: ignore[call-non-callable]
-                out, cached_kv=(hidden_k, hidden_v)
-            )
+            out = block.multihead_attn2(out, cached_kv=(hidden_k, hidden_v))
         embeddings = out.transpose(1, 2)
 
         rep = net.row_interactor(embeddings)  # (1, T_test, D); positions restart at 0

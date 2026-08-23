@@ -649,7 +649,7 @@ def from_model(
     >>> # Continue training with new data
     >>> mondrian_model.partial_fit(X_new, y_new)
     """
-    from shinrin._compat.sklearn_utils_validation import (  # ty: ignore[unresolved-import]
+    from shinrin._compat.sklearn_utils_validation import (
         check_X_y,
     )
 

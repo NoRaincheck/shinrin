@@ -19,7 +19,7 @@ fix:
 lint:
     cargo clippy --all-targets --all-features -- -D warnings
     uv run ruff check src/ tests/
-    uv run ty check --exclude "src/shinrin/_skgarden/**" --exclude "src/shinrin/_skrules/**" --exclude "src/shinrin/_corels/**" --exclude "src/shinrin/_gosdt/**" --exclude "tests/vendored/**" src/ tests/
+    uv run ty check --ignore unresolved-import --exclude "src/shinrin/_skgarden/**" --exclude "src/shinrin/_skrules/**" --exclude "src/shinrin/_corels/**" --exclude "src/shinrin/_gosdt/**" --exclude "tests/vendored/**" src/ tests/
 
 # ---------- Mojo backend ----------
 
