@@ -79,9 +79,11 @@ Selected via the `backend` parameter or `SHINRIN_TABICL_BACKEND`
 - **numpy** — pure NumPy reference implementation, always available.
 - **torch** — own PyTorch implementation with SDPA attention and optional
   GPU inference via `device=`.
-- **mojo** — experimental native kernels (`just build-tabicl-mojo`). The
-  kernels compile and run an end-to-end pass but do not yet reach numeric
-  parity with the reference backends, so they stay opt-in.
+- **mojo** — experimental native kernels (`just build-tabicl-mojo`). Run
+  the full staged graph natively with SIMD + pthread parallelism and a
+  native KV cache (`kv_cache=True`); numeric parity against torch is
+  pinned by the opt-in suite (`SHINRIN_TABICL_PARITY_MOJO=1`). Many-class
+  hierarchical prediction falls back to torch/numpy at `fit()` time.
 
 See [TABICL_BENCHMARK.md](https://github.com/NoRaincheck/shinrin/blob/main/scripts/benchmarks/TABICL_BENCHMARK.md)
 for benchmark methodology and measured numbers.
