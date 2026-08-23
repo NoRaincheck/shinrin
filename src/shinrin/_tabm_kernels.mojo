@@ -24,7 +24,7 @@ losses are means over B*k members. L2 adds alpha*theta to gradients and
 """
 
 from std.os import abort, getenv
-from std.math import abs, exp, log, pow, sqrt
+from std.math import abs, exp, floor, log, pow, sqrt
 from std.memory import alloc
 from std.io import Writer
 from std.python import Python, PythonObject
@@ -246,6 +246,54 @@ def saxpy(dst: Pointer[Float32, MutUntrackedOrigin], src: Pointer[Float32, MutUn
     while i < n:
         dst.unsafe_store[width=1](i, dst.unsafe_load[width=1](i) + Float32(scale) * src.unsafe_load[width=1](i))
         i += 1
+
+
+# =============================================================================
+# Ternary (BitLinear) quantization helpers -- mirrors _mlp_kernels.mojo
+# =============================================================================
+
+
+@always_inline
+def round_half_even(x: Float32) -> Float32:
+    # Matches np.round's half-to-even rule on the clipped [-1, 1] domain.
+    var y = floor(x)
+    var frac = x - y
+    if frac > 0.5:
+        y += 1.0
+    elif frac == 0.5:
+        # Bump only when the floor is odd; Int % keeps the sign of the
+        # dividend, so odd negatives still compare non-zero.
+        if Int(y) % 2 != 0:
+            y += 1.0
+    return y
+
+
+@always_inline
+def _ternary_fill(
+    src: Pointer[Float32, MutUntrackedOrigin],
+    dst: Pointer[Float32, MutUntrackedOrigin],
+    count: Int,
+):
+    # Quantize-dequantize ``count`` contiguous values with a single
+    # absmean scale accumulated in float64 (matches shinrin._quant).
+    var s: Float64 = 0.0
+    var t = 0
+    while t < count:
+        var v = src[t]
+        s += Float64(v if v >= 0 else -v)
+        t += 1
+    var gamma = Float32(s / Float64(count))
+    if gamma < 1e-12:
+        gamma = 1e-12
+    t = 0
+    while t < count:
+        var q = src[t] / gamma
+        if q > 1.0:
+            q = 1.0
+        elif q < -1.0:
+            q = -1.0
+        dst[t] = round_half_even(q) * gamma
+        t += 1
 
 
 # =============================================================================
@@ -588,6 +636,12 @@ struct TabMTrainer(ImplicitlyCopyable, Movable, Writable):
     var offs: Pointer[Int, MutUntrackedOrigin]
     var n_offs: Int
     var P: Int
+    # BitLinear ternary quantization of the shared block weights
+    # (0=none, 1=per_row, 2=per_tensor). ``qw`` holds dequantized
+    # effective weights at theta offsets; refreshed whenever theta
+    # changes. Head weights stay full precision.
+    var quant: Int
+    var qw: Optional[Pointer[Float32, MutUntrackedOrigin]]
     # -- KV-cache: block activations cached from build_cache ----------------
     var cache_slab: Optional[Pointer[Float32, MutUntrackedOrigin]]
     var cache_nb: Int
@@ -667,6 +721,14 @@ struct TabMTrainer(ImplicitlyCopyable, Movable, Writable):
         pos += 1
         cur += self.k * self.dout  # head_b
         self.P = cur
+
+        self.quant = 0
+        self.qw = None
+        if len(dims) > 9:
+            self.quant = Int(dp[9])
+            if self.quant < 0 or self.quant > 2:
+                raise Error("dims[9] must be a quantization code in {0, 1, 2}")
+            self.qw = alloc[Float32](self.P + 16)
         # Cache fields (zeroed; allocated lazily by build_cache_impl)
         self.cache_slab = None
         self.cache_nb = 0
@@ -703,6 +765,44 @@ struct TabMTrainer(ImplicitlyCopyable, Movable, Writable):
     @always_inline
     def off_w(self, i: Int) -> Int:
         return self.offs[self.emb_count() + 4 * i]
+
+    @always_inline
+    def weight_for_fwd(
+        self, theta: Pointer[Float32, MutUntrackedOrigin], i: Int
+    ) -> Pointer[Float32, MutUntrackedOrigin]:
+        """Weight pointer for forward/input-gradient GEMMs of block ``i``.
+
+        Quantized blocks read from the refreshed scratch buffer;
+        gradient accumulation always uses the latent theta weights (STE).
+        """
+        if self.quant == 0:
+            return theta + self.off_w(i)
+        return self.qw.value() + self.off_w(i)
+
+    def refresh_quantized(
+        self, theta: Pointer[Float32, MutUntrackedOrigin]
+    ):
+        """Recompute ternary effective block weights into ``qw``.
+
+        Mirrors shinrin._quant: absmean scale per output row (per_row)
+        or per matrix (per_tensor), float64 accumulation, half-to-even
+        rounding matching np.round. Runs before workers are spawned.
+        """
+        if self.quant == 0:
+            return
+        var i = 0
+        while i < self.nb:
+            var fin = self.block_in(i)
+            var src = theta + self.off_w(i)
+            var dst = self.qw.value() + self.off_w(i)
+            if self.quant == 2:
+                _ternary_fill(src, dst, self.db * fin)
+            else:
+                var r = 0
+                while r < self.db:
+                    _ternary_fill(src + r * fin, dst + r * fin, fin)
+                    r += 1
+            i += 1
 
     @always_inline
     def off_r(self, i: Int) -> Int:
@@ -860,7 +960,9 @@ struct TabMTrainer(ImplicitlyCopyable, Movable, Writable):
         var i = 0
         while i < self.nb:
             var b_in = self.block_in(i)
-            var w = theta + self.off_w(i)
+            # BitLinear: forward GEMM consumes the ternary effective
+            # weights; adapters r/s/bias stay full precision.
+            var w = self.weight_for_fwd(theta, i)
             var rr = theta + self.off_r(i)
             var ss = theta + self.off_s(i)
             var bb = theta + self.off_b(i)
@@ -1198,7 +1300,9 @@ struct TabMTrainer(ImplicitlyCopyable, Movable, Writable):
         var i = self.nb - 1
         while i >= 0:
             var b_in = self.block_in(i)
-            var w = theta + self.off_w(i)
+            # Input-gradients (dv = dq @ W) use the effective weights;
+            # gradient accumulation below stays on the latent weights.
+            var w = self.weight_for_fwd(theta, i)
             var rr = theta + self.off_r(i)
             var ss = theta + self.off_s(i)
             var v = ws.vs_ptr(i)
@@ -1671,6 +1775,7 @@ struct TabMTrainer(ImplicitlyCopyable, Movable, Writable):
     def forward_avg(self_ptr: Pointer[Self, MutAnyOrigin], parts: PythonObject) raises -> PythonObject:
         var self = self_ptr[]
         var theta = ptr_f32(parts[0])
+        self.refresh_quantized(theta)
         var x_num = ptr_f32(parts[1])
         var x_enc = ptr_f32(parts[2])
         var x_cat = ptr_f32(parts[3])
@@ -1858,6 +1963,7 @@ struct TabMTrainer(ImplicitlyCopyable, Movable, Writable):
     def build_cache(self_ptr: Pointer[Self, MutAnyOrigin], parts: PythonObject) raises -> PythonObject:
         var self = self_ptr[]
         var theta = ptr_f32(parts[0])
+        self.refresh_quantized(theta)
         var x_num = ptr_f32(parts[1])
         var x_enc = ptr_f32(parts[2])
         var x_cat = ptr_f32(parts[3])
@@ -2076,6 +2182,9 @@ def k_full_loss_grad(
     nthreads: Int,
 ) -> Float64:
     """Parallel chunked forward/backward over all N rows; mean loss."""
+    # L-BFGS re-evaluates this after every candidate step, so refreshing
+    # here keeps qw in sync with the current latent weights.
+    tr.refresh_quantized(theta)
     vec_zero(grad, tr.P)
     var chunk = max(1, 8192 // tr.k)
     var rows_cap = (chunk + nthreads - 1) // nthreads
@@ -2130,6 +2239,9 @@ def k_adam_epoch(
     nthreads: Int,
 ) -> Tuple[Float64, Int]:
     var rng = Rng(seed)
+    # Quantized effective weights must track theta, which changes after
+    # every Adam round below.
+    tr.refresh_quantized(theta)
     var idx = alloc[Int](N)
     var i = 0
     while i < N:
@@ -2174,6 +2286,7 @@ def k_adam_epoch(
         # Adam update (bias-corrected, mirrors _optim.adam_step)
         t += 1
         adam_update(theta, m, v, g, tr.P, alpha, lr, 1.0 - pow(0.9, Float64(t)), 1.0 - pow(0.999, Float64(t)))
+        tr.refresh_quantized(theta)
         weighted += batch_loss * Float64(nb_rows)
         start = be
     for t3 in range(nthreads):

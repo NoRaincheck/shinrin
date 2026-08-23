@@ -351,3 +351,70 @@ def test_predict_with_cache_vs_numpy():
         atol=1e-5,
         err_msg="cache predictions must match NumPy reference",
     )
+
+
+# ---------------------------------------------------------------------------
+# ternary (BitLinear) quantization parity
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("granularity", ["per_row", "per_tensor"])
+@pytest.mark.parametrize("use_emb", [True, False])
+def test_quantized_loss_grad_parity(granularity, use_emb):
+    """Deterministic loss/grad parity with ternary block quantization."""
+    config, params, batch = make_case("regression", use_emb)
+    config.quantization = "ternary"
+    config.quantization_granularity = granularity
+    core = TabMCore(config, "regression")
+    space = FlatSpace(params)
+    theta = params.flatten()
+
+    loss_np, grads_np = core.loss_and_grads(params, batch)
+    g_np = space.flatten_grads(grads_np)
+
+    from shinrin._tabm._mojo_trainer import get_tabm_trainer
+
+    trainer = get_tabm_trainer(config)
+    dummy = np.zeros(1, dtype=np.float32)
+    x_enc = batch.x_enc if use_emb else dummy
+    loss_m, grad_m = trainer.loss_grad(
+        [theta, batch.x_num, x_enc, dummy, batch.y, TASK_CODES["regression"], 0.0]
+    )
+
+    assert loss_np == pytest.approx(float(loss_m), rel=1e-4)
+    np.testing.assert_allclose(g_np, np.asarray(grad_m), rtol=1e-3, atol=1e-4)
+
+
+def test_quantized_training_curve_close():
+    """QAT trajectories agree loosely: identical math, chaotic rounding.
+
+    Ternary level flips caused by backend float noise amplify over many
+    epochs, so curves are compared with a wide tolerance (the
+    deterministic test above pins the exact semantics).
+    """
+    import os
+
+    from shinrin import TabMClassifier
+
+    rng = np.random.RandomState(0)
+    X = rng.randn(200, 6).astype(np.float32)
+    y = (X[:, 0] + X[:, 1] > 0).astype(np.float32)
+
+    curves = {}
+    for backend in ("numpy", "mojo"):
+        clf = TabMClassifier(
+            hidden_layer_sizes=(16,),
+            k=4,
+            max_iter=40,
+            random_state=3,
+            use_embeddings=False,
+            quantization="ternary",
+        )
+        os.environ["SHINRIN_TABM_BACKEND"] = backend
+        try:
+            clf.fit(X, y)
+        finally:
+            os.environ.pop("SHINRIN_TABM_BACKEND", None)
+        curves[backend] = np.asarray(clf.loss_curve_)
+
+    np.testing.assert_allclose(curves["mojo"], curves["numpy"], rtol=0.25, atol=5e-3)
