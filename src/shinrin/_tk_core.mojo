@@ -5,9 +5,16 @@ Internal module consumed by ``shinrin._tabicl_kernels`` (build with
 math utilities and the GEMM micro-kernels. Code moved verbatim from
 ``_tabicl_kernels.mojo`` — keep behavior-preserving edits separate from
 moves so regressions stay attributable.
+
+The public ``gemm_nt`` / ``gemm_nn`` dispatchers split output rows across
+pthread workers for large problems (bit-exact vs the serial row kernels,
+since each C element is written by exactly one thread); small GEMMs run
+inline. GELU uses the native float32 SIMD erf path.
 """
 
+from std.ffi import external_call
 from std.math import erf, exp, log, max, sqrt
+from std.memory import alloc
 from std.python import Python, PythonObject
 
 comptime SIMDW = 8
@@ -66,8 +73,10 @@ def gelu_scalar(x: Float32) -> Float32:
 
 @always_inline
 def gelu8(x: SIMD[DType.float32, SIMDW]) -> SIMD[DType.float32, SIMDW]:
-    var cx = x.cast[DType.float64]()
-    return (0.5 * cx * (1.0 + erf(cx * 0.7071067811865476))).cast[DType.float32]()
+    # Exact GELU (torch nn.GELU default): 0.5*x*(1+erf(x/sqrt(2))) using the
+    # native float32 SIMD erf (elementwise, so per-lane results match a
+    # width-1 call; ~1 ulp-level deviation from the float64 path only).
+    return 0.5 * x * (1.0 + erf(x * 0.7071067811865476))
 
 
 # =============================================================================
@@ -75,15 +84,15 @@ def gelu8(x: SIMD[DType.float32, SIMDW]) -> SIMD[DType.float32, SIMDW]:
 # =============================================================================
 
 
-@always_inline
-def gemm_nt(m: Int, n: Int, kk: Int, a: Pointer[Float32, MutUntrackedOrigin], b: Pointer[Float32, MutUntrackedOrigin], c: Pointer[Float32, MutUntrackedOrigin]):
-    # C (m,n) = A (m,kk) @ B (n,kk)^T   -- overwrites C
-    var it = 0
-    while it < m:
+def gemm_nt_rows(m: Int, n: Int, kk: Int, a: Pointer[Float32, MutUntrackedOrigin], b: Pointer[Float32, MutUntrackedOrigin], c: Pointer[Float32, MutUntrackedOrigin], lo: Int, hi: Int):
+    # rows [lo, hi) of C (m,n) = A (m,kk) @ B (n,kk)^T -- overwrites those rows.
+    # Deterministic per-row: results identical regardless of row partitioning.
+    var it = lo
+    while it < hi:
         var j = 0
         while j < n:
             var bp = b + j * kk
-            if it + 4 <= m:
+            if it + 4 <= hi:
                 var ap0 = a + it * kk
                 var ap1 = a + (it + 1) * kk
                 var ap2 = a + (it + 2) * kk
@@ -116,7 +125,7 @@ def gemm_nt(m: Int, n: Int, kk: Int, a: Pointer[Float32, MutUntrackedOrigin], b:
                 c[(it + 3) * n + j] = s3
             else:
                 var r = it
-                while r < m:
+                while r < hi:
                     var acc = SIMD[DType.float32, SIMDW](0.0)
                     var ap = a + r * kk
                     var t = 0
@@ -134,10 +143,10 @@ def gemm_nt(m: Int, n: Int, kk: Int, a: Pointer[Float32, MutUntrackedOrigin], b:
 
 
 @always_inline
-def gemm_nn(m: Int, n: Int, kk: Int, a: Pointer[Float32, MutUntrackedOrigin], b: Pointer[Float32, MutUntrackedOrigin], c: Pointer[Float32, MutUntrackedOrigin]):
-    # C (m,n) = A (m,kk) @ B (kk,n)   -- overwrites C
-    var it = 0
-    while it < m:
+def gemm_nn_rows(m: Int, n: Int, kk: Int, a: Pointer[Float32, MutUntrackedOrigin], b: Pointer[Float32, MutUntrackedOrigin], c: Pointer[Float32, MutUntrackedOrigin], lo: Int, hi: Int):
+    # rows [lo, hi) of C (m,n) = A (m,kk) @ B (kk,n) -- overwrites those rows.
+    var it = lo
+    while it < hi:
         var j = 0
         while j + SIMDW <= n:
             if it + 4 <= m:
@@ -171,7 +180,7 @@ def gemm_nn(m: Int, n: Int, kk: Int, a: Pointer[Float32, MutUntrackedOrigin], b:
             j += SIMDW
         while j < n:
             var r = 0
-            while r < 4 and it + r < m:
+            while r < 4 and it + r < hi:
                 var acc: Float32 = 0.0
                 var t = 0
                 while t < kk:
@@ -235,3 +244,148 @@ def gemm_tn_acc(m: Int, n: Int, kk: Int, a: Pointer[Float32, MutUntrackedOrigin]
             c[it * n + j2] += acc
             j2 += 1
         it += 1
+
+
+# =============================================================================
+# Threaded GEMM dispatch (pthreads; output rows split across worker threads)
+# =============================================================================
+
+comptime P_U8 = Pointer[UInt8, MutUntrackedOrigin]
+comptime GEMM_THREAD_MIN_FLOPS = 1 << 19  # ~0.5M MACs: below this threading overhead wins
+comptime GEMM_THREAD_MIN_PANEL = 1 << 17  # B panel (n*kk) must exceed L1 so threads hide memory latency
+comptime SYSCONF_NPROCESSORS_ONLN = 58  # Darwin value of _SC_NPROCESSORS_ONLN
+
+
+struct GemmJob(Movable):
+    var a: Pointer[Float32, MutUntrackedOrigin]
+    var b: Pointer[Float32, MutUntrackedOrigin]
+    var c: Pointer[Float32, MutUntrackedOrigin]
+    var m: Int
+    var n: Int
+    var kk: Int
+    var lo: Int
+    var hi: Int
+    var kind: Int  # 0 = nt (A@B^T), 1 = nn (A@B)
+
+    def __init__(
+        out self,
+        a: Pointer[Float32, MutUntrackedOrigin],
+        b: Pointer[Float32, MutUntrackedOrigin],
+        c: Pointer[Float32, MutUntrackedOrigin],
+        m: Int,
+        n: Int,
+        kk: Int,
+        lo: Int,
+        hi: Int,
+        kind: Int,
+    ):
+        self.a = a
+        self.b = b
+        self.c = c
+        self.m = m
+        self.n = n
+        self.kk = kk
+        self.lo = lo
+        self.hi = hi
+        self.kind = kind
+
+
+def hardware_threads() -> Int:
+    # Number of online CPUs via sysconf(_SC_NPROCESSORS_ONLN). Cheap syscall;
+    # globals are unsupported in Mojo so no caching.
+    var nthreads = Int(external_call["sysconf", Int32](SYSCONF_NPROCESSORS_ONLN))
+    if nthreads < 1:
+        nthreads = 1
+    return nthreads
+
+
+@export("shinrin_gemm_worker")
+def gemm_worker(raw: P_U8) abi("C") -> None:
+    var jp = raw.unsafe_bitcast[GemmJob]()
+    if jp[].kind == 0:
+        gemm_nt_rows(jp[].m, jp[].n, jp[].kk, jp[].a, jp[].b, jp[].c, jp[].lo, jp[].hi)
+    else:
+        gemm_nn_rows(jp[].m, jp[].n, jp[].kk, jp[].a, jp[].b, jp[].c, jp[].lo, jp[].hi)
+
+
+comptime GemmWorkerFn = def(P_U8) thin abi("C") -> None
+
+
+def _gemm_dispatch(kind: Int, m: Int, n: Int, kk: Int, a: Pointer[Float32, MutUntrackedOrigin], b: Pointer[Float32, MutUntrackedOrigin], c: Pointer[Float32, MutUntrackedOrigin]):
+    var threads = hardware_threads()
+    if (
+        m < 24
+        or threads < 2
+        or m * n * kk < GEMM_THREAD_MIN_FLOPS
+        or n * kk < GEMM_THREAD_MIN_PANEL
+    ):
+        if kind == 0:
+            gemm_nt_rows(m, n, kk, a, b, c, 0, m)
+        else:
+            gemm_nn_rows(m, n, kk, a, b, c, 0, m)
+        return
+
+    var jobs = Pointer[GemmJob, MutUntrackedOrigin](alloc[GemmJob](threads))
+    var chunk = (m + threads - 1) // threads
+    var spawned = 0
+    var lo = 0
+    while spawned < threads and lo < m:
+        var hi = lo + chunk
+        if hi > m:
+            hi = m
+        jobs.unsafe_offset(spawned)[] = GemmJob(a, b, c, m, n, kk, lo, hi, kind)
+        lo = hi
+        spawned += 1
+
+    comptime WorkerFn = GemmWorkerFn
+    var fp: WorkerFn = gemm_worker
+    var tids = alloc[P_U8](spawned)
+
+    # Partition 0 runs on the calling thread; partitions 1..spawned-1 spawn.
+    var t = 1
+    while t < spawned:
+        var rc = external_call[
+            "pthread_create",
+            Int32,
+            Pointer[P_U8, MutUntrackedOrigin],  # pthread_t *
+            Int,                                # const pthread_attr_t * (NULL)
+            WorkerFn,                           # start routine
+            P_U8,                               # void *arg
+        ](
+            tids.unsafe_offset(t - 1),
+            0,
+            fp,
+            jobs.unsafe_offset(t).unsafe_bitcast[UInt8](),
+        )
+        if rc != 0:
+            # Spawn failed: run this partition synchronously so results stay correct.
+            gemm_worker(jobs.unsafe_offset(t).unsafe_bitcast[UInt8]())
+        t += 1
+
+    var jp0 = jobs.unsafe_offset(0)
+    if jp0[].kind == 0:
+        gemm_nt_rows(jp0[].m, jp0[].n, jp0[].kk, jp0[].a, jp0[].b, jp0[].c, jp0[].lo, jp0[].hi)
+    else:
+        gemm_nn_rows(jp0[].m, jp0[].n, jp0[].kk, jp0[].a, jp0[].b, jp0[].c, jp0[].lo, jp0[].hi)
+
+    t = 1
+    while t < spawned:
+        external_call[
+            "pthread_join",
+            Int32,
+            P_U8,  # pthread_t
+            Int,   # void **retval (NULL)
+        ](tids.unsafe_offset(t - 1)[], 0)
+        t += 1
+
+
+@always_inline
+def gemm_nt(m: Int, n: Int, kk: Int, a: Pointer[Float32, MutUntrackedOrigin], b: Pointer[Float32, MutUntrackedOrigin], c: Pointer[Float32, MutUntrackedOrigin]):
+    # C (m,n) = A (m,kk) @ B (n,kk)^T -- overwrites C (threaded for large sizes)
+    _gemm_dispatch(0, m, n, kk, a, b, c)
+
+
+@always_inline
+def gemm_nn(m: Int, n: Int, kk: Int, a: Pointer[Float32, MutUntrackedOrigin], b: Pointer[Float32, MutUntrackedOrigin], c: Pointer[Float32, MutUntrackedOrigin]):
+    # C (m,n) = A (m,kk) @ B (kk,n) -- overwrites C (threaded for large sizes)
+    _gemm_dispatch(1, m, n, kk, a, b, c)

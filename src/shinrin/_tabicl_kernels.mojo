@@ -624,7 +624,14 @@ struct TabICLInference(ImplicitlyCopyable, Movable, Writable):
                 b += 1
             i += 1
         i = 0
-        while i < mc * d_icl * 2:
+        var dtotal = mc * d_icl * 2
+        while i + SIMDW <= dtotal:
+            decoded.unsafe_store[width=SIMDW](
+                i,
+                gelu8(decoded.unsafe_load[width=SIMDW](i)),
+            )
+            i += SIMDW
+        while i < dtotal:
             decoded[i] = gelu_scalar(decoded[i])
             i += 1
 
@@ -1432,7 +1439,14 @@ struct TabICLInference(ImplicitlyCopyable, Movable, Writable):
                 b += 1
             t += 1
         t = 0
-        while t < n_rows * d_icl * 2:
+        var ptotal = n_rows * d_icl * 2
+        while t + SIMDW <= ptotal:
+            decoded.unsafe_store[width=SIMDW](
+                t,
+                gelu8(decoded.unsafe_load[width=SIMDW](t)),
+            )
+            t += SIMDW
+        while t < ptotal:
             decoded[t] = gelu_scalar(decoded[t])
             t += 1
 

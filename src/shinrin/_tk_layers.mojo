@@ -597,25 +597,47 @@ def attention_block_forward(
         gemm_nt(q_rows, k_rows, head_dim, q_h, k_h, scores)
         var ts = 0
         while ts < q_rows:
-            var base_s = ts * k_rows
-            var mx: Float32 = -3.0e38
+            var sp = scores + ts * k_rows
+            var nvec = k_rows & ~(SIMDW - 1)
+            # pass 1: scale by 1/sqrt(head_dim), track row max
+            var mxv = SIMD[DType.float32, SIMDW](-3.0e38)
             var s = 0
+            while s < nvec:
+                var v = sp.unsafe_load[width=SIMDW](s) * scale
+                sp.unsafe_store[width=SIMDW](s, v)
+                mxv = max(mxv, v)
+                s += SIMDW
+            var mx = mxv.reduce_max()
             while s < k_rows:
-                var v = scores[base_s + s] * scale
-                scores[base_s + s] = v
+                var v = sp[s] * scale
+                sp[s] = v
                 if v > mx:
                     mx = v
                 s += 1
-            var sum_v: Float32 = 0.0
+            # pass 2: exp(x - max) + sum
+            var sumv = SIMD[DType.float32, SIMDW](0.0)
             s = 0
+            while s < nvec:
+                var e = exp(sp.unsafe_load[width=SIMDW](s) - mx)
+                sp.unsafe_store[width=SIMDW](s, e)
+                sumv += e
+                s += SIMDW
+            var sum_v = sumv.reduce_add()
             while s < k_rows:
-                var e = exp(scores[base_s + s] - mx)
-                scores[base_s + s] = e
+                var e = exp(sp[s] - mx)
+                sp[s] = e
                 sum_v += e
                 s += 1
+            # pass 3: normalize
             s = 0
+            while s < nvec:
+                sp.unsafe_store[width=SIMDW](
+                    s,
+                    sp.unsafe_load[width=SIMDW](s) / sum_v,
+                )
+                s += SIMDW
             while s < k_rows:
-                scores[base_s + s] /= sum_v
+                sp[s] /= sum_v
                 s += 1
             ts += 1
         gemm_nn(q_rows, head_dim, k_rows, scores, v_h, o_h)
@@ -649,8 +671,15 @@ def attention_block_forward(
     var ffh = alloc[Float32](q_rows * d_ff + 16)
     gemm_nt(q_rows, d_ff, d, ffn_in, p.w1, ffh)
     _add_row_bias(ffh, p.b1, q_rows, d_ff)
+    var ftotal = q_rows * d_ff
     mi = 0
-    while mi < q_rows * d_ff:
+    while mi + SIMDW <= ftotal:
+        ffh.unsafe_store[width=SIMDW](
+            mi,
+            gelu8(ffh.unsafe_load[width=SIMDW](mi)),
+        )
+        mi += SIMDW
+    while mi < ftotal:
         ffh[mi] = gelu_scalar(ffh[mi])
         mi += 1
     gemm_nt(q_rows, d, d_ff, ffh, p.w2, res)
