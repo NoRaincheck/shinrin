@@ -55,6 +55,7 @@ module-name = "shinrin._native"
 dev = [
     "pytest>=9.1.1",
     "pytest-cov>=7.1.0",
+    "pytest-timeout>=2.4",
     "ruff>=0.16.3",
     "ty>=0.0.72",
 ]
@@ -69,3 +70,8 @@ extend-exclude = [
     "tests/vendored",
     "src/shinrin/_compat.py",
 ]
+
+[tool.pytest.ini_options]
+# Fail loudly instead of hanging forever if a native kernel wedges.
+timeout = 120
+timeout_method = "thread"

@@ -57,7 +57,7 @@ build-tabm-metal:
 
 # Run TabM tests against the Metal backend
 test-tabm-metal: build-tabm-metal
-    SHINRIN_TABM_BACKEND=metal uv run pytest tests/test_tabm_parity.py tests/test_tabm.py
+    SHINRIN_TEST_METAL=1 SHINRIN_TABM_BACKEND=metal uv run pytest tests/test_tabm_parity.py tests/test_tabm.py
 
 # Build the MLP GPU trainer extension (shinrin._native_mlp_gpu)
 build-mlp-metal:
@@ -65,7 +65,7 @@ build-mlp-metal:
 
 # Run MLP tests against the Metal backend
 test-mlp-metal: build-mlp-metal
-    SHINRIN_MLP_BACKEND=metal uv run pytest tests/test_mlp_parity.py tests/test_mlp.py
+    SHINRIN_TEST_METAL=1 SHINRIN_MLP_BACKEND=metal uv run pytest tests/test_mlp_parity.py tests/test_mlp.py
 
 # Benchmark sklearn vs shinrin MLP backends
 bench-mlp:
