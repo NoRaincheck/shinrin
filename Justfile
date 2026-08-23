@@ -51,6 +51,10 @@ test-mlp-mojo: build-mlp-mojo
 bench-mlp:
     uv run python scripts/benchmarks/bench_mlp.py
 
+# Benchmark GOSDT vs scikit-learn CART
+bench-gosdt:
+    uv run python scripts/benchmarks/bench_gosdt.py
+
 # Benchmark Rust vs Mojo backends
 bench-backends: build-mojo
     uv run python scripts/benchmarks/bench_backends.py

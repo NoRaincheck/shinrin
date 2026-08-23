@@ -108,6 +108,8 @@ See [scripts/benchmarks/BENCHMARK.md](scripts/benchmarks/BENCHMARK.md) for detai
 
 See [scripts/benchmarks/TABM_BENCHMARK.md](scripts/benchmarks/TABM_BENCHMARK.md) for TabM backend comparisons (NumPy vs Mojo vs PyTorch).
 
+See [scripts/benchmarks/GOSDT_BENCHMARK.md](scripts/benchmarks/GOSDT_BENCHMARK.md) for GOSDT vs scikit-learn CART comparisons (`just bench-gosdt`).
+
 To run benchmarks yourself: `python scripts/benchmarks/bench_baselines.py` (or `just bench-backends` for Rust vs Mojo backend comparisons, `just bench-tabm` for TabM backends).
 
 ## Installation
