@@ -370,7 +370,7 @@ def _gemm_dispatch(kind: Int, m: Int, n: Int, kk: Int, a: Pointer[Float32, MutUn
 
     t = 1
     while t < spawned:
-        external_call[
+        _ = external_call[
             "pthread_join",
             Int32,
             P_U8,  # pthread_t
@@ -441,7 +441,7 @@ def run_partitioned_range[
 
     t = 0
     while t < spawned:
-        external_call[
+        _ = external_call[
             "pthread_join",
             Int32,
             P_U8,  # pthread_t

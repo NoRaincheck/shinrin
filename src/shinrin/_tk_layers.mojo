@@ -110,7 +110,6 @@ def ssmax_apply(
     if kind == 0:
         return
     var logn = fast_log(Float32(max(n_keys, 1)))
-    var row_stride = head_dim
 
     if kind == 1:
         var h = 0
