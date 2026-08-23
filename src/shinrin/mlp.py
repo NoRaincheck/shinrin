@@ -284,6 +284,7 @@ class _BaseMLP(BaseEstimator):
         use_scaler=False,
         quantization="none",
         quantization_granularity="per_row",
+        quantize_output=False,
         categorical_indices=None,
         categorical_cardinality_threshold=32,
     ):
@@ -320,6 +321,7 @@ class _BaseMLP(BaseEstimator):
         self.use_scaler = use_scaler
         self.quantization = quantization
         self.quantization_granularity = quantization_granularity
+        self.quantize_output = quantize_output
         self.categorical_indices = categorical_indices
         self.categorical_cardinality_threshold = categorical_cardinality_threshold
 
@@ -389,6 +391,7 @@ class _BaseMLP(BaseEstimator):
             d_embedding=int(self.d_embedding),
             quantization=self.quantization,
             quantization_granularity=self.quantization_granularity,
+            quantize_output=bool(self.quantize_output),
         )
 
     def _split_validation(self, X, y, stratify=None):
