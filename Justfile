@@ -67,6 +67,10 @@ test-tabicl-mojo: build-tabicl-mojo
 bench-gosdt:
     uv run python scripts/benchmarks/bench_gosdt.py
 
+# Benchmark ORDT: optimal rule-sets from decision trees (skope mining + CORELS selection)
+bench-ordt:
+    uv run --extra pandas python scripts/benchmarks/bench_ordt.py
+
 # Benchmark Rust vs Mojo backends
 bench-backends: build-mojo
     uv run python scripts/benchmarks/bench_backends.py
