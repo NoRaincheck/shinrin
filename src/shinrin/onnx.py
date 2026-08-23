@@ -622,7 +622,7 @@ def to_onnx(
         producer_name=name,
         ir_version=8,
     )
-    helper.set_model_props(model, {"shinrin_version": "0.1.0"})
+    helper.set_model_props(model, {"shinrin_version": "0.2.0"})
     return model
 
 

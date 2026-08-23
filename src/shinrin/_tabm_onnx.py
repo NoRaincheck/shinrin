@@ -544,7 +544,7 @@ def tabm_to_onnx(
         ir_version=8,
     )
     props: dict[str, str] = {
-        "shinrin_version": "0.1.0",
+        "shinrin_version": "0.2.0",
         "model_type": "TabMClassifier" if is_classifier else "TabMRegressor",
         "arch_type": cfg.arch_type,
         "k": str(cfg.k),
