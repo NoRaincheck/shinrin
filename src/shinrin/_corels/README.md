@@ -13,19 +13,24 @@ Upstream version: pycorels master (GPL-3.0, see `LICENSE`).
   GNUmakefiles and the upstream C++ test suite are not used).
 - `cpp/mining/` – rule mining / minority bound helpers vendored from
   `pycorels/corels/src/utils.{hh,cpp}`.
+- `cpp/minigmp/` – [mini-gmp](cpp/minigmp/README.md), GMP's portable `mpz_t`
+  implementation, vendored unmodified from the official GMP 6.3.0 tarball.
+- `cpp/gmpshim/gmp.h` – shim redirecting CORELS' `#include <gmp.h>` to
+  mini-gmp.
 - `cpp/bridge.cpp` – new C ABI bridge replacing upstream's Cython module
   (`corels/_corels.pyx`). It is compiled into the `shinrin._native`
   extension by `build.rs` together with the C++ sources.
 - `corels.py`, `utils.py` – adapted copies of the upstream Python layer.
 - `LICENSE` – the upstream GPL-3.0 license text.
 
-## No GMP
+## Bundled GMP via mini-gmp
 
 Upstream optionally uses GMP (`mpz_t`) to represent rule bit vectors when
-compiled with `-DGMP`. This vendoring never defines `GMP`, so CORELS uses its
-built-in word-array (`v_entry*`) bit vector fallback. There is **no libgmp
-dependency** at build or run time; upstream documents this configuration as
-supported but slower for very large search spaces.
+compiled with `-DGMP`, which speeds up bit-vector operations and enables the
+search-space size estimates. This vendoring compiles with `-DGMP` against
+vendored mini-gmp, so the GMP code path is active while the built extension
+stays fully self-contained: **no system libgmp** is needed at build or run
+time, and PyPI wheels require no intermediary packages.
 
 ## Deviations from upstream
 

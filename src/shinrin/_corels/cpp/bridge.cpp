@@ -4,9 +4,9 @@
  * binding (corels/_corels.pyx) while keeping identical semantics,
  * including the module-global fit state and its lifecycle.
  *
- * Built WITHOUT GMP: the `-DGMP` define is never set, so CORELS falls back
- * to plain word-array bit vectors (v_entry*) instead of mpz_t. No dependency
- * on libgmp remains.
+ * Compiled with -DGMP, where `<gmp.h>` resolves through `gmpshim/gmp.h` to
+ * the vendored mini-gmp (see `minigmp/README.md`): the GMP code path is
+ * active with no dependency on a system libgmp.
  *
  * Provenance: derived from pycorels (GPL-3.0), https://github.com/corels/pycorels
  */

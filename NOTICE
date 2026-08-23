@@ -60,9 +60,9 @@ below and in the LICENSE files kept alongside the vendored code.
    Vendored (adapted) into `src/shinrin/_corels/`: the CORELS C++ engine
    (`cpp/corels/`, `cpp/mining/`) and its Python layer (`corels.py`,
    `utils.py`). The upstream Cython binding is replaced by PyO3 bindings in
-   `src/lib.rs`; the C++ sources are compiled into `shinrin._native`
-   WITHOUT GMP (the `-DGMP` word-array bit-vector fallback is used), so no
-   libgmp dependency exists.
+   `src/lib.rs`; the C++ sources are compiled into `shinrin._native` with
+   `-DGMP`, where `<gmp.h>` resolves to the bundled mini-gmp (see item 7),
+   so no system libgmp dependency exists.
 
    NOTE: unlike the other vendored projects above, this code is licensed
    under the GNU General Public License v3.0. The upstream license text is
@@ -72,3 +72,16 @@ below and in the LICENSE files kept alongside the vendored code.
    Copyright (c) 2017 Elaine Angelino, Nicholas Larus-Stone, Daniel Alabi,
    Margo Seltzer (CORELS); pycorels contributors.
    License: GPL-3.0 (see src/shinrin/_corels/LICENSE)
+
+7. GMP mini-gmp (LGPL-3.0-or-later)
+   https://gmplib.org/
+
+   Vendored (unmodified) into `src/shinrin/_corels/cpp/minigmp/` from the
+   official GMP 6.3.0 release tarball: `mini-gmp/mini-gmp.c` and
+   `mini-gmp/mini-gmp.h`. Provides the `mpz_t` API used by the CORELS build
+   (`-DGMP`) without requiring libgmp on the system.
+
+   License: LGPL-3.0-or-later (see
+   src/shinrin/_corels/cpp/minigmp/LICENSE).
+
+   Copyright 1991-2023 Free Software Foundation, Inc.

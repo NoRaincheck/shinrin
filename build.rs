@@ -3,13 +3,16 @@ use std::path::PathBuf;
 fn main() {
     let cpp_dir = PathBuf::from("src/shinrin/_corels/cpp");
 
-    let mut build = cc::Build::new();
-    build
-        .cpp(true)
+    // C++ CORELS engine + bridge. Compiled with -DGMP, with a shim include
+    // dir placed first so `#include <gmp.h>` resolves to the vendored
+    // mini-gmp rather than a system libgmp.
+    let mut cxx = cc::Build::new();
+    cxx.cpp(true)
         .std("c++11")
-        // Vendored CORELS is compiled without -DGMP: bit vectors use the
-        // plain word-array fallback, so there is no libgmp dependency.
+        .define("GMP", None)
+        .include(cpp_dir.join("gmpshim"))
         .include(cpp_dir.join("corels"))
+        .include(cpp_dir.join("mining"))
         .include(&cpp_dir)
         .flag_if_supported("-O3")
         .warnings(false);
@@ -24,10 +27,21 @@ fn main() {
         "mining/utils.cpp",
         "bridge.cpp",
     ] {
-        build.file(cpp_dir.join(name));
+        cxx.file(cpp_dir.join(name));
     }
 
-    build.compile("shinrin_corels");
+    // Compiled before the mini-gmp static lib so linkers that resolve
+    // archives strictly left-to-right see consumers before providers.
+    cxx.compile("shinrin_corels");
+
+    // mini-gmp: GMP's portable mpz_t implementation, vendored from the
+    // official 6.3.0 tarball (see minigmp/README.md). Provides the GMP
+    // API without any system dependency.
+    let mut c = cc::Build::new();
+    c.file(cpp_dir.join("minigmp/mini-gmp.c"))
+        .flag_if_supported("-O3")
+        .warnings(false);
+    c.compile("shinrin_minigmp");
 
     let target = std::env::var("TARGET").unwrap();
     if target.contains("apple") {
