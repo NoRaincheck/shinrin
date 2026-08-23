@@ -66,14 +66,18 @@ def ternary_scales(w: np.ndarray, granularity: str = "per_row") -> np.ndarray:
 
     Returns shape ``(d_out, 1)`` for ``"per_row"`` or ``()`` (a scalar
     array) for ``"per_tensor"`` so callers can simply multiply/divide.
+
+    The mean accumulates in float64 before rounding down to float32: the
+    Mojo kernels do the same, so both backends derive bit-identical
+    scales regardless of summation order.
     """
     w2 = np.asarray(w, dtype=np.float32)
     if granularity == "per_row":
-        return np.maximum(
-            np.mean(np.abs(w2), axis=1, keepdims=True).astype(np.float32), _TINY
-        )
+        s = np.abs(w2).mean(axis=1, keepdims=True, dtype=np.float64)
+        return np.maximum(s.astype(np.float32), _TINY)
     if granularity == "per_tensor":
-        return np.maximum(np.float32(np.mean(np.abs(w2))), _TINY)
+        s = np.float32(np.abs(w2).mean(dtype=np.float64))
+        return np.maximum(s, _TINY)
     raise ValueError(f"Unknown granularity: {granularity!r}")
 
 
