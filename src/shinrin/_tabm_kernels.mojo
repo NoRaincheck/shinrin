@@ -588,6 +588,11 @@ struct TabMTrainer(ImplicitlyCopyable, Movable, Writable):
     var offs: Pointer[Int, MutUntrackedOrigin]
     var n_offs: Int
     var P: Int
+    # -- KV-cache: block activations cached from build_cache ----------------
+    var cache_slab: Optional[Pointer[Float32, MutUntrackedOrigin]]
+    var cache_nb: Int
+    var cache_b_train: Int
+    var cache_off: Optional[Pointer[Int, MutUntrackedOrigin]]
 
     def __init__(out self, dims: PythonObject, bins: PythonObject) raises:
         var dp = ptr_i64(dims)
@@ -662,6 +667,11 @@ struct TabMTrainer(ImplicitlyCopyable, Movable, Writable):
         pos += 1
         cur += self.k * self.dout  # head_b
         self.P = cur
+        # Cache fields (zeroed; allocated lazily by build_cache_impl)
+        self.cache_slab = None
+        self.cache_nb = 0
+        self.cache_b_train = 0
+        self.cache_off = None
 
     @staticmethod
     def py_init(out self: TabMTrainer, args: PythonObject, kwargs: PythonObject) raises:
@@ -1699,6 +1709,187 @@ struct TabMTrainer(ImplicitlyCopyable, Movable, Writable):
         var self = self_ptr[]
         return Int(self.P)
 
+    # -- KV-cache --------------------------------------------------------------
+
+    def build_cache_impl(
+        self,
+        theta: Pointer[Float32, MutUntrackedOrigin],
+        x_num: Pointer[Float32, MutUntrackedOrigin],
+        x_enc: Pointer[Float32, MutUntrackedOrigin],
+        x_cat: Pointer[Float32, MutUntrackedOrigin],
+        rows: Pointer[Int, MutUntrackedOrigin],
+        b: Int,
+        out_cache: Pointer[Float32, MutUntrackedOrigin],
+        out_off: Pointer[Int, MutUntrackedOrigin],
+    ) -> Int:
+        """Run forward on training data and store last-block activations.
+
+        Writes cache offsets to ``out_off`` and activation data to
+        ``out_cache``.  Returns the total bytes written.
+        """
+        # Allocate slab: one (b*k, db) per block, contiguous
+        var total = 0
+        var blk = 0
+        while blk < self.nb:
+            out_off[blk] = total
+            total += b * self.k * self.db
+            blk += 1
+
+        # Run full forward; store last block's activation into the slab
+        var chunk = max(1, 8192 // self.k)
+        var ws = Workspace(chunk, self.k, self.nb, self.d_in, self.db, self.dout, self.F, self.demb, self.denc)
+        var rng = Rng(1)
+        var start = 0
+        while start < b:
+            var rb = min(chunk, b - start)
+            self.forward_chunk(
+                theta, ws, x_num, x_enc, x_cat,
+                rows.unsafe_offset(start), rb, rng, 0.0, False,
+            )
+            # Store last block activation for this chunk
+            var last = start + rb - 1
+            var dst = out_cache + out_off[self.nb - 1] + last * self.k * self.db
+            var src = ws.act_ptr(self.nb - 1) + (rb - 1) * self.db
+            var r = 0
+            var sz = self.k * self.db
+            while r + SIMDW <= sz:
+                dst.unsafe_store[width=SIMDW](r, src.unsafe_load[width=SIMDW](r))
+                r += SIMDW
+            while r < sz:
+                dst[r] = src[r]
+                r += 1
+            start += rb
+        ws.unsafe_free()
+        return total
+
+    def predict_with_cache_impl(
+        self,
+        theta: Pointer[Float32, MutUntrackedOrigin],
+        x_num: Pointer[Float32, MutUntrackedOrigin],
+        x_enc: Pointer[Float32, MutUntrackedOrigin],
+        x_cat: Pointer[Float32, MutUntrackedOrigin],
+        rows: Pointer[Int, MutUntrackedOrigin],
+        b: Int,
+        cached_act: Pointer[Float32, MutUntrackedOrigin],
+        cached_off: Pointer[Int, MutUntrackedOrigin],
+        b_train: Int,
+        pred_out: Pointer[Float32, MutUntrackedOrigin],
+    ) -> Int:
+        """Predict using cached training activations.
+
+        Runs the query rows through all blocks and writes averaged
+        predictions into ``pred_out`` (b, dout).  Returns 0 on success.
+        """
+        var bk = b * self.k
+        var btk = b_train * self.k
+
+        # Allocate workspace for query rows only
+        var chunk = max(1, 8192 // self.k)
+        var ws = Workspace(chunk, self.k, self.nb, self.d_in, self.db, self.dout, self.F, self.demb, self.denc)
+        var rng = Rng(1)
+
+        # Process in chunks (same as forward_avg)
+        var start = 0
+        while start < b:
+            var rb = min(chunk, b - start)
+            self.forward_chunk(
+                theta, ws, x_num, x_enc, x_cat,
+                rows.unsafe_offset(start), rb, rng, 0.0, False,
+            )
+
+            # Head forward on query portion of this chunk
+            var act_last = ws.act_ptr(self.nb - 1)
+            var hw = theta + self.off_head_w()
+            var hb = theta + self.off_head_b()
+            var out_base = pred_out + start * self.dout
+
+            if self.dout == 1:
+                var rr = 0
+                while rr < rb:
+                    var jj = 0
+                    while jj < self.k:
+                        var ap = act_last + (rr * self.k + jj) * self.db
+                        var hwp = hw + jj * self.db
+                        var acc = hb[jj]
+                        var t = 0
+                        while t + SIMDW <= self.db:
+                            acc += (
+                                ap.unsafe_load[width=SIMDW](t) * hwp.unsafe_load[width=SIMDW](t)
+                            ).reduce_add()
+                            t += SIMDW
+                        while t < self.db:
+                            acc += ap[t] * hwp[t]
+                            t += 1
+                        out_base[rr] += acc
+                        jj += 1
+                    rr += 1
+            else:
+                var rr = 0
+                while rr < rb:
+                    var jj = 0
+                    while jj < self.k:
+                        var o = 0
+                        while o < self.dout:
+                            var acc = hb[jj * self.dout + o]
+                            var t = 0
+                            while t < self.db:
+                                acc += act_last[(rr * self.k + jj) * self.db + t] * hw[jj * self.db * self.dout + t * self.dout + o]
+                                t += 1
+                            out_base[rr * self.dout + o] += acc
+                            o += 1
+                        jj += 1
+                    rr += 1
+
+            start += rb
+
+        # Average over k members
+        var inv_k = 1.0 / Float32(self.k)
+        var r = 0
+        while r < b * self.dout:
+            pred_out[r] *= inv_k
+            r += 1
+
+        ws.unsafe_free()
+        return 0
+
+    # -- Python-visible cache methods ------------------------------------------
+
+    @staticmethod
+    def build_cache(self_ptr: Pointer[Self, MutAnyOrigin], parts: PythonObject) raises -> PythonObject:
+        var self = self_ptr[]
+        var theta = ptr_f32(parts[0])
+        var x_num = ptr_f32(parts[1])
+        var x_enc = ptr_f32(parts[2])
+        var x_cat = ptr_f32(parts[3])
+        var rows = ptr_i64(parts[4])
+        var N = iface_dim(parts[4], 0)
+        var cache_act = ptr_f32(parts[5])
+        var cache_off = ptr_i64(parts[6])
+        _ = self.build_cache_impl(
+            theta, x_num, x_enc, x_cat, rows, N,
+            cache_act, cache_off,
+        )
+        return Python.none()
+
+    @staticmethod
+    def predict_with_cache(self_ptr: Pointer[Self, MutAnyOrigin], parts: PythonObject) raises -> PythonObject:
+        var self = self_ptr[]
+        var theta = ptr_f32(parts[0])
+        var x_num = ptr_f32(parts[1])
+        var x_enc = ptr_f32(parts[2])
+        var x_cat = ptr_f32(parts[3])
+        var rows = ptr_i64(parts[4])
+        var b = iface_dim(parts[4], 0)
+        var cached_act = ptr_f32(parts[5])
+        var cached_off = ptr_i64(parts[6])
+        var b_train = Int(py=parts[7])
+        var out = ptr_f32(parts[8])
+        _ = self.predict_with_cache_impl(
+            theta, x_num, x_enc, x_cat, rows, b,
+            cached_act, cached_off, b_train, out,
+        )
+        return Python.none()
+
 
 # =============================================================================
 # Data-parallel workers (one private workspace + gradient buffer per thread)
@@ -2004,6 +2195,8 @@ def PyInit__native_tabm() abi("C") -> PythonObject:
             .def_method[TabMTrainer.loss_grad]("loss_grad")
             .def_method[TabMTrainer.forward_avg]("forward_avg")
             .def_method[TabMTrainer.param_count]("param_count")
+            .def_method[TabMTrainer.build_cache]("build_cache")
+            .def_method[TabMTrainer.predict_with_cache]("predict_with_cache")
         )
         var mod = m.finalize()
         return mod
