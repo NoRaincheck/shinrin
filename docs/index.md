@@ -5,7 +5,7 @@
 
 Shinrin (森林, "forest" in Japanese) is a scikit-learn-compatible library for decision tree and forest models, with Rust bindings for performance and ONNX export support.
 
-Since skope-rules and scikit-garden are no longer actively maintained, this project aims to bring them together with extensions for tree models — including certifiably optimal rule lists (CORELS) and globally optimal sparse decision trees (GOSDT), SHAP explanations, ONNX export, and benchmarking utilities. The vendored CORELS and GOSDT engines compile into the native extension with bundled mini-GMP and no TBB, so `pip install` needs no system libraries.
+Since skope-rules and scikit-garden are no longer actively maintained, this project aims to bring them together with extensions for tree models — including certifiably optimal rule lists (CORELS) and globally optimal sparse decision trees (GOSDT), SHAP explanations, ONNX export, and benchmarking utilities. The vendored CORELS and GOSDT engines compile into the native extension with bundled mini-GMP and no TBB, so `pip install` needs no system libraries. The vendored parts also compound: routing skope-rules' mined candidates through CORELS' certified-optimal selection (ORDT) beats both methods stand-alone across our benchmarks (up to +2.6pp accuracy at 2–5-clause model sizes).
 
 ## Features
 

@@ -139,6 +139,7 @@ results documents:
 | `bench_all.py` | All algorithms across a suite of synthetic + real datasets (fit/predict/score) | `ALL_MODELS_BENCHMARK.md`, published at [Benchmark Results](benchmark-results.md) |
 | `bench_gosdt.py` | GOSDT pipeline vs scikit-learn CART (speed, accuracy, tree size, optimality gap) | `GOSDT_BENCHMARK.md` |
 | `bench_corels.py` | CORELS fit times, mini-GMP vs no-GMP builds | printed |
+| `bench_ordt.py` | ORDT: optimal rule-sets from decision trees — skope-rules mining + CORELS selection vs cart/skope/corels (`just bench-ordt`) | `ORDT_BENCHMARK.md` |
 | `bench_mlp.py` | sklearn vs shinrin MLP backends (NumPy/Mojo/PLE) | `MLP_BENCHMARK.md` |
 | `bench_bitlinear.py` | Ternary (BitLinear) QAT vs full precision, MLP/TabM both backends + TabICL PTQ inference | `BITLINEAR_BENCHMARK.md` |
 | `bench_backends.py` | Rust vs Mojo backends | `BENCHMARK.md` |

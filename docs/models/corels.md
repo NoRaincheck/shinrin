@@ -77,6 +77,47 @@ from shinrin._corels import load_from_csv
 X, y, features, prediction_name = load_from_csv("compas.csv")
 ```
 
+## OrdtClassifier
+
+`OrdtClassifier` is a variant of shinrin's vendored
+[SkopeRules](https://github.com/scikit-learn-contrib/skope-rules)
+(`shinrin[pandas]` required) that replaces skope's heuristic
+precision-weighted vote with CORELS' certified-optimal selection:
+
+1. **mine** — skope-rules harvests root-to-leaf threshold conjunctions from
+   bagged classification/regression trees, scored by out-of-bag
+   precision/recall. Near-duplicates are deliberately kept: CORELS, not a
+   similarity heuristic, decides what earns a slot.
+2. **select** — every surviving rule becomes one binary column of a capture
+   matrix (`Z[i, j] = 1` iff rule *j* fires on sample *i*), and
+   `CorelsClassifier(max_card=1)` returns the provably best ordered rule list
+   *over the mined pool*. Tree thresholds work directly on raw features — no
+   external binarization needed.
+
+```python
+from shinrin import OrdtClassifier
+
+clf = OrdtClassifier(n_estimators=10, max_depth=3, random_state=0)
+clf.fit(X, y)                  # binary targets {0, 1}
+accuracy = clf.score(X_test, y_test)
+
+clf.list_rules()               # ordered (rule label, prediction) pairs;
+                               # negated candidates are prefixed with "NOT "
+clauses, n_rules = clf.complexity()
+clf.stats_                     # {"mined": ..., "usable": ..., "selected": ...}
+```
+
+Mining parameters are inherited from `SkopeRules`; `max_rules`, `c`,
+`min_support` and `n_iter` configure the selection stage.
+
+Optimality is certified relative to the mined candidate pool, not globally
+over all possible conjunctions. Measured in
+[ORDT_BENCHMARK](https://github.com/NoRaincheck/shinrin/blob/main/scripts/benchmarks/ORDT_BENCHMARK.md)
+(`just bench-ordt`), this hybrid beats skope-rules alone on every dataset
+tested — up to +2.6pp test accuracy with 2–5-clause lists — and beats
+CORELS' own mining on 3 of 4 datasets, since adaptive tree thresholds
+replace fixed quantile bins.
+
 ## Notes and constraints
 
 - Features must already be binary; binarize continuous data yourself (or use
