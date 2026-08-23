@@ -16,6 +16,11 @@ from __future__ import annotations
 
 import numpy as np
 
+from shinrin._quant import (
+    QUANTIZATION_NONE,
+    ternary_scales,
+)
+
 from ._layers import TabMConfig, TabMParams
 
 
@@ -76,6 +81,30 @@ class TabMCore:
         self.config = config
         self.task = task
 
+    def effective_weight(self, w: np.ndarray, i: int) -> np.ndarray:
+        """Weight matrix used by block ``i``'s forward pass.
+
+        With ternary quantization the shared block weights are replaced
+        by their BitLinear absmean approximation (straight-through
+        gradients keep training the latent weights). Scales follow the
+        output-row layout of each arch type; embeddings, adapters,
+        biases and the head stay at full precision.
+        """
+        cfg = self.config
+        if cfg.quantization == QUANTIZATION_NONE:
+            return w
+        if cfg.quantization_granularity == "per_row":
+            if cfg.arch_type == "tabm-packed":
+                # (k, b_in, d_block): rows are the last axis.
+                s = ternary_scales(w.transpose(0, 2, 1), "per_row").transpose(
+                    0, 2, 1
+                )
+            else:
+                s = ternary_scales(w, "per_row")
+        else:
+            s = ternary_scales(w, "per_tensor")
+        return np.round(np.clip(w / s, -1.0, 1.0)) * s
+
     # -- forward -------------------------------------------------------------
 
     def _embed(
@@ -117,7 +146,10 @@ class TabMCore:
         for i in range(cfg.n_blocks):
             prefix = f"blk{i}_"
             if cfg.arch_type == "tabm":
-                w, r = params.arrays[prefix + "w"], params.arrays[prefix + "r"]
+                # BitLinear: forward uses the ternary approximation of the
+                # shared weight; gradients flow to the latent weights (STE).
+                w = self.effective_weight(params.arrays[prefix + "w"], i)
+                r = params.arrays[prefix + "r"]
                 s, b = params.arrays[prefix + "s"], params.arrays[prefix + "b"]
                 if i == 0:
                     # Expand the shared representation to the k members.
@@ -130,7 +162,8 @@ class TabMCore:
                 cache: tuple = (x, v, q, u > 0.0)
                 x = a
             elif cfg.arch_type == "tabm-mini":
-                w, bias = params.arrays[prefix + "w"], params.arrays[prefix + "b"]
+                w = self.effective_weight(params.arrays[prefix + "w"], i)
+                bias = params.arrays[prefix + "b"]
                 block_in = x
                 if i == 0:
                     x = x[:, None, :] * params.arrays["mini_r"][None]
@@ -139,7 +172,8 @@ class TabMCore:
                 cache = (x, q, q > 0.0, block_in)
                 x = a
             else:  # tabm-packed
-                w, bias = params.arrays[prefix + "w"], params.arrays[prefix + "b"]
+                w = self.effective_weight(params.arrays[prefix + "w"], i)
+                bias = params.arrays[prefix + "b"]
                 if i == 0:
                     x = np.broadcast_to(x[:, None, :], (len(x), cfg.k, x.shape[1]))
                 q = np.einsum("bki,kio->bko", x, w) + bias[None]
@@ -230,24 +264,27 @@ class TabMCore:
                 da = da * mask / scale
             if cfg.arch_type == "tabm":
                 x_in, v, q, relu_mask = c[0], c[1], c[2], c[3]
-                w, r = params.arrays[prefix + "w"], params.arrays[prefix + "r"]
+                # Weight gradients accumulate to the LATENT weights; only
+                # the input-gradient uses the effective (quantized) weight.
+                r = params.arrays[prefix + "r"]
                 s = params.arrays[prefix + "s"]
+                w_eff = self.effective_weight(params.arrays[prefix + "w"], i)
                 du = da * relu_mask
                 grads[prefix + "b"] = du.sum(axis=0)
                 grads[prefix + "s"] = (du * q).sum(axis=0)
                 dq = du * s[None]
                 grads[prefix + "w"] = np.einsum("bjo,bji->oi", dq, v)
-                dv = dq @ w
+                dv = dq @ w_eff
                 x_in_3d = x_in if x_in.ndim == 3 else x_in[:, None, :]
                 grads[prefix + "r"] = np.einsum("bji,bji->ji", dv, x_in_3d)
                 da = dv * r[None]
             elif cfg.arch_type == "tabm-mini":
                 x_lin, _, relu_mask, block_in = c[0], c[1], c[2], c[3]
-                w = params.arrays[prefix + "w"]
+                w_eff = self.effective_weight(params.arrays[prefix + "w"], i)
                 du = da * relu_mask
                 grads[prefix + "b"] = du.sum(axis=(0, 1))
                 grads[prefix + "w"] = np.einsum("bki,bko->io", du, x_lin)
-                da = np.einsum("bko,oi->bki", du, w)
+                da = np.einsum("bko,oi->bki", du, w_eff)
                 if i == 0:
                     h = block_in
                     mini_r = params.arrays["mini_r"]
@@ -255,11 +292,11 @@ class TabMCore:
                     da = da * mini_r[None]
             else:  # tabm-packed
                 x_in, relu_mask = c[0], c[1]
-                w = params.arrays[prefix + "w"]
+                w_eff = self.effective_weight(params.arrays[prefix + "w"], i)
                 du = da * relu_mask
                 grads[prefix + "b"] = du.sum(axis=0)
                 grads[prefix + "w"] = np.einsum("bki,bko->kio", x_in, du)
-                da = np.einsum("bko,kio->bki", du, w)
+                da = np.einsum("bko,kio->bki", du, w_eff)
 
         if emb_cache is not None:
             # The embedding output is shared across the k members, so its

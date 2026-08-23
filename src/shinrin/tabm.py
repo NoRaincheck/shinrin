@@ -20,6 +20,7 @@ from sklearn.utils.multiclass import unique_labels
 from sklearn.utils.validation import check_is_fitted, check_X_y, validate_data
 
 from shinrin._tabm import _backend as tabm_backend
+from shinrin._quant import validate_quantization
 from shinrin._tabm._layers import TabMConfig, TabMParams
 from shinrin._tabm._model import Batch, TabMCore
 from shinrin._tabm._optim import (
@@ -164,6 +165,8 @@ class _BaseTabM(BaseEstimator):
         use_quantile=True,
         use_asinh=True,
         use_scaler=True,
+        quantization="none",
+        quantization_granularity="per_row",
         categorical_indices=None,
         categorical_cardinality_threshold=32,
     ):
@@ -189,6 +192,8 @@ class _BaseTabM(BaseEstimator):
         self.use_quantile = use_quantile
         self.use_asinh = use_asinh
         self.use_scaler = use_scaler
+        self.quantization = quantization
+        self.quantization_granularity = quantization_granularity
         self.categorical_indices = categorical_indices
         self.categorical_cardinality_threshold = categorical_cardinality_threshold
 
@@ -216,6 +221,7 @@ class _BaseTabM(BaseEstimator):
             raise ValueError(
                 f"solver must be 'adam', 'sgd' or 'lbfgs', got {self.solver!r}"
             )
+        validate_quantization(self.quantization, self.quantization_granularity)
 
     def _task_code(self) -> int:
         """Native loss code: 0 regression, 1 binary, 2 multiclass."""
@@ -246,6 +252,8 @@ class _BaseTabM(BaseEstimator):
             use_embeddings=self.use_embeddings,
             bins=list(pre.bins_) if pre.bins_ else None,
             d_embedding=self.d_embedding,
+            quantization=self.quantization,
+            quantization_granularity=self.quantization_granularity,
         )
 
     def _split_validation(
@@ -495,6 +503,14 @@ class TabMClassifier(ClassifierMixin, _BaseTabM):
         Embedding dimension per numerical feature.
     use_quantile, use_asinh, use_scaler : bool, default=True
         Preprocessing transforms applied to numerical features.
+    quantization : {'none', 'ternary'}, default='none'
+        BitNet-style training-aware ternary weight quantization of the
+        shared backbone blocks (BitLinear). Latent float32 weights are
+        trained with straight-through gradients while the forward pass
+        uses the ``{-1, 0, +1} * gamma`` approximation; embeddings,
+        adapters, biases and the head stay at full precision.
+    quantization_granularity : {'per_row', 'per_tensor'}, default='per_row'
+        Scale granularity for the ternary approximation.
     categorical_indices : list of int, default=None
         Columns forced categorical (others auto-detected by cardinality).
     categorical_cardinality_threshold : int, default=32
