@@ -43,6 +43,7 @@ from shinrin._tk_layers import (
     AttnParams,
     _add_row_bias,
     attention_block_forward,
+    attention_block_forward_cached,
     attention_block_size,
     attn_params_at,
     isab_forward,
@@ -721,6 +722,7 @@ struct TabICLInference(ImplicitlyCopyable, Movable, Writable):
         train_size: Int,
         n_features: Int,
         col_out: Pointer[Float32, MutUntrackedOrigin],  # (n_rows, G, E) t-major
+        col_kv_out: Optional[Pointer[Float32, MutUntrackedOrigin]] = None,
     ) raises -> Int:
         """Column embedding stage (torch ColEmbedding.forward).
 
@@ -728,6 +730,12 @@ struct TabICLInference(ImplicitlyCopyable, Movable, Writable):
         augment train rows with the target embedding, then run the ISAB
         blocks whose first attention keys are restricted to the train
         prefix. Results are scattered into row-major (t, g, e) order.
+
+        When ``col_kv_out`` is given (cache-build mode), per-position attn2
+        K/V are captured post-head-split into
+        ``[g][blk][kv][n_inds*e]`` and sentinel positions (g < row_num_cls)
+        skip block compute entirely — their outputs are overwritten by CLS
+        tokens downstream and their cache slots are never read.
         Returns 0 on success.
         """
         var cfg = self.config
@@ -739,6 +747,7 @@ struct TabICLInference(ImplicitlyCopyable, Movable, Writable):
         var chd = cfg.col_head_dim()
         var cff = cfg.col_dim_feedforward()
         var is_clf = cfg.max_classes > 0
+        var capturing = col_kv_out is not None
         # Both views alias the same buffer; only the view matching the task
         # type is ever dereferenced.
         var target_i64 = ptr_i64(target)
@@ -751,18 +760,21 @@ struct TabICLInference(ImplicitlyCopyable, Movable, Writable):
         var g = 0
         while g < G:
             if g < num_cls:
-                # Sentinel positions: SkippableLinear maps fully-masked
-                # input rows to exactly SKIP_VALUE (no projection).
-                var fill = n_rows * s
-                var i = 0
-                while i < fill:
-                    pos[i] = SKIP_VALUE_F32
-                    i += 1
-                fill = n_rows * e
-                i = 0
-                while i < fill:
-                    cur[i] = SKIP_VALUE_F32
-                    i += 1
+                if not capturing:
+                    # Sentinel positions: SkippableLinear maps fully-masked
+                    # input rows to exactly SKIP_VALUE (no projection). In
+                    # cache-build mode the block compute is skipped instead;
+                    # CLS tokens overwrite these slots downstream either way.
+                    var fill = n_rows * s
+                    var i0 = 0
+                    while i0 < fill:
+                        pos[i0] = SKIP_VALUE_F32
+                        i0 += 1
+                    fill = n_rows * e
+                    i0 = 0
+                    while i0 < fill:
+                        cur[i0] = SKIP_VALUE_F32
+                        i0 += 1
             else:
                 var h = g - num_cls
                 var t = 0
@@ -830,16 +842,31 @@ struct TabICLInference(ImplicitlyCopyable, Movable, Writable):
                     e, cff, cfg.col_nhead, chd, 0,
                     cfg.col_ssmax_n_hidden, cfg.bias_free_ln,
                 )
-                attention_block_forward(
-                    self.params + boff, cur, hidden,
-                    n_inds, train_size, e, cfg.col_nhead, chd, cff,
-                    p1, None, False,
-                )
-                attention_block_forward(
-                    cur, hidden, cur,
-                    n_rows, n_inds, e, cfg.col_nhead, chd, cff,
-                    p2, None, False,
-                )
+                if capturing:
+                    var slot = (g * cfg.col_num_blocks + blk) * 2 * n_inds * e
+                    attention_block_forward(
+                        self.params + boff, cur, hidden,
+                        n_inds, train_size, e, cfg.col_nhead, chd, cff,
+                        p1, None, False,
+                    )
+                    attention_block_forward(
+                        cur, hidden, cur,
+                        n_rows, n_inds, e, cfg.col_nhead, chd, cff,
+                        p2, None, False,
+                        col_kv_out.value() + slot,
+                        col_kv_out.value() + slot + n_inds * e,
+                    )
+                else:
+                    attention_block_forward(
+                        self.params + boff, cur, hidden,
+                        n_inds, train_size, e, cfg.col_nhead, chd, cff,
+                        p1, None, False,
+                    )
+                    attention_block_forward(
+                        cur, hidden, cur,
+                        n_rows, n_inds, e, cfg.col_nhead, chd, cff,
+                        p2, None, False,
+                    )
                 blk += 1
 
             # Scatter this position's embeddings into row-major order.
@@ -1344,19 +1371,16 @@ struct TabICLInference(ImplicitlyCopyable, Movable, Writable):
     # Stage 3: ICL prediction from representations (staged API)
     # =====================================================================
 
-    def predict_from_representations_impl(
+    def _y_encode_reps_impl(
         mut self,
-        reps: Pointer[Float32, MutUntrackedOrigin],  # (n_rows, icl_dim)
+        reps: Pointer[Float32, MutUntrackedOrigin],  # (train_size, icl_dim)
         target: PythonObject,
-        n_rows: Int,
-        dst: Pointer[Float32, MutUntrackedOrigin],  # (n_rows, out_dim)
+        train_size: Int,
     ) raises -> Int:
-        """ICL stage (torch ICLearning.predict_standard internals).
+        """Add the encoded targets to train-row representations, in place.
 
-        Train-row representations are augmented with the encoded targets,
-        every ICL block attends all rows to the train prefix, and the
-        decoder maps the post-LN features to raw (untempered) logits or
-        quantiles for ALL rows; callers slice away the train prefix.
+        Shared verbatim by ``predict_from_representations_impl`` and
+        ``build_cache`` so both augment the train prefix identically.
         Returns 0 on success.
         """
         var cfg = self.config
@@ -1364,14 +1388,6 @@ struct TabICLInference(ImplicitlyCopyable, Movable, Writable):
         var is_clf = cfg.max_classes > 0
         var target_i64 = ptr_i64(target)
         var target_f32 = ptr_f32(target)
-        var train_size = iface_dim(target, 0)
-        if train_size <= 0 or train_size > n_rows:
-            raise Error("target length must be within [1, n_rows]")
-
-        # y_encoder: OneHotAndLinear (classification): F.linear means
-        # out[j] = W[j, c] + b[j] with W stored row-major as (icl_dim,
-        # max_classes). The regression Linear(1, icl_dim) scales the single
-        # weight column by the target.
         var y_enc_w = self.params + self._off_icl_y_encoder_w
         var y_enc_b = self.params + self._off_icl_y_encoder_b
         var t = 0
@@ -1394,27 +1410,22 @@ struct TabICLInference(ImplicitlyCopyable, Movable, Writable):
                     reps[base + j] += y_enc_w[j] * v + y_enc_b[j]
                     j += 1
             t += 1
+        return 0
 
-        # ICL blocks: plain pre-norm attention whose keys/values are
-        # restricted to the train prefix (torch Encoder.forward with
-        # train_size). Rope/ssmax are unused unless configured.
-        var ihd = cfg.icl_head_dim()
-        var icl_ff = cfg.icl_dim_feedforward()
-        var blk = 0
-        while blk < cfg.icl_num_blocks:
-            var off = self._off_icl_blocks + blk * self._icl_attn_size
-            var p = attn_params_at(
-                self.params, off, d_icl, icl_ff,
-                cfg.icl_nhead, ihd, cfg.icl_ssmax_kind,
-                cfg.icl_ssmax_n_hidden, cfg.bias_free_ln,
-            )
-            attention_block_forward(
-                reps, reps, reps, n_rows, train_size, d_icl,
-                cfg.icl_nhead, ihd, icl_ff, p, None, False,
-            )
-            blk += 1
+    def _icl_decode_impl(
+        mut self,
+        reps: Pointer[Float32, MutUntrackedOrigin],  # (n_rows, icl_dim)
+        n_rows: Int,
+        dst: Pointer[Float32, MutUntrackedOrigin],  # (n_rows, out_dim)
+    ) raises -> Int:
+        """Predictor LayerNorm + two-layer decoder head (shared verbatim).
 
-        # Predictor LayerNorm then the two-layer decoder head.
+        Writes raw (untempered) logits or quantiles for all ``n_rows``;
+        callers slice away the train prefix when running the plain path.
+        Returns 0 on success.
+        """
+        var cfg = self.config
+        var d_icl = cfg.icl_dim
         layer_norm_affine(
             reps, reps, n_rows, d_icl,
             self.params + self._off_icl_ln_w,
@@ -1424,7 +1435,7 @@ struct TabICLInference(ImplicitlyCopyable, Movable, Writable):
 
         var decoded = alloc[Float32](n_rows * d_icl * 2 + 16)
         gemm_nt(n_rows, d_icl * 2, d_icl, reps, self.params + self._off_decoder_w1, decoded)
-        t = 0
+        var t = 0
         while t < n_rows:
             var b = 0
             while b + SIMDW <= d_icl * 2:
@@ -1468,6 +1479,53 @@ struct TabICLInference(ImplicitlyCopyable, Movable, Writable):
         decoded.unsafe_free()
         return 0
 
+    def predict_from_representations_impl(
+        mut self,
+        reps: Pointer[Float32, MutUntrackedOrigin],  # (n_rows, icl_dim)
+        target: PythonObject,
+        n_rows: Int,
+        dst: Pointer[Float32, MutUntrackedOrigin],  # (n_rows, out_dim)
+    ) raises -> Int:
+        """ICL stage (torch ICLearning.predict_standard internals).
+
+        Train-row representations are augmented with the encoded targets,
+        every ICL block attends all rows to the train prefix, and the
+        decoder maps the post-LN features to raw (untempered) logits or
+        quantiles for ALL rows; callers slice away the train prefix.
+        Returns 0 on success.
+        """
+        var cfg = self.config
+        var d_icl = cfg.icl_dim
+        var train_size = iface_dim(target, 0)
+        if train_size <= 0 or train_size > n_rows:
+            raise Error("target length must be within [1, n_rows]")
+
+        # y_encoder augmentation on the train prefix (shared helper).
+        _ = self._y_encode_reps_impl(reps, target, train_size)
+
+        # ICL blocks: plain pre-norm attention whose keys/values are
+        # restricted to the train prefix (torch Encoder.forward with
+        # train_size). Rope/ssmax are unused unless configured.
+        var ihd = cfg.icl_head_dim()
+        var icl_ff = cfg.icl_dim_feedforward()
+        var blk = 0
+        while blk < cfg.icl_num_blocks:
+            var off = self._off_icl_blocks + blk * self._icl_attn_size
+            var p = attn_params_at(
+                self.params, off, d_icl, icl_ff,
+                cfg.icl_nhead, ihd, cfg.icl_ssmax_kind,
+                cfg.icl_ssmax_n_hidden, cfg.bias_free_ln,
+            )
+            attention_block_forward(
+                reps, reps, reps, n_rows, train_size, d_icl,
+                cfg.icl_nhead, ihd, icl_ff, p, None, False,
+            )
+            blk += 1
+
+        # Predictor LayerNorm + decoder head (shared helper).
+        _ = self._icl_decode_impl(reps, n_rows, dst)
+        return 0
+
     @staticmethod
     def predict_from_representations(
         self_ptr: Pointer[Self, MutAnyOrigin],
@@ -1498,6 +1556,277 @@ struct TabICLInference(ImplicitlyCopyable, Movable, Writable):
         )
         return out_arr
 
+    # =====================================================================
+    # KV-cache: build (train side) and predict (test side)
+    # =====================================================================
+
+    def stage_col_cached_impl(
+        mut self,
+        x: Pointer[Float32, MutUntrackedOrigin],       # (n_test, n_features)
+        n_test: Int,
+        train_size: Int,
+        n_features: Int,
+        col_out: Pointer[Float32, MutUntrackedOrigin],  # (n_test, G, E) t-major
+        col_cache: Pointer[Float32, MutUntrackedOrigin],  # [g][blk][kv][n_inds*e]
+    ) raises -> Int:
+        """Cached column stage (torch ColEmbedding.predict_with_cache path).
+
+        Skips attn1 entirely — attn2's K/V come from the prebuilt cache —
+        and test rows never receive the target augmentation. Sentinel
+        positions (g < row_num_cls) stay SKIP_VALUE and skip compute; CLS
+        tokens overwrite their outputs downstream. Returns 0 on success.
+        """
+        var cfg = self.config
+        var e = cfg.embed_dim
+        var s = cfg.col_feature_group_size
+        var num_cls = cfg.row_num_cls
+        var G = num_cls + n_features
+        var n_inds = cfg.col_num_inds
+        var chd = cfg.col_head_dim()
+        var cff = cfg.col_dim_feedforward()
+
+        var pos = alloc[Float32](n_test * s + 16)
+        var cur = alloc[Float32](n_test * e + 16)
+
+        var g = num_cls
+        while g < G:
+            if g < num_cls:
+                var t = 0
+                while t < n_test:
+                    var j = 0
+                    while j < e:
+                        col_out[t * G * e + g * e + j] = SKIP_VALUE_F32
+                        j += 1
+                    t += 1
+            else:
+                var h = g - num_cls
+                var t = 0
+                while t < n_test:
+                    var i = 0
+                    while i < s:
+                        pos[t * s + i] = x[
+                            t * n_features + (h + (1 << i)) % n_features
+                        ]
+                        i += 1
+                    t += 1
+                gemm_nt(
+                    n_test, e, s, pos, self.params + self._off_in_linear_w, cur
+                )
+                var b = self._off_in_linear_b
+                t = 0
+                while t < n_test:
+                    var j = 0
+                    while j + SIMDW <= e:
+                        cur.unsafe_store[width=SIMDW](
+                            t * e + j,
+                            cur.unsafe_load[width=SIMDW](t * e + j)
+                            + self.params.unsafe_load[width=SIMDW](b + j),
+                        )
+                        j += SIMDW
+                    while j < e:
+                        cur[t * e + j] += self.params[b + j]
+                        j += 1
+                    t += 1
+
+                # Cached blocks: only attn2 runs, against the cached K/V.
+                var blk = 0
+                while blk < cfg.col_num_blocks:
+                    var boff = (
+                        self._off_col_blocks
+                        + blk * self._col_blk_stride
+                        + n_inds * e
+                        + self._col_attn_size
+                    )
+                    var p2 = attn_params_at(
+                        self.params, boff,
+                        e, cff, cfg.col_nhead, chd, 0,
+                        cfg.col_ssmax_n_hidden, cfg.bias_free_ln,
+                    )
+                    var slot = (g * cfg.col_num_blocks + blk) * 2 * n_inds * e
+                    attention_block_forward_cached(
+                        cur, cur, n_test, n_inds,
+                        e, cfg.col_nhead, chd, cff, p2,
+                        col_cache + slot,
+                        col_cache + slot + n_inds * e,
+                    )
+                    blk += 1
+
+                # Scatter this position's embeddings into row-major order.
+                t = 0
+                while t < n_test:
+                    var src_base = t * e
+                    var dst_base = t * G * e + g * e
+                    var j = 0
+                    while j + SIMDW <= e:
+                        col_out.unsafe_store[width=SIMDW](
+                            dst_base + j,
+                            cur.unsafe_load[width=SIMDW](src_base + j),
+                        )
+                        j += SIMDW
+                    while j < e:
+                        col_out[dst_base + j] = cur[src_base + j]
+                        j += 1
+                    t += 1
+            g += 1
+
+        pos.unsafe_free()
+        cur.unsafe_free()
+        return 0
+
+    @staticmethod
+    def build_cache(
+        self_ptr: Pointer[Self, MutAnyOrigin],
+        parts: PythonObject,
+    ) raises -> PythonObject:
+        """Pre-compute the col and ICL K/V caches from training data.
+
+        ``parts = (x, target)`` where ``x`` is ``(train_size, n_features)``
+        float32 training rows and ``target`` is ``(train_size,)`` int64
+        labels or float32 scaled targets. Returns ``(col_cache,
+        icl_cache)``, flat float32 arrays laid out as ``[g][blk][kv][
+        n_inds*embed_dim]`` and ``[blk][kv][train_size*icl_dim]``;
+        sentinel position slots are zero-filled and never read.
+        """
+        var self = self_ptr[]
+        var x = ptr_f32(parts[0])
+        var target = parts[1]
+        var n_features = iface_dim(parts[0], 1)
+        var train_size = iface_dim(target, 0)
+        if train_size < 1:
+            raise Error("build_cache needs at least one training row")
+
+        var cfg = self.config
+        var e = cfg.embed_dim
+        var num_cls = cfg.row_num_cls
+        var G = num_cls + n_features
+        var n_inds = cfg.col_num_inds
+        var d_icl = cfg.icl_dim
+        var ihd = cfg.icl_head_dim()
+        var icl_ff = cfg.icl_dim_feedforward()
+        var ce = num_cls * e
+
+        var np = np_module()
+        var col_total = G * cfg.col_num_blocks * 2 * n_inds * e
+        var icl_total = cfg.icl_num_blocks * 2 * train_size * d_icl
+        var col_arr = np.zeros(Python.tuple(Int(col_total)), "float32")
+        var icl_arr = np.zeros(Python.tuple(Int(icl_total)), "float32")
+        var col_cache = ptr_f32(col_arr)
+        var icl_cache = ptr_f32(icl_arr)
+
+        # Col stage over the training rows with K/V capture.
+        var col_out = alloc[Float32](train_size * G * e + 16)
+        _ = self.stage_col_impl(
+            x, target, train_size, train_size, n_features, col_out, col_cache
+        )
+
+        # Row stage gives the train representations; y-encode them in place
+        # exactly like predict_from_representations_impl does.
+        var reps = alloc[Float32](train_size * ce + 16)
+        _ = self.stage_row_impl(col_out, train_size, G, reps)
+        _ = self._y_encode_reps_impl(reps, target, train_size)
+
+        # ICL blocks capture K/V restricted to the train prefix.
+        var blk = 0
+        while blk < cfg.icl_num_blocks:
+            var off = self._off_icl_blocks + blk * self._icl_attn_size
+            var p = attn_params_at(
+                self.params, off, d_icl, icl_ff,
+                cfg.icl_nhead, ihd, cfg.icl_ssmax_kind,
+                cfg.icl_ssmax_n_hidden, cfg.bias_free_ln,
+            )
+            var slot = blk * 2 * train_size * d_icl
+            attention_block_forward(
+                reps, reps, reps, train_size, train_size, d_icl,
+                cfg.icl_nhead, ihd, icl_ff, p, None, False,
+                icl_cache + slot,
+                icl_cache + slot + train_size * d_icl,
+            )
+            blk += 1
+
+        col_out.unsafe_free()
+        reps.unsafe_free()
+        return Python.tuple(col_arr, icl_arr)
+
+    @staticmethod
+    def predict_with_cache(
+        self_ptr: Pointer[Self, MutAnyOrigin],
+        parts: PythonObject,
+    ) raises -> PythonObject:
+        """Predict test rows against prebuilt caches.
+
+        ``parts = (x_test, target, col_cache, icl_cache)`` where ``x_test``
+        is ``(n_test, n_features)`` float32 test rows, ``target`` supplies
+        the train size (and label validation for classification), and the
+        caches are the flat arrays returned by ``build_cache``. Returns a
+        flat float32 array of ``n_test * out_dim`` RAW decoder outputs in
+        row-major order (same contract as
+        ``predict_from_representations``).
+        """
+        var self = self_ptr[]
+        var x = ptr_f32(parts[0])
+        var n_test = iface_dim(parts[0], 0)
+        var n_features = iface_dim(parts[0], 1)
+        var target = parts[1]
+        var train_size = iface_dim(target, 0)
+        if train_size < 1:
+            raise Error("cache target length must be at least 1")
+        if n_test < 1:
+            raise Error("predict_with_cache needs at least one test row")
+
+        var cfg = self.config
+        var e = cfg.embed_dim
+        var num_cls = cfg.row_num_cls
+        var G = num_cls + n_features
+        var n_inds = cfg.col_num_inds
+        var d_icl = cfg.icl_dim
+        var ihd = cfg.icl_head_dim()
+        var icl_ff = cfg.icl_dim_feedforward()
+        var ce = num_cls * e
+
+        var col_cache = ptr_f32(parts[2])
+        var icl_cache = ptr_f32(parts[3])
+        var col_total = G * cfg.col_num_blocks * 2 * n_inds * e
+        var icl_total = cfg.icl_num_blocks * 2 * train_size * d_icl
+        if iface_dim(parts[2], 0) != col_total:
+            raise Error("col cache size mismatch for this model/features")
+        if iface_dim(parts[3], 0) != icl_total:
+            raise Error("icl cache size mismatch for this train size")
+
+        var col_out = alloc[Float32](n_test * G * e + 16)
+        _ = self.stage_col_cached_impl(
+            x, n_test, train_size, n_features, col_out, col_cache
+        )
+        var reps = alloc[Float32](n_test * ce + 16)
+        _ = self.stage_row_impl(col_out, n_test, G, reps)
+
+        # ICL blocks attend the test queries to the cached train K/V, then
+        # the shared LayerNorm + decoder produces raw outputs per row.
+        var blk = 0
+        while blk < cfg.icl_num_blocks:
+            var off = self._off_icl_blocks + blk * self._icl_attn_size
+            var p = attn_params_at(
+                self.params, off, d_icl, icl_ff,
+                cfg.icl_nhead, ihd, cfg.icl_ssmax_kind,
+                cfg.icl_ssmax_n_hidden, cfg.bias_free_ln,
+            )
+            var slot = blk * 2 * train_size * d_icl
+            attention_block_forward_cached(
+                reps, reps, n_test, train_size,
+                d_icl, cfg.icl_nhead, ihd, icl_ff, p,
+                icl_cache + slot,
+                icl_cache + slot + train_size * d_icl,
+            )
+            blk += 1
+
+        var np = np_module()
+        var total = n_test * cfg.out_dim
+        var out_arr = np.empty(Python.tuple(Int(total)), "float32")
+        _ = self._icl_decode_impl(reps, n_test, ptr_f32(out_arr))
+
+        col_out.unsafe_free()
+        reps.unsafe_free()
+        return out_arr
+
 
 # =============================================================================
 # Python bindings
@@ -1517,6 +1846,8 @@ def PyInit__native_tabicl() abi("C") -> PythonObject:
             .def_method[TabICLInference.predict_from_representations](
                 "predict_from_representations"
             )
+            .def_method[TabICLInference.build_cache]("build_cache")
+            .def_method[TabICLInference.predict_with_cache]("predict_with_cache")
             .def_method[TabICLInference.attn_probe]("attn_probe")
             .def_method[TabICLInference.gemm_probe]("gemm_probe")
             .def_method[TabICLInference.param_count]("param_count")

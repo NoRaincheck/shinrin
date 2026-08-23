@@ -289,11 +289,56 @@ class TabICLMojoModel:
         return probs
 
     def build_cache(self, X: np.ndarray, y_train: np.ndarray) -> dict:
-        """KV-cache construction (not implemented natively yet)."""
-        raise NotImplementedError(
-            "The Mojo backend does not support KV caching yet; "
-            "use the 'numpy'/'torch' backends."
+        """Pre-compute col-stage and ICL-stage K/V caches natively.
+
+        Returns a dict with ``"col"`` shaped ``(G, blocks, 2, n_inds,
+        embed_dim)`` and ``"icl"`` shaped ``(blocks, 2, train_size,
+        icl_dim)`` float32 views over native flat buffers (``kv`` axis:
+        0=key, 1=value), plus ``"train_size"``/``"num_classes"`` metadata.
+        The caches are backend-specific; pass them back only to this
+        backend's :meth:`predict_with_cache`.
+        """
+        cfg = self.config
+        x = np.ascontiguousarray(X, dtype=np.float32)
+        if x.ndim != 2:
+            raise ValueError(f"X must be 2-D (rows, features); got {x.shape}")
+        y = self._prepare_target(cfg, np.asarray(y_train))
+        if y.ndim != 1:
+            raise ValueError("y_train must be 1-D")
+        train_size = y.shape[0]
+        if train_size < 1:
+            raise ValueError("build_cache needs at least one training row")
+
+        col_flat, icl_flat = self._handle.build_cache([x, y])
+        col_flat = np.asarray(col_flat, dtype=np.float32)
+        icl_flat = np.asarray(icl_flat, dtype=np.float32)
+
+        g_total = cfg.row_num_cls + x.shape[1]
+        col_shape = (
+            g_total,
+            cfg.col_num_blocks,
+            2,
+            cfg.col_num_inds,
+            cfg.embed_dim,
         )
+        icl_shape = (cfg.icl_num_blocks, 2, train_size, cfg.icl_dim)
+        if col_flat.size != int(np.prod(col_shape)):
+            raise ValueError(
+                f"build_cache returned {col_flat.size} col floats, "
+                f"expected {int(np.prod(col_shape))}"
+            )
+        if icl_flat.size != int(np.prod(icl_shape)):
+            raise ValueError(
+                f"build_cache returned {icl_flat.size} icl floats, "
+                f"expected {int(np.prod(icl_shape))}"
+            )
+        num_classes = len(np.unique(y_train)) if cfg.max_classes > 0 else 0
+        return {
+            "col": col_flat.reshape(col_shape),
+            "icl": icl_flat.reshape(icl_shape),
+            "train_size": train_size,
+            "num_classes": num_classes,
+        }
 
     def predict_with_cache(
         self,
@@ -302,11 +347,38 @@ class TabICLMojoModel:
         return_logits: bool = True,
         temperature: float = 0.9,
     ) -> np.ndarray:
-        """Cached prediction (not implemented natively yet)."""
-        raise NotImplementedError(
-            "The Mojo backend does not support KV caching yet; "
-            "use the 'numpy'/'torch' backends."
+        """Predict test rows against a native :meth:`build_cache` result."""
+        cfg = self.config
+        x = np.ascontiguousarray(X_test, dtype=np.float32)
+        if x.ndim != 2:
+            raise ValueError(f"X_test must be 2-D (rows, features); got {x.shape}")
+        train_size = int(cache["train_size"])
+        if train_size < 1:
+            raise ValueError("cache train_size must be at least 1")
+
+        # The kernels only read the target's length here (targets were
+        # already folded into the cache at build time).
+        sentinel_dtype = np.int64 if cfg.max_classes > 0 else np.float32
+        target = np.zeros(train_size, dtype=sentinel_dtype)
+        col = np.ascontiguousarray(cache["col"], dtype=np.float32).reshape(-1)
+        icl = np.ascontiguousarray(cache["icl"], dtype=np.float32).reshape(-1)
+
+        out_all = np.asarray(
+            self._handle.predict_with_cache([x, target, col, icl]),
+            dtype=np.float32,
         )
+        out = out_all.reshape(x.shape[0], cfg.out_dim)
+        if cfg.max_classes == 0:
+            return out
+        num_classes = int(cache.get("num_classes", cfg.max_classes))
+        logits = out[:, :num_classes]
+        if return_logits:
+            return logits
+        scaled = logits / temperature
+        scaled = scaled - scaled.max(axis=-1, keepdims=True)
+        probs = np.exp(scaled)
+        probs /= probs.sum(axis=-1, keepdims=True)
+        return probs
 
     # ------------------------------------------------------------------ #
     # cleanup

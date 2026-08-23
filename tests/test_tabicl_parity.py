@@ -263,3 +263,51 @@ def test_mojo_classifier_staged_parity():
 def test_mojo_regressor_staged_parity():
     rng = np.random.RandomState(3)
     _run_mojo_parity(TINY_REGRESSOR, rng.randn(12).astype(np.float32))
+
+
+@pytest.mark.skipif(
+    os.environ.get("SHINRIN_TABICL_PARITY_MOJO") != "1",
+    reason="set SHINRIN_TABICL_PARITY_MOJO=1 with `just build-tabicl-mojo`",
+)
+@pytest.mark.parametrize(
+    "cfg_dict,y",
+    [
+        (TINY_CLASSIFIER, np.arange(12) % TINY_CLASSIFIER["max_classes"]),
+        (TINY_REGRESSOR, np.random.RandomState(3).randn(12).astype(np.float32)),
+    ],
+    ids=["classifier", "regressor"],
+)
+def test_mojo_kv_cache_parity(cfg_dict, y):
+    """Native cache: exact vs plain Mojo, and ~torch's cached path."""
+    from shinrin._tabicl._mojo_backend import TabICLMojoModel
+
+    try:
+        from _tabicl_fixture import make_params
+    except ImportError:
+        pytest.skip("fixture helper unavailable")
+
+    config = TabICLConfig.from_dict(cfg_dict)
+    params = make_params(cfg_dict, seed=0)
+    try:
+        model = TabICLMojoModel(config, params)
+        ref = TabICLTorchModel(config, params)
+    except ImportError:
+        pytest.skip("native module not built")
+
+    rng = np.random.RandomState(11)
+    train_size = y.shape[0]
+    n_test = 7
+    X = rng.randn(train_size + n_test, 5).astype(np.float32)
+
+    plain = model.forward(X, y, return_logits=True)
+    cache = model.build_cache(X[:train_size], y)
+    assert cache["train_size"] == train_size
+    assert cache["num_classes"] == (len(np.unique(y)) if config.max_classes > 0 else 0)
+    cached = model.predict_with_cache(X[train_size:], cache, return_logits=True)
+    assert cached.shape == plain.shape
+    # The cached kernels run identical math on identical K/V: bit-exact.
+    np.testing.assert_array_equal(plain, cached)
+
+    ref_cache = ref.build_cache(X[:train_size], y)
+    ref_cached = ref.predict_with_cache(X[train_size:], ref_cache, return_logits=True)
+    np.testing.assert_allclose(cached, ref_cached, rtol=5e-4, atol=5e-5)
