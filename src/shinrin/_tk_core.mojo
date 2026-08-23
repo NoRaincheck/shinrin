@@ -389,3 +389,62 @@ def gemm_nt(m: Int, n: Int, kk: Int, a: Pointer[Float32, MutUntrackedOrigin], b:
 def gemm_nn(m: Int, n: Int, kk: Int, a: Pointer[Float32, MutUntrackedOrigin], b: Pointer[Float32, MutUntrackedOrigin], c: Pointer[Float32, MutUntrackedOrigin]):
     # C (m,n) = A (m,kk) @ B (kk,n) -- overwrites C (threaded for large sizes)
     _gemm_dispatch(1, m, n, kk, a, b, c)
+
+
+# =============================================================================
+# Generic partitioned-range runner (pthreads over job records)
+# =============================================================================
+
+
+def run_partitioned_range[
+    T: AnyType
+](jobs: Pointer[T, MutUntrackedOrigin], n_parts: Int, worker_fp: GemmWorkerFn):
+    """Run ``worker_fp`` over ``n_parts`` consecutive job records.
+
+    Record ``t`` lives at ``jobs.unsafe_offset(t)``; the worker reads its own
+    work range out of the record. Partitions 1..spawned-1 are spawned first,
+    partition 0 then runs on the calling thread, and finally all spawned
+    workers are joined. A failed spawn runs that partition synchronously (its
+    tid slot is never joined), so results stay correct regardless of thread
+    availability.
+    """
+    var threads = hardware_threads()
+    if threads < 2 or n_parts < 2:
+        worker_fp(jobs.unsafe_bitcast[UInt8]())
+        return
+
+    var tids = alloc[P_U8](n_parts - 1)
+    var spawned = 0  # successful spawns; also the next free tid slot
+    var t = 1
+    while t < n_parts and t < threads:
+        var rc = external_call[
+            "pthread_create",
+            Int32,
+            Pointer[P_U8, MutUntrackedOrigin],  # pthread_t *
+            Int,                                # const pthread_attr_t * (NULL)
+            GemmWorkerFn,                       # start routine
+            P_U8,                               # void *arg
+        ](
+            tids.unsafe_offset(spawned),
+            0,
+            worker_fp,
+            jobs.unsafe_offset(t).unsafe_bitcast[UInt8](),
+        )
+        if rc != 0:
+            # Spawn failed: run this partition synchronously so results stay correct.
+            worker_fp(jobs.unsafe_offset(t).unsafe_bitcast[UInt8]())
+        else:
+            spawned += 1
+        t += 1
+
+    worker_fp(jobs.unsafe_bitcast[UInt8]())
+
+    t = 0
+    while t < spawned:
+        external_call[
+            "pthread_join",
+            Int32,
+            P_U8,  # pthread_t
+            Int,   # void **retval (NULL)
+        ](tids.unsafe_offset(t)[], 0)
+        t += 1
