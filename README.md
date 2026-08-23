@@ -15,7 +15,7 @@ Shinrin also includes **TabM** — a parameter-efficient ensemble MLP for tabula
 - **Tabular Neural Networks** — scikit-learn compatible `MLPClassifier`/`MLPRegressor` and `TabMClassifier`/`TabMRegressor` with optional PLE embeddings and Mojo-accelerated training
 - **TabM Neural Networks** — Parameter-efficient ensemble MLPs for tabular data with BatchEnsemble-style multiplicative adapters (ICLR 2025)
 - **TreeSHAP Explanations** — `TreeExplainer` for single trees and forests with `explanation()` visualization helper
-- **ONNX Export** — Export trained models to ONNX format for deployment
+- **ONNX Export** — Export trained trees, forests, and TabM models to ONNX format for deployment
 - **Benchmarking** — Built-in utilities for training speed, prediction speed, and model size
 - **Rust & Mojo Bindings** — Performance-critical code in Rust via PyO3 and Mojo kernels
 
@@ -174,6 +174,23 @@ onnx_model = to_onnx(model, X)
 save_onnx(model, "model.onnx", X)
 ```
 
+Works for tree/forest models and TabM. TabM exports a self-contained
+graph (preprocessing, embeddings, ensemble backbone, averaged head) that
+runs on raw feature vectors with any batch size:
+
+```python
+import onnxruntime as ort
+from shinrin import TabMRegressor
+from shinrin.onnx import save_onnx
+
+model = TabMRegressor(hidden_layer_sizes=(256,), k=32, random_state=0)
+model.fit(X_train, y_train)
+save_onnx(model, "tabm.onnx", X_train)
+
+session = ort.InferenceSession("tabm.onnx")
+predictions = session.run(None, {"X": X_test.astype(np.float32)})[0]
+```
+
 ### Benchmarking
 
 ```python
@@ -199,7 +216,7 @@ print_benchmark_report(results)
 
 All vendored tests are included and passing — these are ported from scikit-garden and skope-rules to verify compatibility. Run `pytest --cov=src/shinrin tests/` for a full coverage report.
 
-TabM parity tests (`tests/test_tabm_parity.py`) verify that the Mojo kernels produce identical results to the NumPy reference implementation. TabM functional tests (`tests/test_tabm.py`) cover training, prediction, and determinism.
+TabM parity tests (`tests/test_tabm_parity.py`) verify that the Mojo kernels produce identical results to the NumPy reference implementation. TabM functional tests (`tests/test_tabm.py`) cover training, prediction, and determinism. TabM ONNX export tests (`tests/test_tabm_onnx.py`) verify onnxruntime inference parity for all architectures, tasks, and preprocessing configurations.
 
 ## License
 

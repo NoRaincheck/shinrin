@@ -1,8 +1,8 @@
-"""ONNX exporter for shinrin tree and forest models.
+"""ONNX exporter for shinrin tree, forest, and TabM models.
 
-This module provides functionality to export fitted shinrin tree and forest
-models to the ONNX format, enabling deployment on platforms that support
-ONNX runtime inference.
+This module provides functionality to export fitted shinrin tree, forest,
+and TabM models to the ONNX format, enabling deployment on platforms that
+support ONNX runtime inference.
 """
 
 from __future__ import annotations
@@ -13,9 +13,9 @@ import numpy as np
 
 # Lazy import for ONNX types (used in _onnx_dtype)
 try:
-    from onnx import TensorProto  # ty: ignore[unresolved-import]
+    from onnx import TensorProto
 except ImportError:  # pragma: no cover
-    TensorProto = None  # type: ignore[misc,assignment]
+    TensorProto: Any = None
 
 
 def _tree_to_onnx(
@@ -177,6 +177,15 @@ def _tree_to_onnx(
     return attributes
 
 
+def _is_tabm_estimator(estimator) -> bool:
+    """Return True when ``estimator`` is a fitted-capable TabM model."""
+    try:
+        from shinrin.tabm import TabMClassifier, TabMRegressor
+    except ImportError:  # pragma: no cover - sklearn missing
+        return False
+    return isinstance(estimator, (TabMClassifier, TabMRegressor))
+
+
 def to_onnx(
     estimator,
     X=None,
@@ -185,13 +194,15 @@ def to_onnx(
     name="ShinrinTree",
     target_opset=None,
 ):
-    """Convert a fitted shinrin tree or forest model to ONNX format.
+    """Convert a fitted shinrin tree, forest, or TabM model to ONNX format.
 
     Parameters
     ----------
-    estimator : fitted tree or forest estimator
-        The model to export. Must have ``tree_`` (single tree) or
-        ``estimators_`` (forest) attribute.
+    estimator : fitted tree, forest, or TabM estimator
+        The model to export. Must have ``tree_`` (single tree),
+        ``estimators_`` (forest) attribute, or be a fitted
+        :class:`~shinrin.tabm.TabMClassifier` /
+        :class:`~shinrin.tabm.TabMRegressor`.
     X : ndarray of shape (n_samples, n_features), optional
         Training data used to infer input shape and dtype.
         If not provided, defaults to 4 features with float64 dtype.
@@ -228,7 +239,7 @@ def to_onnx(
     >>> onnx_model = to_onnx(tree, X)
     """
     try:
-        from onnx import (  # ty: ignore[unresolved-import]
+        from onnx import (
             TensorProto,
             helper,
             numpy_helper,
@@ -236,6 +247,20 @@ def to_onnx(
     except ImportError:
         raise ImportError(
             "onnx is required for ONNX export. Install it with: pip install onnx"
+        )
+
+    # Route TabM models to the dedicated exporter (self-contained graph with
+    # preprocessing baked in; no ai.onnx.ml ops).
+    if _is_tabm_estimator(estimator):
+        from shinrin._tabm_onnx import tabm_to_onnx
+
+        return tabm_to_onnx(
+            estimator,
+            X=X,
+            feature_names=feature_names,
+            class_names=class_names,
+            name=name,
+            target_opset=target_opset,
         )
 
     if target_opset is None:
@@ -403,11 +428,14 @@ def to_onnx(
                     np.array(class_names, dtype=object),
                     name="class_names",
                 )
+                graph_outputs = [output_tensor]
+                if label_tensor is not None:
+                    graph_outputs.append(label_tensor)
                 graph = helper.make_graph(
                     [tree_node],
                     f"{name}_graph",
                     [input_tensor],
-                    [output_tensor, label_tensor],
+                    graph_outputs,
                 )
                 model = helper.make_model(
                     graph,
@@ -601,9 +629,9 @@ def to_onnx(
 def _onnx_dtype(dtype):
     """Map numpy dtype to ONNX TensorProto dtype."""
     try:
-        from onnx import TensorProto  # ty: ignore[unresolved-import]
+        from onnx import TensorProto
     except ImportError:
-        TensorProto = None  # type: ignore[misc,assignment]
+        TensorProto: Any = None
 
     mapping: dict[Any, Any] = {
         np.float16: "FLOAT",
@@ -626,7 +654,7 @@ def save_onnx(estimator, path, X=None, feature_names=None, class_names=None):
 
     Parameters
     ----------
-    estimator : fitted tree or forest estimator
+    estimator : fitted tree, forest, or TabM estimator
         The model to export.
     path : str
         File path to save the ONNX model.

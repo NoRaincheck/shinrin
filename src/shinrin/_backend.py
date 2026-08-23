@@ -55,7 +55,7 @@ def _load_mojo() -> Any:
     """
     if _mojo_shared_lib() is None:
         try:
-            import mojo.importer  # noqa: F401
+            importlib.import_module("mojo.importer")
         except ImportError as exc:
             raise ImportError(
                 "SHINRIN_BACKEND=mojo requires the 'mojo' package "

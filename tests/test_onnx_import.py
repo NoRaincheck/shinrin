@@ -17,7 +17,7 @@ from shinrin.onnx import to_onnx
 
 ONNX_INSTALLED = True
 try:
-    import onnx  # noqa: F401  # ty: ignore[unresolved-import]
+    import onnx  # noqa: F401
 except ImportError:
     ONNX_INSTALLED = False
 

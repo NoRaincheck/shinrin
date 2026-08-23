@@ -17,8 +17,8 @@ from shinrin import (
 
 ONNX_INSTALLED = True
 try:
-    import onnx  # noqa: F401  # ty: ignore[unresolved-import]
-    from onnx import (  # ty: ignore[unresolved-import]
+    import onnx  # noqa: F401
+    from onnx import (
         TensorProto,  # noqa: F401
         helper,  # noqa: F401
         numpy_helper,  # noqa: F401

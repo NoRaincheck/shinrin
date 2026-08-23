@@ -55,7 +55,7 @@ def get_tabm_native() -> Any:
         return _CACHE["mojo"]
     if _mojo_shared_lib() is None:
         try:
-            import mojo.importer  # noqa: F401
+            importlib.import_module("mojo.importer")
         except ImportError as exc:
             raise ImportError(
                 "The Mojo TabM kernels require a prebuilt "

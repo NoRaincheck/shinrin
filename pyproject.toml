@@ -23,6 +23,9 @@ sklearn = [
 pandas = [
     "pandas>=2.2",
 ]
+onnx = [
+    "onnx>=1.14",
+]
 full = [
     "scikit-learn>=1.7",
     "pandas>=2.2",
@@ -47,9 +50,12 @@ module-name = "shinrin._native"
 
 [dependency-groups]
 dev = [
+    "onnx>=1.14",
+    "onnxruntime>=1.15",
     "pytest>=9.1.1",
     "pytest-cov>=7.1.0",
     "ruff>=0.16.3",
+    "scikit-learn>=1.7",
     "ty>=0.0.72",
 ]
 docs = [
