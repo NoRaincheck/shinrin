@@ -28,7 +28,7 @@ from typing import TYPE_CHECKING, Any, Union
 import numpy as np
 
 if TYPE_CHECKING:
-    from onnx import ModelProto  # ty: ignore[unresolved-import]
+    from onnx import ModelProto
 
 # ---------------------------------------------------------------------------
 # Type aliases
@@ -154,7 +154,7 @@ _extract_tree_from_onnx = _extract_tree_from_onnx_node
 
 def _onnx_tensor_to_numpy(attr) -> np.ndarray:
     """Convert an ONNX attribute tensor to a numpy array."""
-    from onnx import numpy_helper  # ty: ignore[unresolved-import]
+    from onnx import numpy_helper
 
     if hasattr(attr, "t"):
         t = attr.t
