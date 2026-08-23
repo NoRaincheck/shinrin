@@ -71,6 +71,90 @@ ternary scheme (~1.58 bits/weight of information).
 | fp | 76.1s | **0.988** |
 | ternary/row (PTQ) | 72.9s | 0.672 |
 
+## Ablation — before vs after BitLinear (`shinrin.benchmark`)
+
+The tables above report *train* scores; for an honest before/after
+comparison the `ablation_benchmark()` utility (see
+[Benchmarking](../../docs/features/benchmarking.md)) fits each variant
+once and scores it on **held-out** data. Run with:
+
+```python
+from shinrin.benchmark import ablation_benchmark, print_ablation_report
+
+variants = {
+    "fp (baseline)": MLPClassifier(hidden_layer_sizes=(128, 64), max_iter=100),
+    "ternary/row": MLPClassifier(
+        ..., quantization="ternary", quantization_granularity="per_row"
+    ),
+}
+results = ablation_benchmark(variants, X_train, y_train, X_test, y_test)
+print_ablation_report(results)
+```
+
+Setup: 4,000 train / 1,000 held-out samples x 20 features;
+classification uses `sklearn.datasets.make_classification` (3 classes,
+10 informative) because the rank-based labels of the main suite are
+unlearnable out-of-sample (every variant sits at chance); regression as
+above. Same architectures and epoch budget as the main suite.
+
+### NumPy backend
+
+MLP:
+
+| Task | Variant | fit | Δfit | test score | Δscore |
+|---|---|---|---|---|---|
+| 3-class | fp | **0.39s** | 1.00x | **0.9210** | – |
+| 3-class | ternary/row | 0.53s | 1.34x | 0.9140 | −0.007 |
+| 3-class | ternary/tensor | 0.50s | 1.28x | 0.9050 | −0.016 |
+| Regression | fp | **0.13s** | 1.00x | 0.9945 | – |
+| Regression | ternary/row | 0.35s | 2.77x | 0.9941 | −0.0005 |
+| Regression | ternary/tensor | 0.30s | 2.32x | **0.9959** | +0.001 |
+
+TabM:
+
+| Task | Variant | fit | Δfit | test score | Δscore |
+|---|---|---|---|---|---|
+| 3-class | fp | **25.2s** | 1.00x | **0.9370** | – |
+| 3-class | ternary/row | 25.5s | 1.01x | 0.9310 | −0.006 |
+| 3-class | ternary/tensor | 25.6s | 1.02x | 0.9300 | −0.007 |
+| Regression | fp | **15.5s** | 1.00x | **0.9986** | – |
+| Regression | ternary/row | 15.7s | 1.02x | 0.9982 | −0.0004 |
+| Regression | ternary/tensor | 15.6s | 1.01x | 0.9983 | −0.0003 |
+
+### Mojo backend
+
+MLP:
+
+| Task | Variant | fit | Δfit | test score | Δscore |
+|---|---|---|---|---|---|
+| 3-class | fp | **0.40s** | 1.00x | 0.9170 | – |
+| 3-class | ternary/row | 0.46s | 1.15x | **0.9280** | +0.011 |
+| 3-class | ternary/tensor | 0.48s | 1.21x | 0.9110 | −0.006 |
+| Regression | fp | **0.16s** | 1.00x | **0.9955** | – |
+| Regression | ternary/row | 0.37s | 2.31x | 0.9942 | −0.001 |
+| Regression | ternary/tensor | 0.31s | 1.94x | 0.9943 | −0.001 |
+
+TabM:
+
+| Task | Variant | fit | Δfit | test score | Δscore |
+|---|---|---|---|---|---|
+| 3-class | fp | **3.03s** | 1.00x | **0.9420** | – |
+| 3-class | ternary/row | 3.46s | 1.14x | 0.9280 | −0.014 |
+| 3-class | ternary/tensor | 3.20s | 1.06x | 0.9310 | −0.011 |
+| Regression | fp | **2.57s** | 1.00x | **0.9981** | – |
+| Regression | ternary/row | 2.71s | 1.05x | 0.9980 | −0.000 |
+| Regression | ternary/tensor | 2.69s | 1.05x | 0.9970 | −0.001 |
+
+### Ablation takeaways
+
+- On a learnable classification task the QAT cost is modest: ~0.6–1.6
+  accuracy points (NumPy), within RNG noise on some Mojo runs — far
+  smaller than the train-score gaps of the rank-based main suite.
+- Regression stays at full-precision parity on held-out R² everywhere.
+- Fit overhead is 1.01–1.34x except tiny-time MLP regression fits,
+  where the fixed per-refresh quantize pass dominates the ratio (~2x of
+  a 0.13–0.16s baseline).
+
 ## Notes
 
 - **Fit-time overhead is small.** QAT adds one absmean pass over each
