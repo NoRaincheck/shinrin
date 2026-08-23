@@ -12,6 +12,8 @@ Shinrin also includes **TabM** — a parameter-efficient ensemble MLP for tabula
 ## Features
 
 - **Mondrian Trees & Forests** — Full scikit-learn API compatibility
+- **CORELS Optimal Rule Lists** — Certifiably optimal rule lists for binary data (`CorelsClassifier`), vendored from pycorels with bundled mini-GMP (no system dependency)
+- **GOSDT Optimal Sparse Decision Trees** — Globally optimized sparse decision trees with reference-ensemble guesses (`GOSDTClassifier`, `ThresholdGuessBinarizer`), vendored from gosdt-guesses; runs single-threaded with no TBB/GMP system dependencies
 - **Tabular Neural Networks** — scikit-learn compatible `MLPClassifier`/`MLPRegressor` and `TabMClassifier`/`TabMRegressor` with optional PLE embeddings and Mojo-accelerated training
 - **TabM Neural Networks** — Parameter-efficient ensemble MLPs for tabular data with BatchEnsemble-style multiplicative adapters (ICLR 2025)
 - **TreeSHAP Explanations** — `TreeExplainer` for single trees and forests with `explanation()` visualization helper
@@ -59,6 +61,33 @@ clf = TabMClassifier(k=32, max_iter=200)
 clf.fit(X, y)
 ```
 
+### CORELS Optimal Rule Lists
+
+```python
+from shinrin import CorelsClassifier
+
+# Binary features, binary classification — provably optimal rule list
+clf = CorelsClassifier(c=0.01, verbosity=["rulelist"])
+clf.fit(X, y, features=["feature1", "feature2"])
+print(clf.rl())          # human-readable optimal rule list
+predictions = clf.predict(X)
+```
+
+### GOSDT Optimal Sparse Decision Trees
+
+```python
+from shinrin import GOSDTClassifier, ThresholdGuessBinarizer
+
+# Binarize continuous features via gradient-boosting threshold guesses
+X_bin = ThresholdGuessBinarizer().fit_transform(X, y)
+
+# Optionally guide the search with a blackbox reference ensemble
+clf = GOSDTClassifier(regularization=0.05, depth_budget=4)
+clf.fit(X_bin, y)                      # or: clf.fit(X_bin, y, y_ref=y_ref)
+print(str(clf.trees_[0]))              # globally optimal tree
+accuracy = clf.score(X_bin, y)
+```
+
 ### Native Backends
 
 Both Mondrian trees and TabM support interchangeable native backends:
@@ -78,6 +107,8 @@ SHINRIN_TABM_BACKEND=mojo python your_script.py     # TabM-specific backend
 See [scripts/benchmarks/BENCHMARK.md](scripts/benchmarks/BENCHMARK.md) for detailed benchmark results comparing Shinrin against LightGBM and scikit-learn SGD.
 
 See [scripts/benchmarks/TABM_BENCHMARK.md](scripts/benchmarks/TABM_BENCHMARK.md) for TabM backend comparisons (NumPy vs Mojo vs PyTorch).
+
+See [scripts/benchmarks/GOSDT_BENCHMARK.md](scripts/benchmarks/GOSDT_BENCHMARK.md) for GOSDT vs scikit-learn CART comparisons (`just bench-gosdt`).
 
 To run benchmarks yourself: `python scripts/benchmarks/bench_baselines.py` (or `just bench-backends` for Rust vs Mojo backend comparisons, `just bench-tabm` for TabM backends).
 

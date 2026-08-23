@@ -70,3 +70,18 @@ Model: shinrin_forest
   Prediction Time: 0.038s
   Model Size:      148.5 KB
 ```
+
+## Scripts
+
+Standalone benchmark scripts live in `scripts/benchmarks/` with committed
+results documents:
+
+| Script | Comparison | Results doc (`scripts/benchmarks/`) |
+|---|---|---|
+| `bench_gosdt.py` | GOSDT pipeline vs scikit-learn CART (speed, accuracy, tree size, optimality gap) | `GOSDT_BENCHMARK.md` |
+| `bench_corels.py` | CORELS fit times, mini-GMP vs no-GMP builds | printed |
+| `bench_mlp.py` | sklearn vs shinrin MLP backends (NumPy/Mojo/PLE) | `MLP_BENCHMARK.md` |
+| `bench_backends.py` | Rust vs Mojo backends | `BENCHMARK.md` |
+| `bench_tabm.py` | TabM NumPy/Mojo/PyTorch | `TABM_BENCHMARK.md` |
+
+Run them with `just bench-gosdt`, `just bench-mlp`, `just bench-backends`, etc.

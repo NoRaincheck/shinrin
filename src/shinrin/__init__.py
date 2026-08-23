@@ -1,7 +1,7 @@
 """shinrin: random forests, quantile regression and rule extraction.
 
-This package vendors scikit-garden (BSD-3) and skope-rules (BSD-3) so they
-can be used without being installed as dependencies.
+This package vendors scikit-garden (BSD-3), skope-rules (BSD-3) and pycorels
+(GPL-3) so they can be used without being installed as dependencies.
 
 Optional dependencies:
     scikit-learn  – required for all tree/forest estimators
@@ -21,22 +21,26 @@ from typing import Any
 __version__ = "0.1.0"
 
 __all__ = [
+    "CorelsClassifier",
     "DecisionTreeQuantileRegressor",
     "ExtraTreeQuantileRegressor",
     "ExtraTreesQuantileRegressor",
     "ExtraTreesRegressor",
+    "GOSDTClassifier",
     "MLPClassifier",
     "MLPRegressor",
     "MondrianForestClassifier",
     "MondrianForestRegressor",
     "MondrianTreeClassifier",
     "MondrianTreeRegressor",
+    "NumericBinarizer",
     "RandomForestQuantileRegressor",
     "RandomForestRegressor",
     "Rule",
     "SkopeRules",
     "TabMClassifier",
     "TabMRegressor",
+    "ThresholdGuessBinarizer",
     "TreeExplainer",
     "benchmark_model_size",
     "benchmark_prediction",
@@ -55,6 +59,9 @@ __all__ = [
 
 # Mapping of public name → (module_path, attr_name)
 _IMPORT_MAP: dict[str, tuple[str, str]] = {
+    "CorelsClassifier": ("shinrin._corels.corels", "CorelsClassifier"),
+    "GOSDTClassifier": ("shinrin._gosdt.classifier", "GOSDTClassifier"),
+    "NumericBinarizer": ("shinrin._gosdt.binarizer", "NumericBinarizer"),
     "ExtraTreesRegressor": ("shinrin._skgarden.forest", "ExtraTreesRegressor"),
     "MLPClassifier": ("shinrin.mlp", "MLPClassifier"),
     "MLPRegressor": ("shinrin.mlp", "MLPRegressor"),
@@ -96,6 +103,10 @@ _IMPORT_MAP: dict[str, tuple[str, str]] = {
     "SkopeRules": ("shinrin._skrules.skope_rules", "SkopeRules"),
     "TabMClassifier": ("shinrin.tabm", "TabMClassifier"),
     "TabMRegressor": ("shinrin.tabm", "TabMRegressor"),
+    "ThresholdGuessBinarizer": (
+        "shinrin._gosdt.threshold_guessing",
+        "ThresholdGuessBinarizer",
+    ),
     "TreeExplainer": ("shinrin.shap", "TreeExplainer"),
     "explanation": ("shinrin.shap", "explanation"),
     "to_onnx": ("shinrin.onnx", "to_onnx"),

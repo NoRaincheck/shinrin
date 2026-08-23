@@ -12,6 +12,25 @@
 - `MondrianForestRegressor` — Ensemble of Mondrian trees for regression
 - `MondrianForestClassifier` — Ensemble of Mondrian trees for classification
 
+### CORELS Optimal Rule Lists
+
+- `CorelsClassifier` — Certifiably optimal rule lists for binary data
+- `RuleList` — Learned rule list (via `shinrin._corels`)
+- `load_from_csv` — Load binary CSV datasets (via `shinrin._corels`)
+
+See [CORELS Rule Lists](models/corels.md)
+
+### GOSDT Optimal Sparse Trees
+
+- `GOSDTClassifier` — Globally optimal sparse decision trees with
+  reference-ensemble guesses
+- `ThresholdGuessBinarizer` — Gradient-boosting threshold binarization
+- `NumericBinarizer` — Lossless midpoint binarization
+- `Tree` — Parsed optimal tree (via `shinrin._gosdt`)
+- `Status` — Result status enum (via `shinrin._gosdt`)
+
+See [GOSDT Optimal Trees](models/gosdt.md)
+
 ## Explanations
 
 - `TreeExplainer` — SHAP explainer for tree models

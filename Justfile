@@ -19,7 +19,7 @@ fix:
 lint:
     cargo clippy --all-targets --all-features -- -D warnings
     uv run ruff check src/ tests/
-    uv run ty check --exclude "src/shinrin/_skgarden/**" --exclude "src/shinrin/_skrules/**" --exclude "tests/vendored/**" src/ tests/
+    uv run ty check --exclude "src/shinrin/_skgarden/**" --exclude "src/shinrin/_skrules/**" --exclude "src/shinrin/_corels/**" --exclude "src/shinrin/_gosdt/**" --exclude "tests/vendored/**" src/ tests/
 
 # ---------- Mojo backend ----------
 
@@ -50,6 +50,10 @@ test-mlp-mojo: build-mlp-mojo
 # Benchmark sklearn vs shinrin MLP backends
 bench-mlp:
     uv run python scripts/benchmarks/bench_mlp.py
+
+# Benchmark GOSDT vs scikit-learn CART
+bench-gosdt:
+    uv run python scripts/benchmarks/bench_gosdt.py
 
 # Benchmark Rust vs Mojo backends
 bench-backends: build-mojo

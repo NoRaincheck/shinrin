@@ -66,6 +66,8 @@ docs = [
 extend-exclude = [
     "src/shinrin/_skgarden",
     "src/shinrin/_skrules",
+    "src/shinrin/_corels",
+    "src/shinrin/_gosdt",
     "tests/vendored",
     "src/shinrin/_compat.py",
 ]
