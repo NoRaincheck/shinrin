@@ -225,9 +225,9 @@ class _BaseTabM(BaseEstimator):
 
     def _resolve_backend(self) -> str:
         backend = tabm_backend.get_tabm_backend()
-        if backend == "mojo" and self.arch_type != "tabm":
+        if backend in ("mojo", "metal") and self.arch_type != "tabm":
             warnings.warn(
-                "The Mojo trainer currently supports arch_type='tabm' only; "
+                "The native trainers currently support arch_type='tabm' only; "
                 f"falling back to NumPy for arch_type={self.arch_type!r}."
             )
             return "numpy"
@@ -300,7 +300,7 @@ class _BaseTabM(BaseEstimator):
                     "early_stopping is not supported with solver='lbfgs'; "
                     "it will be ignored."
                 )
-            if backend == "mojo":
+            if backend in ("mojo", "metal"):
                 from shinrin._tabm._mojo_trainer import get_native_trainer
 
                 n_iter, losses = get_native_trainer(params.config).lbfgs(
@@ -322,7 +322,7 @@ class _BaseTabM(BaseEstimator):
             space.scatter(theta, params)
             return
 
-        if self.solver == "sgd" and backend == "mojo":
+        if self.solver == "sgd" and backend in ("mojo", "metal"):
             backend = "numpy"
 
         lr = self.learning_rate_init
@@ -340,7 +340,7 @@ class _BaseTabM(BaseEstimator):
         bs = self._batch_size(n)
 
         for epoch in range(self.max_iter):
-            if backend == "mojo":
+            if backend in ("mojo", "metal"):
                 from shinrin._tabm._mojo_trainer import get_native_trainer
 
                 assert state is not None

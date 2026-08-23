@@ -357,9 +357,9 @@ class _BaseMLP(BaseEstimator):
         from shinrin._mlp._backend import get_mlp_backend
 
         backend = get_mlp_backend()
-        if backend == "mojo" and self.solver != "adam":
+        if backend in ("mojo", "metal") and self.solver != "adam":
             warnings.warn(
-                "The Mojo trainer supports solver='adam' only; falling back "
+                "The native trainers support solver='adam' only; falling back "
                 f"to NumPy for solver={self.solver!r}."
             )
             return "numpy"
@@ -461,7 +461,7 @@ class _BaseMLP(BaseEstimator):
         for epoch in range(self.max_iter):
             epoch_rng = np.random.RandomState(base_seed + epoch)
             perm = epoch_rng.permutation(n) if self.shuffle else np.arange(n)
-            if backend == "mojo":
+            if backend in ("mojo", "metal"):
                 assert isinstance(opt, _AdamOptimizer)
                 epoch_loss, opt.t = self._mojo_epoch(
                     theta, opt, train, bs, alpha, base_seed + epoch, task_code

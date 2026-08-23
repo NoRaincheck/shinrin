@@ -146,13 +146,19 @@ Fitted bin edges are exposed via `model.preprocessor_.bins_`.
 
 ## Backends
 
-Two trainer backends are available, selected via the
-`SHINRIN_TABM_BACKEND` environment variable (`auto`, `numpy` or `mojo`;
-`auto` uses Mojo when a prebuilt kernel library is present):
+Trainer backends are selected via the `SHINRIN_TABM_BACKEND` environment
+variable (`auto`, `numpy`, `mojo` or `metal`; `auto` uses the CPU Mojo
+kernels when a prebuilt kernel library is present, and Metal is always
+opt-in):
 
 - **numpy** — pure NumPy reference implementation, always available.
-- **mojo** — Mojo kernels (`just build-tabm-mojo`) that execute the full
+- **mojo** — CPU Mojo kernels (`just build-tabm-mojo`) that execute the full
   training step natively; no BLAS requirement.
+- **metal** — experimental Apple-GPU kernels (`just build-tabm-metal`;
+  requires the `metal` extra, Xcode 26 with the Metal toolchain and an
+  Apple Silicon Mac). See the
+  [installation notes](../getting-started/installation.md#metal-apple-gpu-backends)
+  for requirements and current stability caveats.
 
 See [TABM_BENCHMARK.md](https://github.com/NoRaincheck/shinrin/blob/main/scripts/benchmarks/TABM_BENCHMARK.md)
 for measured trade-offs between the backends.

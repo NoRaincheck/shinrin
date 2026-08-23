@@ -27,7 +27,7 @@ import numpy as np
 
 from shinrin._tabm._model import Batch
 
-from ._backend import get_mlp_native
+from ._backend import get_mlp_backend, get_mlp_native
 from ._layers import MLPConfig
 
 _LOCK = threading.Lock()
@@ -58,7 +58,8 @@ def _or_dummy(arr: np.ndarray | None) -> np.ndarray:
 
 def get_native_trainer(config: MLPConfig) -> NativeTrainer:
     """Return a cached native ``MLPTrainer`` wrapper for the configuration."""
-    key = (
+    backend = get_mlp_backend()
+    key = (backend,) + (
         config.n_num_features,
         config.d_enc,
         tuple(config.cat_cardinalities),
@@ -74,7 +75,9 @@ def get_native_trainer(config: MLPConfig) -> NativeTrainer:
             layersizes = np.array(config.layer_sizes, dtype=np.int64)
             bins = np.array(config.bin_counts, dtype=np.int64)
             trainer = NativeTrainer(
-                get_mlp_native().MLPTrainer(_dims_vector(config), layersizes, bins)
+                get_mlp_native(backend).MLPTrainer(
+                    _dims_vector(config), layersizes, bins
+                )
             )
             _TRAINERS[key] = trainer
         return trainer

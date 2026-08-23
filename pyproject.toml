@@ -17,6 +17,12 @@ dependencies = [
 mojo = [
     "mojo>=1.0.0",
 ]
+# Metal (Apple GPU) backends via Mojo GPU kernels; requires Xcode 26+ with
+# the Metal Toolchain component (`xcodebuild -downloadComponent MetalToolchain`)
+metal = [
+    "mojo>=1.0.0",
+    "max>=26.5",
+]
 sklearn = [
     "scikit-learn>=1.7",
 ]

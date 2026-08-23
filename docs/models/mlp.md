@@ -119,17 +119,23 @@ before fitting.
 
 ## Backends
 
-Two trainer backends are available, selected via the
-`SHINRIN_MLP_BACKEND` environment variable (`auto`, `numpy` or `mojo`;
-`auto` uses Mojo when a prebuilt kernel library is present):
+Trainer backends are selected via the `SHINRIN_MLP_BACKEND` environment
+variable (`auto`, `numpy`, `mojo` or `metal`; `auto` uses the CPU Mojo
+kernels when a prebuilt kernel library is present, and Metal is always
+opt-in):
 
 - **numpy** — pure NumPy reference implementation, always available;
   supports all solvers.
-- **mojo** — Mojo kernels (`just build-mlp-mojo`) executing shuffled
+- **mojo** — CPU Mojo kernels (`just build-mlp-mojo`) executing shuffled
   minibatch Adam epochs (with dropout), L-BFGS and inference natively;
   no BLAS requirement. Non-Adam solvers transparently fall back to
   NumPy. `SHINRIN_MLP_THREADS` overrides the worker count; the kernels
   scale threads down automatically for small minibatches.
+- **metal** — experimental Apple-GPU kernels (`just build-mlp-metal`;
+  requires the `metal` extra, Xcode 26 with the Metal toolchain and an
+  Apple Silicon Mac). Adam only; see the
+  [installation notes](../getting-started/installation.md#metal-apple-gpu-backends)
+  for requirements and current stability caveats.
 
 See [MLP_BENCHMARK.md](https://github.com/NoRaincheck/shinrin/blob/main/scripts/benchmarks/MLP_BENCHMARK.md)
 for measured comparisons against scikit-learn across both backends.

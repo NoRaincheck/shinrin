@@ -21,7 +21,7 @@ from typing import Any
 
 import numpy as np
 
-from ._backend import get_tabm_native
+from ._backend import get_tabm_backend, get_tabm_native
 from ._layers import TabMConfig, TabMParams
 from ._model import Batch
 
@@ -58,7 +58,8 @@ def _or_dummy(arr: np.ndarray | None) -> np.ndarray:
 
 def get_tabm_trainer(config: TabMConfig) -> Any:
     """Return a cached native ``TabMTrainer`` for the given configuration."""
-    key = (
+    backend = get_tabm_backend()
+    key = (backend,) + (
         config.k,
         config.n_blocks,
         config.d_block,
@@ -72,7 +73,7 @@ def get_tabm_trainer(config: TabMConfig) -> Any:
     with _LOCK:
         trainer = _TRAINERS.get(key)
         if trainer is None:
-            trainer = get_tabm_native().TabMTrainer(
+            trainer = get_tabm_native(backend).TabMTrainer(
                 _dims_vector(config), _bins_vector(config)
             )
             _TRAINERS[key] = trainer

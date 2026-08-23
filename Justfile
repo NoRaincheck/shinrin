@@ -47,6 +47,26 @@ build-mlp-mojo:
 test-mlp-mojo: build-mlp-mojo
     SHINRIN_MLP_BACKEND=mojo uv run pytest tests/test_mlp_parity.py tests/test_mlp.py
 
+# ---------- Metal (Apple GPU via Mojo) backend ----------
+
+# Build the TabM GPU trainer extension (shinrin._native_tabm_gpu)
+# Requires: `pip install 'shinrin[metal]'` (mojo + max) and Xcode 26 with the
+# Metal toolchain (`xcodebuild -downloadComponent MetalToolchain`).
+build-tabm-metal:
+    uv run mojo build src/shinrin/_tabm_gpu_kernels.mojo --emit shared-lib -o src/shinrin/_native_tabm_gpu.so
+
+# Run TabM tests against the Metal backend
+test-tabm-metal: build-tabm-metal
+    SHINRIN_TABM_BACKEND=metal uv run pytest tests/test_tabm_parity.py tests/test_tabm.py
+
+# Build the MLP GPU trainer extension (shinrin._native_mlp_gpu)
+build-mlp-metal:
+    uv run mojo build src/shinrin/_mlp_gpu_kernels.mojo --emit shared-lib -o src/shinrin/_native_mlp_gpu.so
+
+# Run MLP tests against the Metal backend
+test-mlp-metal: build-mlp-metal
+    SHINRIN_MLP_BACKEND=metal uv run pytest tests/test_mlp_parity.py tests/test_mlp.py
+
 # Benchmark sklearn vs shinrin MLP backends
 bench-mlp:
     uv run python scripts/benchmarks/bench_mlp.py

@@ -61,16 +61,47 @@ clf.fit(X, y)
 
 ### Native Backends
 
-Both Mondrian trees and TabM support interchangeable native backends:
+Both Mondrian trees, TabM and the plain MLP support interchangeable native
+backends:
 
 - **Rust** (default) — PyO3/maturin extension for tree models
-- **Mojo** — Experimental Mojo port for TabM training kernels
+- **Mojo** — Mojo port of the TabM / MLP training kernels (CPU)
+- **Metal** (experimental) — Apple-GPU Mojo kernels for TabM and MLP
 
 Select the backend with environment variables:
 
 ```bash
-SHINRIN_BACKEND=mojo python your_script.py          # TabM Mojo backend
+SHINRIN_BACKEND=mojo python your_script.py          # tree-model Mojo backend
 SHINRIN_TABM_BACKEND=mojo python your_script.py     # TabM-specific backend
+SHINRIN_MLP_BACKEND=metal python your_script.py     # MLP Metal GPU backend
+```
+
+#### Metal (Apple GPU) backends
+
+TabM and the plain MLP ship experimental Apple-GPU trainers built from the
+same Mojo sources as their CPU counterparts. They are strictly opt-in:
+
+```bash
+pip install 'shinrin[metal]'          # mojo + max packages
+just build-tabm-metal                 # -> shinrin/_native_tabm_gpu.so
+just build-mlp-metal                  # -> shinrin/_native_mlp_gpu.so
+SHINRIN_TABM_BACKEND=metal python your_script.py
+```
+
+Requirements: Apple Silicon, macOS 15+, Xcode 26 with the Metal toolchain
+component (`xcodebuild -downloadComponent MetalToolchain`), and the `max`
+package (`pip install shinrin[metal]`).
+
+Status: the kernels build and run end-to-end and match the NumPy reference
+on small configurations, but on current MAX releases (26.5) larger
+training runs can silently drop kernel launches when many pipelines are
+compiled at once (upstream XPC compiler-service instability). The backends
+therefore remain experimental; the CPU Mojo and NumPy paths are unaffected.
+```
+
+Note: the native trainers currently cover `arch_type='tabm'` with the
+`solver='adam'`/`'lbfgs'` pair for TabM and `solver='adam'` only for the
+plain MLP; other combinations automatically fall back to NumPy.
 ```
 
 ## Benchmarks
@@ -92,7 +123,8 @@ Optional dependencies:
 ```bash
 pip install shinrin[sklearn]   # scikit-learn for benchmarks and SHAP plotting
 pip install shinrin[onnx]      # ONNX export
-pip install shinrin[mojo]      # TabM Mojo kernels (`just build-tabm-mojo`)
+pip install shinrin[mojo]      # TabM/MLP Mojo kernels (`just build-tabm-mojo`)
+pip install shinrin[metal]     # Apple-GPU (Metal) kernels, needs Xcode 26 + Metal toolchain
 pip install shinrin[full]      # All optional dependencies
 ```
 
