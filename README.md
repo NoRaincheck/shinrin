@@ -12,6 +12,7 @@ Shinrin also includes **TabM** — a parameter-efficient ensemble MLP for tabula
 ## Features
 
 - **Mondrian Trees & Forests** — Full scikit-learn API compatibility
+- **CORELS Optimal Rule Lists** — Certifiably optimal rule lists for binary data (`CorelsClassifier`), vendored from pycorels with **no GMP dependency**
 - **Tabular Neural Networks** — scikit-learn compatible `MLPClassifier`/`MLPRegressor` and `TabMClassifier`/`TabMRegressor` with optional PLE embeddings and Mojo-accelerated training
 - **TabM Neural Networks** — Parameter-efficient ensemble MLPs for tabular data with BatchEnsemble-style multiplicative adapters (ICLR 2025)
 - **TreeSHAP Explanations** — `TreeExplainer` for single trees and forests with `explanation()` visualization helper
@@ -57,6 +58,18 @@ predictions = model.predict(X)
 # Classification
 clf = TabMClassifier(k=32, max_iter=200)
 clf.fit(X, y)
+```
+
+### CORELS Optimal Rule Lists
+
+```python
+from shinrin import CorelsClassifier
+
+# Binary features, binary classification — provably optimal rule list
+clf = CorelsClassifier(c=0.01, verbosity=["rulelist"])
+clf.fit(X, y, features=["feature1", "feature2"])
+print(clf.rl())          # human-readable optimal rule list
+predictions = clf.predict(X)
 ```
 
 ### Native Backends

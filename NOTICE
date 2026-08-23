@@ -1,8 +1,9 @@
 NOTICE
 
-shinrin vendors portions of the following BSD-3-Clause licensed projects and
-also ships a Rust port of one of them. Their copyright and license notices are
-reproduced below and in the LICENSE files kept alongside the vendored code.
+shinrin vendors portions of the following BSD-3-Clause and Apache-2.0
+licensed projects (plus one GPL-3.0 project, noted below) and also ships a
+Rust port of one of them. Their copyright and license notices are reproduced
+below and in the LICENSE files kept alongside the vendored code.
 
 1. scikit-garden (BSD-3-Clause)
    https://github.com/scikit-garden/scikit-garden
@@ -51,3 +52,23 @@ reproduced below and in the LICENSE files kept alongside the vendored code.
    The sklearn-style estimator interface and preprocessing pipeline of the
    shinrin TabM implementation were adapted from chapman73/tabm-lightning,
    which itself wraps the yandex-research/tabm reference above.
+
+6. pycorels / CORELS (GPL-3.0)
+   https://github.com/corels/pycorels
+   https://github.com/corels/corels
+
+   Vendored (adapted) into `src/shinrin/_corels/`: the CORELS C++ engine
+   (`cpp/corels/`, `cpp/mining/`) and its Python layer (`corels.py`,
+   `utils.py`). The upstream Cython binding is replaced by PyO3 bindings in
+   `src/lib.rs`; the C++ sources are compiled into `shinrin._native`
+   WITHOUT GMP (the `-DGMP` word-array bit-vector fallback is used), so no
+   libgmp dependency exists.
+
+   NOTE: unlike the other vendored projects above, this code is licensed
+   under the GNU General Public License v3.0. The upstream license text is
+   kept at `src/shinrin/_corels/LICENSE` (pycorels) and
+   `src/shinrin/_corels/cpp/corels/LICENSE` (CORELS).
+
+   Copyright (c) 2017 Elaine Angelino, Nicholas Larus-Stone, Daniel Alabi,
+   Margo Seltzer (CORELS); pycorels contributors.
+   License: GPL-3.0 (see src/shinrin/_corels/LICENSE)

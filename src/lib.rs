@@ -15,7 +15,7 @@ use numpy::{
     PyArray1, PyArray2, PyArray3, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2,
     PyUntypedArrayMethods,
 };
-use pyo3::exceptions::{PyKeyError, PyMemoryError, PyValueError};
+use pyo3::exceptions::{PyKeyError, PyMemoryError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyTuple, PyType};
 
@@ -2490,6 +2490,308 @@ impl PyPartialFitTreeBuilder {
 }
 
 // =============================================================================
+// CORELS (vendored pycorels) bindings
+//
+// The vendored C++ sources live in `src/shinrin/_corels/cpp` and are compiled
+// into this extension by `build.rs` (without GMP). These bindings replace
+// upstream's Cython module (`corels/_corels.pyx`) with identical semantics.
+// =============================================================================
+
+mod corels_bridge {
+    use std::ffi::c_void;
+    use std::os::raw::{c_char, c_int};
+
+    pub const OK: c_int = 0;
+    pub const RUN_FAILED: c_int = 1;
+    pub const MEMORY: c_int = -1;
+    pub const VALUE: c_int = -2;
+
+    #[repr(C)]
+    pub struct EndArrays {
+        pub lens: *mut c_int,
+        pub lens_len: c_int,
+        pub ants: *mut c_int,
+        pub ants_len: c_int,
+        pub classes: *mut c_int,
+        pub classes_len: c_int,
+    }
+
+    extern "C" {
+        pub fn shinrin_corels_begin(
+            samples: *const u8,
+            nsamples: c_int,
+            nfeatures: c_int,
+            labels: *const u8,
+            features: *const *const c_char,
+            nfeatures_names: c_int,
+            max_card: c_int,
+            min_support: f64,
+            verbosity_str: *const c_char,
+            mine_verbose: c_int,
+            minor_verbose: c_int,
+            c: f64,
+            policy: c_int,
+            map_type: c_int,
+            ablation: c_int,
+            calculate_size: c_int,
+        ) -> c_int;
+
+        pub fn shinrin_corels_loop(max_num_nodes: usize) -> c_int;
+
+        pub fn shinrin_corels_end(
+            early: c_int,
+            out_lens: *mut *mut c_int,
+            out_lens_len: *mut c_int,
+            out_ants: *mut *mut c_int,
+            out_ants_len: *mut c_int,
+            out_classes: *mut *mut c_int,
+            out_classes_len: *mut c_int,
+        ) -> f64;
+
+        fn shinrin_corels_free_ints(p: *mut c_void);
+    }
+
+    /// Frees arrays returned by `shinrin_corels_end` on scope exit.
+    pub struct IntArrayGuard(pub *mut c_int);
+
+    impl Drop for IntArrayGuard {
+        fn drop(&mut self) {
+            unsafe { shinrin_corels_free_ints(self.0.cast()) };
+        }
+    }
+}
+
+use corels_bridge as cb;
+
+#[pyfunction]
+#[pyo3(signature = (samples, labels, features, max_card, min_support, verbosity_str,
+                    mine_verbose, minor_verbose, c, policy, map_type, ablation,
+                    calculate_size))]
+#[allow(clippy::too_many_arguments)]
+fn corels_fit_wrap_begin(
+    samples: PyReadonlyArray2<u8>,
+    labels: PyReadonlyArray2<u8>,
+    features: Vec<String>,
+    max_card: i32,
+    min_support: f64,
+    verbosity_str: &str,
+    mine_verbose: i32,
+    minor_verbose: i32,
+    c: f64,
+    policy: i32,
+    map_type: i32,
+    ablation: i32,
+    calculate_size: bool,
+) -> PyResult<bool> {
+    let nsamples = samples.shape()[0];
+    let nfeatures = samples.shape()[1];
+    let samples_view = samples.as_array();
+    let samples = samples_view
+        .as_slice()
+        .ok_or_else(|| PyValueError::new_err("samples array must be C-contiguous"))?;
+    let labels_view = labels.as_array();
+    let labels = labels_view
+        .as_slice()
+        .ok_or_else(|| PyValueError::new_err("labels array must be C-contiguous"))?;
+    if labels.len() != 2 * nsamples {
+        return Err(PyValueError::new_err(format!(
+            "Sample count mismatch between label ({}) and rule data ({})",
+            if nsamples == 0 { 0 } else { labels.len() / 2 },
+            nsamples
+        )));
+    }
+    if nfeatures > features.len() {
+        return Err(PyValueError::new_err(format!(
+            "Feature count mismatch between sample data ({}) and feature names ({})",
+            nfeatures,
+            features.len()
+        )));
+    }
+
+    let c_features: std::vec::Vec<std::ffi::CString> = features
+        .iter()
+        .map(|s| {
+            std::ffi::CString::new(s.as_str())
+                .map_err(|_| PyValueError::new_err("feature names must not contain NUL bytes"))
+        })
+        .collect::<PyResult<_>>()?;
+    let feature_ptrs: Vec<*const std::os::raw::c_char> =
+        c_features.iter().map(|s| s.as_ptr()).collect();
+    let verbosity = std::ffi::CString::new(verbosity_str)
+        .map_err(|_| PyValueError::new_err("verbosity string must not contain NUL bytes"))?;
+
+    let rc = unsafe {
+        cb::shinrin_corels_begin(
+            samples.as_ptr(),
+            nsamples as std::os::raw::c_int,
+            nfeatures as std::os::raw::c_int,
+            labels.as_ptr(),
+            feature_ptrs.as_ptr(),
+            features.len() as std::os::raw::c_int,
+            max_card,
+            min_support,
+            verbosity.as_ptr(),
+            mine_verbose,
+            minor_verbose,
+            c,
+            policy,
+            map_type,
+            ablation,
+            calculate_size as std::os::raw::c_int,
+        )
+    };
+
+    match rc {
+        cb::OK => Ok(true),
+        cb::RUN_FAILED => Ok(false),
+        cb::MEMORY => Err(PyMemoryError::new_err("corels: out of memory")),
+        cb::VALUE => Err(PyValueError::new_err(format!(
+            "Sample count mismatch between label ({}) and rule data ({})",
+            labels.len() / 2,
+            nsamples
+        ))),
+        _ => Err(PyValueError::new_err("corels: unexpected return code")),
+    }
+}
+
+#[pyfunction]
+fn corels_fit_wrap_loop(max_num_nodes: usize) -> PyResult<bool> {
+    Ok(unsafe { cb::shinrin_corels_loop(max_num_nodes) } != 0)
+}
+
+#[pyfunction]
+fn corels_fit_wrap_end<'py>(py: Python<'py>, early: bool) -> PyResult<Vec<Bound<'py, PyDict>>> {
+    let mut arrays = cb::EndArrays {
+        lens: std::ptr::null_mut(),
+        lens_len: 0,
+        ants: std::ptr::null_mut(),
+        ants_len: 0,
+        classes: std::ptr::null_mut(),
+        classes_len: 0,
+    };
+    unsafe {
+        cb::shinrin_corels_end(
+            early as std::os::raw::c_int,
+            &mut arrays.lens,
+            &mut arrays.lens_len,
+            &mut arrays.ants,
+            &mut arrays.ants_len,
+            &mut arrays.classes,
+            &mut arrays.classes_len,
+        );
+    }
+
+    // Free the C buffers when we leave this scope, success or not.
+    let _guards = (
+        cb::IntArrayGuard(arrays.lens),
+        cb::IntArrayGuard(arrays.ants),
+        cb::IntArrayGuard(arrays.classes),
+    );
+
+    let have_lens = !arrays.lens.is_null();
+    let have_ants = !arrays.ants.is_null();
+    let have_classes = !arrays.classes.is_null();
+    if (!have_lens && arrays.lens_len > 0)
+        || (!have_ants && arrays.ants_len > 0)
+        || (!have_classes && arrays.classes_len > 0)
+    {
+        return Err(PyMemoryError::new_err("corels: out of memory"));
+    }
+
+    let lens_len = arrays.lens_len.max(0) as usize;
+    let ants_len = arrays.ants_len.max(0) as usize;
+    let classes_len = arrays.classes_len.max(0) as usize;
+    let lens = unsafe { std::slice::from_raw_parts(arrays.lens, lens_len) };
+    let ants = unsafe { std::slice::from_raw_parts(arrays.ants, ants_len) };
+    let classes = unsafe { std::slice::from_raw_parts(arrays.classes, classes_len) };
+
+    if classes_len != lens_len + 1 {
+        return Err(PyValueError::new_err(
+            "corels: inconsistent rulelist/classes sizes",
+        ));
+    }
+
+    let mut r_out = Vec::with_capacity(lens_len + 1);
+    let mut offset = 0usize;
+    for i in 0..lens_len {
+        let n = lens[i].max(0) as usize;
+        if offset + n > ants_len {
+            return Err(PyValueError::new_err("corels: malformed antecedent data"));
+        }
+        let dict = PyDict::new(py);
+        dict.set_item("antecedents", &ants[offset..offset + n])?;
+        dict.set_item("prediction", classes[i] != 0)?;
+        r_out.push(dict);
+        offset += n;
+    }
+
+    // The final entry is the default prediction.
+    let dict = PyDict::new(py);
+    dict.set_item("antecedents", vec![0])?;
+    dict.set_item("prediction", classes[lens_len] != 0)?;
+    r_out.push(dict);
+
+    Ok(r_out)
+}
+
+#[pyfunction]
+fn corels_predict_wrap<'py>(
+    py: Python<'py>,
+    x: PyReadonlyArray2<'py, u8>,
+    rules: Vec<Bound<'py, PyDict>>,
+) -> PyResult<Bound<'py, numpy::PyArray1<bool>>> {
+    let x = x.as_array();
+    let nsamples = x.nrows();
+    let nfeatures = x.ncols();
+
+    let n_rules = rules.len();
+    if n_rules == 0 {
+        return Ok(numpy::PyArray1::from_vec(py, vec![false; nsamples]));
+    }
+
+    let mut parsed: Vec<(Vec<i32>, bool)> = Vec::with_capacity(n_rules - 1);
+    let mut default_pred = false;
+    for (i, rule) in rules.iter().enumerate() {
+        let antecedents: Vec<i32> = rule
+            .get_item("antecedents")?
+            .ok_or_else(|| PyTypeError::new_err("Rule dicts must contain 'antecedents' key"))?
+            .extract()
+            .map_err(|_| PyTypeError::new_err("Rule antecedents must be lists of ints"))?;
+        let prediction: i64 = rule
+            .get_item("prediction")?
+            .ok_or_else(|| PyTypeError::new_err("Rule dicts must contain 'prediction' key"))?
+            .extract()
+            .map_err(|_| PyTypeError::new_err("Rule predictions must be bools or ints"))?;
+        if i == n_rules - 1 {
+            default_pred = prediction != 0;
+        } else {
+            parsed.push((antecedents, prediction != 0));
+        }
+    }
+
+    let mut out = vec![default_pred; nsamples];
+    for s in 0..nsamples {
+        for (antecedents, prediction) in &parsed {
+            let mut matched = true;
+            for &idx in antecedents {
+                let want: u8 = if idx < 0 { 0 } else { 1 };
+                let iu = idx.unsigned_abs() as usize;
+                if iu == 0 || iu > nfeatures || x[[s, iu - 1]] != want {
+                    matched = false;
+                    break;
+                }
+            }
+            if matched {
+                out[s] = *prediction;
+                break;
+            }
+        }
+    }
+
+    Ok(numpy::PyArray1::from_vec(py, out))
+}
+
+// =============================================================================
 // Module
 // =============================================================================
 
@@ -2504,6 +2806,10 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyTree>()?;
     m.add_class::<PyDepthFirstTreeBuilder>()?;
     m.add_class::<PyPartialFitTreeBuilder>()?;
+    m.add_function(wrap_pyfunction!(corels_fit_wrap_begin, m)?)?;
+    m.add_function(wrap_pyfunction!(corels_fit_wrap_loop, m)?)?;
+    m.add_function(wrap_pyfunction!(corels_fit_wrap_end, m)?)?;
+    m.add_function(wrap_pyfunction!(corels_predict_wrap, m)?)?;
     m.add("DTYPE", numpy::dtype::<f32>(m.py()))?;
     m.add("DOUBLE", numpy::dtype::<f64>(m.py()))?;
     Ok(())

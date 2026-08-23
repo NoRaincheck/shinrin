@@ -1,7 +1,7 @@
 """shinrin: random forests, quantile regression and rule extraction.
 
-This package vendors scikit-garden (BSD-3) and skope-rules (BSD-3) so they
-can be used without being installed as dependencies.
+This package vendors scikit-garden (BSD-3), skope-rules (BSD-3) and pycorels
+(GPL-3) so they can be used without being installed as dependencies.
 
 Optional dependencies:
     scikit-learn  – required for all tree/forest estimators
@@ -21,6 +21,7 @@ from typing import Any
 __version__ = "0.1.0"
 
 __all__ = [
+    "CorelsClassifier",
     "DecisionTreeQuantileRegressor",
     "ExtraTreeQuantileRegressor",
     "ExtraTreesQuantileRegressor",
@@ -55,6 +56,7 @@ __all__ = [
 
 # Mapping of public name → (module_path, attr_name)
 _IMPORT_MAP: dict[str, tuple[str, str]] = {
+    "CorelsClassifier": ("shinrin._corels.corels", "CorelsClassifier"),
     "ExtraTreesRegressor": ("shinrin._skgarden.forest", "ExtraTreesRegressor"),
     "MLPClassifier": ("shinrin.mlp", "MLPClassifier"),
     "MLPRegressor": ("shinrin.mlp", "MLPRegressor"),
