@@ -14,7 +14,9 @@ void Optimizer::models(std::unordered_set< Model > & results) {
 
     // Copy into final results
     if (model_limit_exceeded) {
-        std::cout << "Model limit exceeded. Will not produce any model." << std::endl;
+        if (Configuration::verbose) {
+            std::cout << "Model limit exceeded. Will not produce any model." << std::endl;
+        }
         results.clear();
         return;
     }
@@ -25,10 +27,12 @@ void Optimizer::models(std::unordered_set< Model > & results) {
         // * (insertion.first) = (** iterator);
          Model * model = new Model(**iterator);
          count++;
-        
-        std::string serialization;
-        (**iterator).serialize(serialization, 2);
-        std::cout << serialization << std::endl;
+
+        if (Configuration::verbose) {
+            std::string serialization;
+            (**iterator).serialize(serialization, 2);
+            std::cout << serialization << std::endl;
+        }
         results.insert(**iterator);
         delete model;
     }
