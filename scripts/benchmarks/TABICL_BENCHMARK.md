@@ -73,9 +73,9 @@ Quick grid (`300 x 10`, i.e. 300 train rows x 10 features, 200 test rows;
 
 | Task | numpy fit | numpy predict | torch fit | torch predict | mojo fit | mojo predict | score (all) |
 |---|---|---|---|---|---|---|---|
-| classification | 0.066s | 3.996s (20.0 ms/1k) | 0.112s | 1.286s (6.4 ms/1k) | 0.058s | 4.197s (21.0 ms/1k) | 0.750 |
-| regression | 0.065s | 4.002s (20.0 ms/1k) | 0.111s | 1.351s (6.8 ms/1k) | 0.056s | 4.284s (21.4 ms/1k) | 0.999 |
-| mixed categorical | 0.077s | 3.955s (19.8 ms/1k) | 0.110s | 1.286s (6.4 ms/1k) | 0.058s | 4.215s (21.1 ms/1k) | 0.915 |
+| classification | 0.066s | 3.996s (20.0 ms/1k) | 0.112s | 1.286s (6.4 ms/1k) | 0.058s | 3.597s (18.0 ms/1k) | 0.750 |
+| regression | 0.065s | 4.002s (20.0 ms/1k) | 0.111s | 1.351s (6.8 ms/1k) | 0.056s | 3.664s (18.3 ms/1k) | 0.999 |
+| mixed categorical | 0.077s | 3.955s (19.8 ms/1k) | 0.110s | 1.286s (6.4 ms/1k) | 0.056s | 3.622s (18.1 ms/1k) | 0.915 |
 
 - All three backends produce **identical scores** on every task — expected,
   since they load the same checkpoint and implement the same graph; this is
@@ -83,12 +83,13 @@ Quick grid (`300 x 10`, i.e. 300 train rows x 10 features, 200 test rows;
 - On CPU, torch predict remains ~3× faster than both reference backends
   (fused SDPA-style kernels vs unfused matmul chains).
 - Mojo predict used to be ~2× slower than NumPy here; after vectorizing
-  the elementwise attention paths and register-tiling `gemm_nt` /
-  `gemm_nn` (see kernel history below) it is at rough parity with NumPy
-  (~44% faster than its pre-optimization numbers). Remaining known gaps:
-  LayerNorm/RoPE stay scalar by design (parity contracts pin exact
-  accumulation orders), no fused online-softmax attention yet, and
-  threads are created/joined per parallel region.
+  the elementwise attention paths, register-tiling `gemm_nt` / `gemm_nn`,
+  pooling the worker threads and threading SSMax over rows (see kernel
+  history below) it is now slightly **faster** than NumPy (~52% faster
+  than its pre-optimization numbers). Remaining known gaps: LayerNorm/
+  RoPE stay scalar by design (parity contracts pin exact accumulation
+  orders), no fused online-softmax attention yet, GEMM panel packing/
+  blocking still open.
 
 ## Ternary PTQ ablation (1500 x 40, 400 test rows)
 
@@ -99,9 +100,9 @@ identical across backends (same quantized checkpoint).
 
 | Variant | numpy predict | acc | torch predict | acc | mojo predict | acc |
 |---|---|---|---|---|---|---|
-| fp | 46.5s | 0.938 | 10.4s | 0.938 | 37.7s | 0.938 |
-| ternary/row | 44.4s | 0.250 | 9.6s | 0.250 | 39.8s | 0.250 |
-| ternary/tensor | 43.9s | 0.250 | 9.6s | 0.250 | 39.1s | 0.250 |
+| fp | 46.5s | 0.938 | 10.4s | 0.938 | 34.0s | 0.938 |
+| ternary/row | 44.4s | 0.250 | 9.6s | 0.250 | 34.1s | 0.250 |
+| ternary/tensor | 43.9s | 0.250 | 9.6s | 0.250 | 34.1s | 0.250 |
 
 - Quantized inference runs at essentially the same speed as fp: the
   ternary scheme dequantizes to fp values before the GEMMs, so matmul
@@ -116,25 +117,25 @@ identical across backends (same quantized checkpoint).
 
 Predict time per call, `n_estimators=8`, classification, 2026-08 (mojo
 column after the kernel work below). Cache build adds a one-time ~16s
-(numpy) / ~4s (torch) / ~12s (mojo) to `fit`.
+(numpy) / ~4s (torch) / ~10s (mojo) to `fit`.
 
 | Config | numpy | torch | mojo |
 |---|---|---|---|
-| bs=8, no cache | 119.4s | 32.6s | 115.2s |
-| bs=32, no cache | 42.3s | 11.0s | 39.3s |
-| bs=128, no cache | 20.9s | 4.8s | 17.7s |
-| bs=8, kv_cache | 4.74s | 4.92s | 3.26s |
-| bs=32, kv_cache | 2.67s | 1.87s | 2.37s |
-| bs=128, kv_cache | 2.19s | 1.08s | 1.96s |
+| bs=8, no cache | 119.4s | 32.6s | 86.8s |
+| bs=32, no cache | 42.3s | 11.0s | 30.7s |
+| bs=128, no cache | 20.9s | 4.8s | 14.9s |
+| bs=8, kv_cache | 4.74s | 4.92s | 3.12s |
+| bs=32, kv_cache | 2.67s | 1.87s | 2.07s |
+| bs=128, kv_cache | 2.19s | 1.08s | 1.69s |
 
 - Without caching, shrinking `batch_size` from 128 to 8 costs **~6–8×**
   more attention work on every backend (the chunking cliff).
 - With the KV cache the batch-size dependence nearly vanishes (test
   chunks attend cached train-side K/V): at `bs=8` the cache is worth
-  **25×** on NumPy, **6.6×** on torch and **35×** on mojo.
-- Cached mojo is now faster than cached numpy at every batch size and
-  within ~2× of torch — the native KV path makes the experimental
-  backend practically usable.
+  **25×** on NumPy, **6.6×** on torch and **28×** on mojo.
+- Cached mojo is faster than cached numpy at every batch size and within
+  ~1.6× of torch — the native KV path makes the experimental backend
+  practically usable.
 
 ## Mojo kernel performance history
 
@@ -159,15 +160,30 @@ Landed (predict on that workload, M1 Max):
 - **gemm_nn dual column blocks** plus a partition-bound fix (workers no
   longer write past their row range when chunk sizes are not multiples
   of four). 25.3s → 25.0s.
+- **Scoped persistent worker pool**: one pool per exported entry-point
+  call; workers park on a condition variable between parallel regions
+  instead of pthread create/join per region. Determinism pinned by a
+  stress suite (`tests/test_tabicl_pool_stress.py`: bit-equality across
+  repeats, odd shapes, tiny batches, repeated model creation).
+  Wall-clock ~neutral on this workload (25.0s → 25.5s) — the parked
+  thread-time in profiles was mostly join-wait, not recoverable spawn
+  cost — but it removes thousands of spawns per predict and provides the
+  worker-scratch infrastructure for the next item.
+- **SSMax row threading**: QASSMax kinds (4/5) partition rows across the
+  pool with per-partition scratch; per-row math unchanged so threaded and
+  serial paths stay bit-identical. 25.5s → 23.1s (-10%).
+
+Cumulative: predict on this workload went **42.3s → 23.1s (-45%)**, and
+the quick-grid estimator sweep flipped from mojo being ~2× slower than
+NumPy to slightly faster (7.46s → 3.60s per call).
 
 Open work, roughly in impact order:
 
-- Persistent thread pool (kernels currently pthread create/join per call,
-  and most thread-time is parked); also thread LayerNorm/RoPE/SSMax over
-  rows once a pool exists.
 - GEMM panel packing/blocking for large problems.
 - Fused online-softmax attention (SDPA-style), removing the materialized
   score matrix and the split/merge transposes.
+- Thread LayerNorm/RoPE over rows (tiny shares; only worth it as part of
+  larger changes).
 - Sanitizer coverage: blocked by the Mojo toolchain — `--sanitize
   address/thread` instrumentation compiles, but neither `mojo build` nor
   the `mojo run` JIT can resolve the sanitizer runtime symbols (the
