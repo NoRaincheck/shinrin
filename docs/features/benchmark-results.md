@@ -31,7 +31,7 @@ uv run python scripts/benchmarks/bench_all.py
 - MLP and TabM use their pure-NumPy reference backends; Mondrian models use the Rust backend.
 - Model configurations: MondrianTree depth 16; MondrianForest 20 trees, depth 16; RandomForest / ExtraTrees 100 trees; quantile forests 50 trees; MLP (128, 64) hidden units, 100 Adam epochs; TabM (256, 256) hidden units, 60 Adam epochs.
 - Scores reflect these fixed budgets, not tuned optima: MLP trains for only 100 epochs and can underperform on unscaled targets (see california-10k).
-- GOSDT runs behind the threshold-guessing binarization pipeline (`depth_budget=4`, 60 s search limit), capped at 6,000 training rows.
+- GOSDT runs behind the threshold-guessing binarization pipeline (`depth_budget=4`, 60 s search limit), capped at 6,000 training rows. (GOSDT is now named SPOT / `SPOTClassifier`; the tables below keep the name used at measurement time.)
 - CORELS runs on quantile one-hot binarized features (`max_card=1`), capped at 6,000 training rows.
 - TabM capped at 12,000 training rows (NumPy reference trainer cost).
 - Not included: SkopeRules (requires optional `pandas`), TabICL (requires torch plus a downloaded checkpoint). See the other benchmark documents for those comparisons.

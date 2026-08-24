@@ -56,6 +56,18 @@ See [CORELS Rule Lists](models/corels.md)
 
 See [SPOT Optimal Trees](models/spot.md)
 
+### SPOTSET Rashomon Sets (formerly treeFARMS)
+
+- `SPOTSETClassifier` — Enumerates the Rashomon set of near-optimal sparse
+  decision trees; access individual trees via `clf[i]`, the whole set via
+  `clf.model_set_`
+- `ModelSetContainer` — Lazy container over the extracted set (via
+  `shinrin._spotset`)
+- `TreeClassifier` — One decoded tree of the set with `predict`/`score`/
+  `leaves`/`maximum_depth` helpers
+
+See [SPOTSET Rashomon Sets](models/spotset.md)
+
 ### Tabular Neural Networks
 
 - `MLPClassifier` — scikit-learn-compatible MLP classifier (NumPy / Mojo backends)

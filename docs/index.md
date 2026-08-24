@@ -12,6 +12,7 @@ Since skope-rules and scikit-garden are no longer actively maintained, this proj
 - **Mondrian Trees & Forests** — Full scikit-learn API compatibility
 - **CORELS Optimal Rule Lists** — Certifiably optimal rule lists (`CorelsClassifier`) with bundled mini-GMP, no system dependency
 - **SPOT Optimal Sparse Trees** (formerly GOSDT) — Globally optimized trees with reference-ensemble guesses (`SPOTClassifier`, `ThresholdGuessBinarizer`)
+- **SPOTSET Rashomon Sets** (formerly treeFARMS) — All near-optimal trees within a configurable bound of the optimum (`SPOTSETClassifier`)
 - **Rule Extraction & ORDT** — `SkopeRules` plus the `OrdtClassifier` variant that routes mined candidates through CORELS' certified selection
 - **Tabular Neural Networks** — scikit-learn-compatible `MLPClassifier`/`MLPRegressor` and `TabMClassifier`/`TabMRegressor` with optional PLE embeddings, ternary weight quantization (BitLinear), and Mojo-accelerated training
 - **TabICL** — Tabular in-context learning foundation model (torch/NumPy/Mojo backends)
