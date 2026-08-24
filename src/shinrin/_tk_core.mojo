@@ -87,16 +87,79 @@ def gelu8(x: SIMD[DType.float32, SIMDW]) -> SIMD[DType.float32, SIMDW]:
 def gemm_nt_rows(m: Int, n: Int, kk: Int, a: Pointer[Float32, MutUntrackedOrigin], b: Pointer[Float32, MutUntrackedOrigin], c: Pointer[Float32, MutUntrackedOrigin], lo: Int, hi: Int):
     # rows [lo, hi) of C (m,n) = A (m,kk) @ B (n,kk)^T -- overwrites those rows.
     # Deterministic per-row: results identical regardless of row partitioning.
+    #
+    # The full-block case processes output elements in 4-row x 2-column
+    # register tiles: eight independent FMA chains instead of four, which
+    # hides multiply-add latency without changing any element's accumulation
+    # order (sequential over kk in SIMDW steps, then the same scalar tail),
+    # so results stay bit-identical to the historical single-column kernel.
     var it = lo
     while it < hi:
-        var j = 0
-        while j < n:
-            var bp = b + j * kk
-            if it + 4 <= hi:
-                var ap0 = a + it * kk
-                var ap1 = a + (it + 1) * kk
-                var ap2 = a + (it + 2) * kk
-                var ap3 = a + (it + 3) * kk
+        if it + 4 <= hi:
+            var ap0 = a + it * kk
+            var ap1 = ap0 + kk
+            var ap2 = ap0 + 2 * kk
+            var ap3 = ap0 + 3 * kk
+            var j = 0
+            while j + 2 <= n:
+                var bp0 = b + j * kk
+                var bp1 = bp0 + kk
+                var acc00 = SIMD[DType.float32, SIMDW](0.0)
+                var acc01 = SIMD[DType.float32, SIMDW](0.0)
+                var acc10 = SIMD[DType.float32, SIMDW](0.0)
+                var acc11 = SIMD[DType.float32, SIMDW](0.0)
+                var acc20 = SIMD[DType.float32, SIMDW](0.0)
+                var acc21 = SIMD[DType.float32, SIMDW](0.0)
+                var acc30 = SIMD[DType.float32, SIMDW](0.0)
+                var acc31 = SIMD[DType.float32, SIMDW](0.0)
+                var t = 0
+                while t + SIMDW <= kk:
+                    var b0 = bp0.unsafe_load[width=SIMDW](t)
+                    var b1 = bp1.unsafe_load[width=SIMDW](t)
+                    var a0 = ap0.unsafe_load[width=SIMDW](t)
+                    acc00 += a0 * b0
+                    acc01 += a0 * b1
+                    var a1 = ap1.unsafe_load[width=SIMDW](t)
+                    acc10 += a1 * b0
+                    acc11 += a1 * b1
+                    var a2 = ap2.unsafe_load[width=SIMDW](t)
+                    acc20 += a2 * b0
+                    acc21 += a2 * b1
+                    var a3 = ap3.unsafe_load[width=SIMDW](t)
+                    acc30 += a3 * b0
+                    acc31 += a3 * b1
+                    t += SIMDW
+                var s00 = acc00.reduce_add()
+                var s01 = acc01.reduce_add()
+                var s10 = acc10.reduce_add()
+                var s11 = acc11.reduce_add()
+                var s20 = acc20.reduce_add()
+                var s21 = acc21.reduce_add()
+                var s30 = acc30.reduce_add()
+                var s31 = acc31.reduce_add()
+                while t < kk:
+                    var b0 = bp0[t]
+                    var b1 = bp1[t]
+                    s00 += ap0[t] * b0
+                    s01 += ap0[t] * b1
+                    s10 += ap1[t] * b0
+                    s11 += ap1[t] * b1
+                    s20 += ap2[t] * b0
+                    s21 += ap2[t] * b1
+                    s30 += ap3[t] * b0
+                    s31 += ap3[t] * b1
+                    t += 1
+                c[it * n + j] = s00
+                c[it * n + j + 1] = s01
+                c[(it + 1) * n + j] = s10
+                c[(it + 1) * n + j + 1] = s11
+                c[(it + 2) * n + j] = s20
+                c[(it + 2) * n + j + 1] = s21
+                c[(it + 3) * n + j] = s30
+                c[(it + 3) * n + j + 1] = s31
+                j += 2
+            while j < n:
+                var bp = b + j * kk
                 var acc0 = SIMD[DType.float32, SIMDW](0.0)
                 var acc1 = SIMD[DType.float32, SIMDW](0.0)
                 var acc2 = SIMD[DType.float32, SIMDW](0.0)
@@ -123,11 +186,15 @@ def gemm_nt_rows(m: Int, n: Int, kk: Int, a: Pointer[Float32, MutUntrackedOrigin
                 c[(it + 1) * n + j] = s1
                 c[(it + 2) * n + j] = s2
                 c[(it + 3) * n + j] = s3
-            else:
-                var r = it
-                while r < hi:
+                j += 1
+        else:
+            var r = it
+            while r < hi:
+                var ap = a + r * kk
+                var j = 0
+                while j < n:
+                    var bp = b + j * kk
                     var acc = SIMD[DType.float32, SIMDW](0.0)
-                    var ap = a + r * kk
                     var t = 0
                     while t + SIMDW <= kk:
                         acc += ap.unsafe_load[width=SIMDW](t) * bp.unsafe_load[width=SIMDW](t)
@@ -137,8 +204,8 @@ def gemm_nt_rows(m: Int, n: Int, kk: Int, a: Pointer[Float32, MutUntrackedOrigin
                         s += ap[t] * bp[t]
                         t += 1
                     c[r * n + j] = s
-                    r += 1
-            j += 1
+                    j += 1
+                r += 1
         it += 4
 
 
