@@ -257,10 +257,11 @@ def _hard_tree_predict(model, X):
     return np.stack(outputs).mean(axis=0)
 
 
-class TestMondrianApproximateFallback:
-    """Size-guarded fallback from the exact graph to plain TreeEnsemble."""
+class TestMondrianExportEncoding:
+    """Export encoding follows the estimator's path_smoothing mode."""
 
-    def test_forest_auto_fallback_and_hard_structure_parity(self):
+    def test_default_constant_export_matches_native_even_huge(self):
+        """Constant-mode forests export plain tree-ensembles that match."""
         from shinrin import MondrianForestRegressor
         from shinrin._mondrian_onnx import (
             MODE_TREE_ENSEMBLE,
@@ -274,30 +275,50 @@ class TestMondrianApproximateFallback:
         X = rng.randn(4000, 20)
         y = X @ rng.randn(20) + rng.randn(4000) * 10
         model = MondrianForestRegressor(n_estimators=20, max_depth=16, random_state=0)
-        model.fit(X.astype(np.float32), y.astype(np.float32))
+        model.fit(X.astype(np.float32), y)
 
-        assert _estimated_exact_bytes(_collect_trees(model)) > (2 << 30), (
-            "expected this configuration to exceed the protobuf limit"
-        )
+        # The smoothing graph would exceed the protobuf limit here, but
+        # constant-mode models never need it.
+        assert _estimated_exact_bytes(_collect_trees(model)) > (2 << 30)
+        assert model.path_smoothing is False
 
+        # No fallback warning: this encoding is exact for the model.
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
             proto = mondrian_to_onnx(model)
-        assert any("falling back" in str(w.message) for w in caught)
+        assert not [w for w in caught if "falling back" in str(w.message)]
 
         props = {p.key: p.value for p in proto.metadata_props}
         assert props[PROP_EXPORT_MODE] == MODE_TREE_ENSEMBLE
 
         got = _ort_predict(proto, X[:500])[0]
-        expected = _hard_tree_predict(model, X[:500]).ravel()
-        # the approximation drops path smoothing but reproduces the hard
-        # structure exactly
-        _assert_close(got, expected, 1e-4)
+        np.testing.assert_allclose(
+            got,
+            model.predict(X[:500].astype(np.float32)),
+            rtol=1e-4,
+            atol=1e-4,
+        )
+        np.testing.assert_allclose(
+            got, _hard_tree_predict(model, X[:500]).ravel(), rtol=1e-4, atol=1e-4
+        )
 
-    def test_small_models_stay_exact(self):
+    def test_approximate_false_requires_smoothing_model(self):
+        from shinrin import MondrianTreeRegressor
+        from shinrin._mondrian_onnx import mondrian_to_onnx
+
+        rng = np.random.RandomState(5)
+        X = rng.randn(200, 4).astype(np.float32)
+        y = X[:, 0]
+
+        tree = MondrianTreeRegressor(max_depth=6, random_state=0).fit(X, y)
+        with pytest.raises(ValueError, match="path_smoothing=False"):
+            mondrian_to_onnx(tree, approximate=False)
+
+    def test_small_models_default_to_tree_ensemble(self):
         from shinrin import MondrianForestRegressor, MondrianTreeRegressor
         from shinrin._mondrian_onnx import (
             MODE_EXACT,
+            MODE_TREE_ENSEMBLE,
             PROP_EXPORT_MODE,
             mondrian_to_onnx,
         )
@@ -306,13 +327,21 @@ class TestMondrianApproximateFallback:
         X = rng.randn(200, 4).astype(np.float32)
         y = X[:, 0]
 
+        # Default (constant) models always get the plain tree-ensemble.
         tree = MondrianTreeRegressor(max_depth=6, random_state=0).fit(X, y)
         props = {p.key: p.value for p in mondrian_to_onnx(tree).metadata_props}
-        assert props[PROP_EXPORT_MODE] == MODE_EXACT
+        assert props[PROP_EXPORT_MODE] == MODE_TREE_ENSEMBLE
 
         forest = MondrianForestRegressor(n_estimators=3, max_depth=5, random_state=0)
         forest.fit(X, y)
         props = {p.key: p.value for p in mondrian_to_onnx(forest).metadata_props}
+        assert props[PROP_EXPORT_MODE] == MODE_TREE_ENSEMBLE
+
+        # Smoothing-mode models still get the exact graph by default.
+        smooth_tree = MondrianTreeRegressor(
+            max_depth=6, random_state=0, path_smoothing=True
+        ).fit(X, y)
+        props = {p.key: p.value for p in mondrian_to_onnx(smooth_tree).metadata_props}
         assert props[PROP_EXPORT_MODE] == MODE_EXACT
 
     def test_forced_approximate_classifier_matches_labels(self):
@@ -350,16 +379,29 @@ def test_generic_forest_packs_single_tree_ensemble_node():
     X = rng.randn(150, 4).astype(np.float32)
     y = X[:, 0]
 
-    # The Mondrian export is a self-contained standard-domain graph: it
-    # reproduces native predict without any ai.onnx.ml operator.
+    # The Mondrian export for a smoothing-mode model is a self-contained
+    # standard-domain graph: it reproduces native predict (path smoothing)
+    # without any ai.onnx.ml operator.
     mondrian_forest = MondrianForestRegressor(
-        n_estimators=4, max_depth=5, random_state=0
+        n_estimators=4, max_depth=5, random_state=0, path_smoothing=True
     )
     mondrian_forest.fit(X, y)
     proto = to_onnx(mondrian_forest, X[:3])
     onnx = pytest.importorskip("onnx")
     onnx.checker.check_model(proto)
     assert not [n for n in proto.graph.node if "TreeEnsemble" in n.op_type]
+
+    # Default constant-mode models export as a plain TreeEnsemble node.
+    default_forest = MondrianForestRegressor(
+        n_estimators=4, max_depth=5, random_state=0
+    )
+    default_forest.fit(X, y)
+    proto = to_onnx(default_forest, X[:3])
+    onnx.checker.check_model(proto)
+    te_nodes = [n for n in proto.graph.node if n.op_type == "TreeEnsembleRegressor"]
+    assert len(te_nodes) == 1
+    got = _ort_predict(proto, X)[0]
+    np.testing.assert_allclose(got, default_forest.predict(X), rtol=1e-4, atol=1e-4)
 
     sklearn_forest = RandomForestRegressor(n_estimators=6, random_state=0).fit(X, y)
     proto = to_onnx(sklearn_forest, X[:3])

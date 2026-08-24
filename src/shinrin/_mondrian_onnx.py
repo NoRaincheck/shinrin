@@ -1,21 +1,30 @@
-"""Exact ONNX export for Mondrian trees and forests.
+"""ONNX export for Mondrian trees and forests.
 
-``Tree.predict`` walks a single root-to-leaf path chosen by hard threshold
-comparisons and accumulates a weighted average over every *visited* node
-(see ``shinrin-native`` ``predict``):
+Two encodings are produced, selected by the estimator's
+``path_smoothing`` prediction mode (see ``mondrian_to_onnx``):
 
-- ``eta_j(x)  = sum_f max(x_f - upper_jf, 0) + max(lower_jf - x_f, 0)``
-  (distance of ``x`` outside node ``j``'s bounding box),
-- ``delta_j   = tau_j - tau_parent(j)``,
-- ``p_js_j(x) = 1 - exp(-delta_j * eta_j(x))``,
-- survival along the path: ``p_nsy *= 1 - p_js_j`` after each internal node,
-- per-node weight: ``w_j = p_nsy_before(j) * p_js_j`` for internal nodes,
-  ``w_leaf = p_nsy_at_leaf`` (no eta factor),
-- routing: ``x_f <= threshold_j`` goes left, else right,
+- ``tree-ensemble`` (default models): a plain ``ai.onnx.ml``
+  tree-ensemble of the hard tree structure. Native constant-mode
+  prediction routes each sample down a single root-to-leaf path by hard
+  threshold comparisons and returns the leaf value, which is exactly
+  what this graph computes.
+- ``exact`` (`path_smoothing=True` models): a standard-domain graph
+  reproducing the weighted-path prediction of ``shinrin-native``
+  ``predict``, where every visited node contributes with a
+  Mondrian-process weight:
 
-and the prediction is ``sum_j w_j * value_j`` over the visited nodes
-(regression uses raw values; classification normalises by node sample
-counts first).
+  - ``eta_j(x)  = sum_f max(x_f - upper_jf, 0) + max(lower_jf - x_f, 0)``
+    (distance of ``x`` outside node ``j``'s bounding box),
+  - ``delta_j   = tau_j - tau_parent(j)``,
+  - ``p_js_j(x) = 1 - exp(-delta_j * eta_j(x))``,
+  - survival along the path: ``p_nsy *= 1 - p_js_j`` after each internal node,
+  - per-node weight: ``w_j = p_nsy_before(j) * p_js_j`` for internal nodes,
+    ``w_leaf = p_nsy_at_leaf`` (no eta factor),
+  - routing: ``x_f <= threshold_j`` goes left, else right,
+
+  and the prediction is ``sum_j w_j * value_j`` over the visited nodes
+  (regression uses raw values; classification normalises by node sample
+  counts first).
 
 Graph layout
 ------------
@@ -214,16 +223,21 @@ def mondrian_to_onnx(
 ):
     """Export a fitted Mondrian tree/forest to ONNX.
 
-    By default an exact standard-domain graph is produced: it reproduces
-    native ``predict``/``predict_proba`` — including the Mondrian-process
-    smoothing along decision paths — to float32 round-off. Because exact
-    graphs embed per-node selection matrices whose size grows with node
-    count squared, very large ensembles automatically fall back to a plain
-    ``ai.onnx.ml`` tree-ensemble export of the *hard tree structure*
-    (leaf means / class distributions, averaged across trees). That
-    fallback is fast and small but omits the path smoothing, so its
-    predictions deviate from native ``predict``; the deviation grows with
-    tree depth and leaf sparsity.
+    The encoding follows the estimator's ``path_smoothing`` prediction
+    mode so that exported predictions match native ``predict`` /
+    ``predict_proba`` exactly:
+
+    - Constant prediction (``path_smoothing=False``, the default): a plain
+      ``ai.onnx.ml`` tree-ensemble of the hard tree structure (leaf means /
+      class distributions averaged across trees). This *is* the native
+      model, so the result is exact, small and fast.
+    - Path smoothing (``path_smoothing=True``): by default an exact
+      standard-domain graph reproducing the Mondrian-process smoothing
+      along decision paths to float32 round-off. Because exact graphs
+      embed per-node selection matrices whose size grows with node count
+      squared, very large ensembles automatically fall back to the plain
+      tree-ensemble encoding; that fallback omits the smoothing, so its
+      predictions then deviate from native ``predict``.
 
     Parameters
     ----------
@@ -240,11 +254,12 @@ def mondrian_to_onnx(
     target_opset : int
         Default-domain opset version (default 15).
     approximate : bool, optional
-        Force the plain tree-ensemble approximation (``True``) or the
-        exact graph (``False``). By default (``None``) the exact graph is
-        used unless its estimated initializer size exceeds
-        ``MONDRIAN_EXACT_MAX_BYTES``, in which case the approximation is
-        used and a :class:`UserWarning` is emitted.
+        Force the plain tree-ensemble encoding (``True``) or the exact
+        smoothing graph (``False``). By default (``None``) the encoding is
+        chosen from the estimator's ``path_smoothing`` mode; smoothing
+        models additionally fall back to the tree-ensemble when the exact
+        graph's estimated initializer size exceeds
+        ``MONDRIAN_EXACT_MAX_BYTES`` (a :class:`UserWarning` is emitted).
 
     Returns
     -------
@@ -260,12 +275,24 @@ def mondrian_to_onnx(
             "onnx is required for ONNX export. Install it with: pip install onnx"
         )
     trees = _collect_trees(estimator)
+    smoothing = bool(getattr(estimator, "path_smoothing", True))
 
     use_approx = approximate
-    if use_approx is None:
+    if not smoothing:
+        # Constant leaf predictions are exactly what a plain tree-ensemble
+        # computes; there is no smoother to reproduce.
+        if approximate is False:
+            raise ValueError(
+                "approximate=False requests the exact Mondrian smoothing "
+                "graph, but this estimator predicts constant leaf values "
+                "(path_smoothing=False). Its plain tree-ensemble export "
+                "already matches native predict() exactly."
+            )
+        use_approx = True
+    elif use_approx is None:
         use_approx = _estimated_exact_bytes(trees) > MONDRIAN_EXACT_MAX_BYTES
     if use_approx:
-        if not approximate:
+        if smoothing and not approximate:
             warnings.warn(
                 "Exact Mondrian graph estimated at "
                 f"{_estimated_exact_bytes(trees):,} initializer bytes "

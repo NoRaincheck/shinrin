@@ -81,13 +81,15 @@ class BaseDecisionTree(ABC, BaseEstimator):
                  max_depth,
                  min_samples_split,
                  random_state,
-                 class_weight=None):
+                 class_weight=None,
+                 path_smoothing=False):
         self.criterion = criterion
         self.splitter = splitter
         self.max_depth = max_depth
         self.min_samples_split = min_samples_split
         self.random_state = random_state
         self.class_weight = class_weight
+        self.path_smoothing = path_smoothing
 
     def fit(self, X, y, sample_weight=None, check_input=True,
             X_idx_sorted=None):
@@ -232,8 +234,14 @@ class BaseDecisionTree(ABC, BaseEstimator):
 
         return X
 
+    def _resolve_path_smoothing(self, path_smoothing):
+        """Resolve the effective prediction mode for a predict-time call."""
+        if path_smoothing is None:
+            return bool(getattr(self, "path_smoothing", False))
+        return bool(path_smoothing)
+
     def predict(self, X, check_input=True, return_std=False,
-                return_anomaly=False, return_shap=False):
+                return_anomaly=False, return_shap=False, path_smoothing=None):
         """Predict class or regression value for X.
 
         For a classification model, the predicted class for each sample in X is
@@ -265,6 +273,11 @@ class BaseDecisionTree(ABC, BaseEstimator):
             The SHAP values explain the contribution of each feature to the
             prediction relative to the base value (root prediction).
 
+        path_smoothing : boolean, optional
+            Override the estimator's ``path_smoothing`` setting for this
+            call. ``None`` (default) uses the value chosen at construction
+            time. See the class docstring for what the mode means.
+
         Returns
         -------
         y : array of shape = [n_samples] or [n_samples, n_outputs]
@@ -278,6 +291,7 @@ class BaseDecisionTree(ABC, BaseEstimator):
         """
         check_is_fitted(self, 'tree_')
         X = self._validate_X_predict(X, check_input)
+        smoothing = self._resolve_path_smoothing(path_smoothing)
 
         # Classification
         if isinstance(self, ClassifierMixin):
@@ -286,11 +300,13 @@ class BaseDecisionTree(ABC, BaseEstimator):
                     "return_std is not supported for classifiers. "
                     "Use MondrianTreeRegressor for standard deviation estimates."
                 )
-            prediction = self.classes_[self.predict_proba(X).argmax(axis=1)]
+            prediction = self.classes_[self.predict_proba(
+                X, path_smoothing=smoothing).argmax(axis=1)]
         # Regression
         else:
             mean_and_std = self.tree_.predict(
-                X, return_std=return_std, is_regression=True)
+                X, return_std=return_std, is_regression=True,
+                path_smoothing=smoothing)
             prediction = mean_and_std[0]
 
         # Build return tuple consistently
@@ -300,7 +316,7 @@ class BaseDecisionTree(ABC, BaseEstimator):
         if return_anomaly:
             parts.append(self._compute_anomaly(X))
         if return_shap:
-            parts.append(self._compute_shap(X))
+            parts.append(self._compute_shap(X, path_smoothing=smoothing))
 
         # Filter out None values
         parts = [p for p in parts if p is not None]
@@ -320,12 +336,11 @@ class BaseDecisionTree(ABC, BaseEstimator):
         X = self._validate_X_predict(X, check_input=True)
         return self.tree_.isolation_path_length(X)
 
-    def _compute_shap(self, X):
-        """Compute TreeSHAP values for each sample using path-based decomposition.
+    def _compute_shap(self, X, check_input=True, path_smoothing=None):
+        """Compute TreeSHAP values for each sample.
 
-        For Mondrian trees, predictions use weighted averaging across all nodes
-        on the path. This method decomposes the prediction into feature
-        contributions such that:
+        Decomposes this tree's prediction (under the effective
+        ``path_smoothing`` mode) into feature contributions such that:
             prediction = base_value + sum(shap_values)
 
         For regression, returns shape (n_samples, n_features).
@@ -338,6 +353,11 @@ class BaseDecisionTree(ABC, BaseEstimator):
         X : array-like, shape = (n_samples, n_features)
             Input samples.
 
+        path_smoothing : boolean, optional
+            Override the estimator's ``path_smoothing`` setting for this
+            call. ``None`` (default) uses the value chosen at construction
+            time.
+
         Returns
         -------
         shap_values : ndarray
@@ -345,10 +365,16 @@ class BaseDecisionTree(ABC, BaseEstimator):
             or (n_samples, n_features, n_classes) for classification.
         """
         check_is_fitted(self, 'tree_')
-        X = self._validate_X_predict(X, check_input=True)
+        X = self._validate_X_predict(X, check_input)
         n_samples = X.shape[0]
         n_features = X.shape[1]
         is_regression = not isinstance(self, ClassifierMixin)
+        smoothing = self._resolve_path_smoothing(path_smoothing)
+
+        if not smoothing:
+            return self._hard_path_shap(
+                X, is_regression=is_regression,
+                n_samples=n_samples, n_features=n_features)
 
         # Get weighted decision path: (n_samples, n_nodes) with weights
         weighted_path = self.weighted_decision_path(X)
@@ -450,7 +476,50 @@ class BaseDecisionTree(ABC, BaseEstimator):
 
         return shap
 
-    def pred_contribs(self, X, check_input=True):
+    def _hard_path_shap(self, X, is_regression, n_samples, n_features):
+        """TreeSHAP decomposition of the constant (leaf) prediction.
+
+        Each split along the routed root-to-leaf path is attributed with
+        the change in predicted value it introduces, so that
+        ``prediction = root value + sum(shap_values)`` holds exactly.
+        """
+        n_classes = self.n_classes_
+        tree = self.tree_
+
+        def _val(nid):
+            if is_regression:
+                return tree.mean[nid]
+            total = tree.n_node_samples[nid]
+            if total <= 0:
+                return np.zeros(n_classes)
+            return tree.value[nid, 0, :n_classes] / total
+
+        paths = self.decision_path(X, check_input=False)
+        if hasattr(paths, 'toarray'):
+            paths = paths.toarray()
+
+        shap = np.zeros(
+            (n_samples, n_features, n_classes)
+            if not is_regression else (n_samples, n_features))
+
+        for i in range(n_samples):
+            path_node_indices = np.where(paths[i] > 0)[0]
+            # Walk consecutive pairs; each internal node contributes the
+            # value change between itself and the child it routes to.
+            for parent, child in zip(path_node_indices[:-1],
+                                     path_node_indices[1:]):
+                feat = tree.feature[parent]
+                if feat < 0 or feat >= n_features:
+                    continue
+                contrib = _val(child) - _val(parent)
+                if is_regression:
+                    shap[i, feat] += contrib
+                else:
+                    shap[i, feat, :] += contrib
+
+        return shap
+
+    def pred_contribs(self, X, check_input=True, path_smoothing=None):
         """Return TreeSHAP values including the base value.
 
         This method returns SHAP values such that the sum of SHAP values
@@ -465,6 +534,11 @@ class BaseDecisionTree(ABC, BaseEstimator):
         check_input : boolean, (default=True)
             Allow to bypass several input checking.
 
+        path_smoothing : boolean, optional
+            Override the estimator's ``path_smoothing`` setting for this
+            call. ``None`` (default) uses the value chosen at construction
+            time.
+
         Returns
         -------
         shap_values : array
@@ -474,7 +548,7 @@ class BaseDecisionTree(ABC, BaseEstimator):
         """
         check_is_fitted(self, 'tree_')
         X = self._validate_X_predict(X, check_input)
-        shap = self._compute_shap(X)
+        shap = self._compute_shap(X, path_smoothing=path_smoothing)
 
         if isinstance(self, ClassifierMixin):
             # shap is (n_samples, n_features, n_classes)
@@ -563,14 +637,25 @@ class BaseMondrianTree(BaseDecisionTree):
           inverse of the size of the bounding-box.
 
     At prediction time:
-        - Every node in the path from the root to the leaf is given a weight
-          while making predictions.
-        - At each node, the probability of an unseen sample splitting from that
-          node is calculated. The farther the sample is away from the bounding
-          box, the more probable that it will split away.
-        - For every node, the probability that an unseen sample has not split
-          before reaching that node and the probability that it will split away
-          at that particular node are multiplied to give a weight.
+        - **Constant (default).** Each sample is routed down a single
+          root-to-leaf path by hard threshold comparisons and receives the
+          leaf's stored value (leaf mean for regression, normalized class
+          counts for classification). This matches the piecewise-constant
+          behaviour of scikit-learn's tree and forest predictors, and is
+          exactly what the plain ONNX ``ai.onnx.ml`` tree-ensemble export
+          computes. It is an *opinionated default*: it deliberately deviates
+          from the "pure" Mondrian-process prediction described below.
+        - **Path smoothing** (`path_smoothing=True`). Every node on the path
+          from root to leaf is given a weight while making predictions.
+          At each node, the probability of an unseen sample splitting from
+          that node is calculated. The farther the sample is away from the
+          bounding box, the more probable that it will split away.
+          For every node, the probability that an unseen sample has not
+          split before reaching that node and the probability that it will
+          split away at that particular node are multiplied to give a weight.
+          This is the predictor of the original Mondrian-forest process;
+          enable it when you want the statistically pure estimator or its
+          uncertainty estimates.
 
     Parameters
     ----------
@@ -592,6 +677,15 @@ class BaseMondrianTree(BaseDecisionTree):
         If RandomState instance, random_state is the random number generator;
         If None, the random number generator is the RandomState instance used
         by `np.random`.
+
+    path_smoothing : bool, optional (default=False)
+        Prediction mode. With the default ``False``, predictions are
+        piecewise-constant leaf values (scikit-learn-consistent; see above).
+        With ``True``, predictions use the pure Mondrian-process weighting
+        over every node on the decision path. This only affects
+        ``predict`` / ``predict_proba``; SHAP contributions and anomaly
+        scores always use the Mondrian node weights regardless of this
+        setting.
     """
     def partial_fit(self, X, y, classes=None):
         """
@@ -704,13 +798,15 @@ class MondrianTreeRegressor(BaseMondrianTree, RegressorMixin):
     def __init__(self,
                  max_depth=None,
                  min_samples_split=2,
-                 random_state=None):
+                 random_state=None,
+                 path_smoothing=False):
         super(MondrianTreeRegressor, self).__init__(
             criterion="mse",
             splitter="mondrian",
             max_depth=max_depth,
             min_samples_split=min_samples_split,
-            random_state=random_state)
+            random_state=random_state,
+            path_smoothing=path_smoothing)
 
     @classmethod
     def from_model(cls, model, X, y):
@@ -794,13 +890,15 @@ class MondrianTreeClassifier(BaseMondrianTree, ClassifierMixin):
     def __init__(self,
                  max_depth=None,
                  min_samples_split=2,
-                 random_state=None):
+                 random_state=None,
+                 path_smoothing=False):
         super(MondrianTreeClassifier, self).__init__(
             criterion="classification",
             splitter="mondrian",
             max_depth=max_depth,
             min_samples_split=min_samples_split,
-            random_state=random_state)
+            random_state=random_state,
+            path_smoothing=path_smoothing)
 
     @classmethod
     def from_model(cls, model, X, y):
@@ -861,7 +959,7 @@ class MondrianTreeClassifier(BaseMondrianTree, ClassifierMixin):
 
         return from_model(model, X, y, cls)
 
-    def predict_proba(self, X, check_input=True):
+    def predict_proba(self, X, check_input=True, path_smoothing=None):
         """
         Predicts the probability of each class label given X.
 
@@ -875,6 +973,11 @@ class MondrianTreeClassifier(BaseMondrianTree, ClassifierMixin):
             Allow to bypass several input checking.
             Don't use this parameter unless you know what you do.
 
+        path_smoothing : boolean, optional
+            Override the estimator's ``path_smoothing`` setting for this
+            call. ``None`` (default) uses the value chosen at construction
+            time. See the class docstring for what the mode means.
+
         Returns
         -------
         y_prob : array of shape = [n_samples, n_classes]
@@ -883,7 +986,9 @@ class MondrianTreeClassifier(BaseMondrianTree, ClassifierMixin):
         check_is_fitted(self, 'tree_')
         X = self._validate_X_predict(X, check_input)
 
-        return self.tree_.predict(X, return_std=False, is_regression=False)[0]
+        return self.tree_.predict(
+            X, return_std=False, is_regression=False,
+            path_smoothing=self._resolve_path_smoothing(path_smoothing))[0]
 
     def partial_fit(self, X, y, classes=None):
         """

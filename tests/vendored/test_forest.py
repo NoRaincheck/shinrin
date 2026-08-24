@@ -228,7 +228,9 @@ def check_mean_std_forest_regressor(est):
 
 
 def test_mean_std_forest_regressor():
-    mfr = MondrianForestRegressor(random_state=0)
+    # Far-away points converging to the empirical mean/variance is a
+    # property of the pure Mondrian-process (smoothed) predictor.
+    mfr = MondrianForestRegressor(random_state=0, path_smoothing=True)
     mfr.fit(X, y)
     check_mean_std_forest_regressor(mfr)
     mfr.partial_fit(X, y)
@@ -261,7 +263,9 @@ def check_proba_classif_convergence(est, X_train, y_train):
 def test_proba_classif_convergence():
     X_train, X_test, y_train, y_test = train_test_split(
         X, y, train_size=0.6, test_size=0.4)
-    mfc = MondrianForestClassifier(random_state=0)
+    # Far-away points converging to the empirical label distribution is a
+    # property of the pure Mondrian-process (smoothed) predictor.
+    mfc = MondrianForestClassifier(random_state=0, path_smoothing=True)
     mfc.fit(X_train, y_train)
     check_proba_classif_convergence(mfc, X_train, y_train)
     mfc.partial_fit(X_train, y_train)

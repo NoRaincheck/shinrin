@@ -1485,13 +1485,14 @@ impl PyTree {
         Ok(PyArray1::from_vec(py, out))
     }
 
-    #[pyo3(signature = (x, return_std=false, is_regression=true))]
+    #[pyo3(signature = (x, return_std=false, is_regression=true, path_smoothing=false))]
     fn predict<'py>(
         &self,
         py: Python<'py>,
         x: Bound<'py, PyArray2<f32>>,
         return_std: bool,
         is_regression: bool,
+        path_smoothing: bool,
     ) -> PyResult<PyObject> {
         let inner = self.inner.borrow();
         let shape = x.shape();
@@ -1527,17 +1528,24 @@ impl PyTree {
                 parent_tau = node.tau as f64;
 
                 let mut eta = 0.0f64;
-                for f in 0..n_features {
-                    let x_val = view[[i, f]] as f64;
-                    eta += (x_val - node.upper_bounds[f] as f64).max(0.0)
-                        + (node.lower_bounds[f] as f64 - x_val).max(0.0);
+                if path_smoothing {
+                    for f in 0..n_features {
+                        let x_val = view[[i, f]] as f64;
+                        eta += (x_val - node.upper_bounds[f] as f64).max(0.0)
+                            + (node.lower_bounds[f] as f64 - x_val).max(0.0);
+                    }
                 }
 
+                // With path smoothing every visited node contributes
+                // w_j = p_nsy * p_js; in constant mode only the leaf
+                // contributes (p_nsy stays 1.0 because p_js is 0).
                 let (w_j, p_js) = if node.left_child == TREE_LEAF {
                     (p_nsy, 0.0f64)
-                } else {
+                } else if path_smoothing {
                     let p_js = 1.0 - (-delta * eta).exp();
                     (p_nsy * p_js, p_js)
+                } else {
+                    (0.0f64, 0.0f64)
                 };
 
                 if is_regression {

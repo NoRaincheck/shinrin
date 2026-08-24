@@ -1,4 +1,5 @@
 import numpy as np
+import threading
 from scipy import sparse
 from shinrin._compat.sklearn_base import ClassifierMixin
 from shinrin._compat.sklearn_exceptions import DataConversionWarning
@@ -6,6 +7,7 @@ from shinrin._compat.sklearn_exceptions import NotFittedError
 from shinrin._compat.sklearn_preprocessing import LabelEncoder
 from shinrin._compat.sklearn_utils import check_random_state
 from shinrin._compat.sklearn_utils_validation import check_array
+from shinrin._compat.sklearn_utils_validation import check_is_fitted
 from shinrin._compat.sklearn_utils_validation import check_X_y
 from joblib import delayed, Parallel
 
@@ -33,6 +35,9 @@ from ..tree import MondrianTreeRegressor
 
 from ...forest import ForestClassifier
 from ...forest import ForestRegressor
+from ...forest import _accumulate_prediction
+from ...forest import _joblib_parallel_args
+from ...forest import _partition_estimators
 
 def _single_tree_pfit(tree, X, y, classes=None):
     if classes is not None:
@@ -42,16 +47,21 @@ def _single_tree_pfit(tree, X, y, classes=None):
     return tree
 
 class BaseMondrian(object):
-    def pred_contribs(self, X):
+    def pred_contribs(self, X, path_smoothing=None):
         """Return TreeSHAP values including the base value.
 
         This method returns SHAP values averaged across all trees such that
-        the sum of SHAP values plus the base value equals the model prediction.
+        the sum of SHAP values plus the base value equals the model
+        prediction under the effective ``path_smoothing`` mode.
 
         Parameters
         ----------
         X : array-like, shape = (n_samples, n_features)
             The input samples.
+
+        path_smoothing : boolean, optional
+            Override the forest's ``path_smoothing`` setting for this call.
+            ``None`` (default) uses the value chosen at construction time.
 
         Returns
         -------
@@ -61,6 +71,7 @@ class BaseMondrian(object):
             For classification with K classes, shape is
             (n_samples, n_features + 1, K).
         """
+        smoothing = self._resolve_path_smoothing(path_smoothing)
         X = self._validate_X_predict(X)
         n_samples = X.shape[0]
         n_features = self.n_features_
@@ -70,7 +81,7 @@ class BaseMondrian(object):
         is_classification = None
 
         for est in self.estimators_:
-            tree_contribs = est.pred_contribs(X)
+            tree_contribs = est.pred_contribs(X, path_smoothing=smoothing)
             # tree_contribs shape: (n_samples, n_features + 1) for reg
             # or (n_samples, n_features + 1, K) for clf
             if isinstance(est, ClassifierMixin):
@@ -326,6 +337,17 @@ class MondrianForestRegressor(ForestRegressor, BaseMondrian):
         If RandomState instance, random_state is the random number generator;
         If None, the random number generator is the RandomState instance used
         by `np.random`.
+
+    path_smoothing : bool, optional (default=False)
+        Prediction mode for every tree in the forest. With the default
+        ``False``, predictions are piecewise-constant leaf values averaged
+        across trees (scikit-learn-consistent, and exactly what the plain
+        ONNX ``ai.onnx.ml`` tree-ensemble export computes). This is an
+        *opinionated default* that deviates from the "pure" Mondrian-process
+        prediction; with ``True``, each tree weights every node on its
+        decision path (see ``MondrianTreeRegressor``). SHAP contributions
+        and anomaly scores always use the Mondrian node weights regardless
+        of this setting.
     """
     def __init__(self,
                  n_estimators=10,
@@ -334,12 +356,13 @@ class MondrianForestRegressor(ForestRegressor, BaseMondrian):
                  bootstrap=False,
                  n_jobs=1,
                  random_state=None,
-                 verbose=0):
+                 verbose=0,
+                 path_smoothing=False):
         super(MondrianForestRegressor, self).__init__(
             base_estimator=MondrianTreeRegressor(),
             n_estimators=n_estimators,
             estimator_params=("max_depth", "min_samples_split",
-                              "random_state"),
+                              "random_state", "path_smoothing"),
             bootstrap=bootstrap,
             n_jobs=n_jobs,
             random_state=random_state,
@@ -347,6 +370,13 @@ class MondrianForestRegressor(ForestRegressor, BaseMondrian):
 
         self.max_depth = max_depth
         self.min_samples_split = min_samples_split
+        self.path_smoothing = path_smoothing
+
+    def _resolve_path_smoothing(self, path_smoothing):
+        """Resolve the effective prediction mode for a predict-time call."""
+        if path_smoothing is None:
+            return bool(getattr(self, "path_smoothing", False))
+        return bool(path_smoothing)
 
     @classmethod
     def from_model(cls, model, X, y):
@@ -437,7 +467,7 @@ class MondrianForestRegressor(ForestRegressor, BaseMondrian):
         return super(MondrianForestRegressor, self).fit(X, y)
 
     def predict(self, X, return_std=False, return_anomaly=False,
-                return_shap=False):
+                return_shap=False, path_smoothing=None):
         """
         Returns the predicted mean and std.
 
@@ -483,10 +513,15 @@ class MondrianForestRegressor(ForestRegressor, BaseMondrian):
         shap_values : array-like, shape = (n_samples, n_features), optional
             TreeSHAP values averaged across all trees. Returned if
             ``return_shap=True``.
+
+        path_smoothing : boolean, optional
+            Override the forest's ``path_smoothing`` setting for this call.
+            ``None`` (default) uses the value chosen at construction time.
         """
         X = check_array(X)
         if not hasattr(self, "estimators_"):
             raise NotFittedError("The model has to be fit before prediction.")
+        smoothing = self._resolve_path_smoothing(path_smoothing)
         ensemble_mean = np.zeros(X.shape[0])
         exp_y_sq = np.zeros_like(ensemble_mean)
         ensemble_anomaly = np.zeros(X.shape[0])
@@ -495,13 +530,16 @@ class MondrianForestRegressor(ForestRegressor, BaseMondrian):
         for est in self.estimators_:
             # Compute anomaly and shap from tree directly
             tree_anomaly = est._compute_anomaly(X) if return_anomaly else None
-            tree_shap = est._compute_shap(X) if return_shap else None
+            tree_shap = (est._compute_shap(X, path_smoothing=smoothing)
+                         if return_shap else None)
 
             if return_std:
-                mean, std = est.predict(X, return_std=True)
+                mean, std = est.predict(X, return_std=True,
+                                        path_smoothing=smoothing)
                 exp_y_sq += (std**2 + mean**2)
             else:
-                mean = est.predict(X, return_std=False)
+                mean = est.predict(X, return_std=False,
+                                   path_smoothing=smoothing)
             ensemble_mean += mean
 
             if return_anomaly:
@@ -603,6 +641,14 @@ class MondrianForestClassifier(ForestClassifier, BaseMondrian):
         If RandomState instance, random_state is the random number generator;
         If None, the random number generator is the RandomState instance used
         by `np.random`.
+
+    path_smoothing : bool, optional (default=False)
+        Prediction mode for every tree in the forest. With the default
+        ``False``, class probabilities are the per-leaf class distributions
+        averaged across trees (scikit-learn-consistent). This is an
+        *opinionated default* that deviates from the "pure" Mondrian-process
+        prediction; with ``True``, each tree weights every node on its
+        decision path (see ``MondrianTreeClassifier``).
     """
     def __init__(self,
                  n_estimators=10,
@@ -611,12 +657,13 @@ class MondrianForestClassifier(ForestClassifier, BaseMondrian):
                  bootstrap=False,
                  n_jobs=1,
                  random_state=None,
-                 verbose=0):
+                 verbose=0,
+                 path_smoothing=False):
         super(MondrianForestClassifier, self).__init__(
             base_estimator=MondrianTreeClassifier(),
             n_estimators=n_estimators,
             estimator_params=("max_depth", "min_samples_split",
-                              "random_state"),
+                              "random_state", "path_smoothing"),
             bootstrap=bootstrap,
             n_jobs=n_jobs,
             random_state=random_state,
@@ -624,6 +671,13 @@ class MondrianForestClassifier(ForestClassifier, BaseMondrian):
 
         self.max_depth = max_depth
         self.min_samples_split = min_samples_split
+        self.path_smoothing = path_smoothing
+
+    def _resolve_path_smoothing(self, path_smoothing):
+        """Resolve the effective prediction mode for a predict-time call."""
+        if path_smoothing is None:
+            return bool(getattr(self, "path_smoothing", False))
+        return bool(path_smoothing)
 
     @classmethod
     def from_model(cls, model, X, y):
@@ -714,7 +768,7 @@ class MondrianForestClassifier(ForestClassifier, BaseMondrian):
         return super(MondrianForestClassifier, self).fit(X, y)
 
     def predict(self, X, return_anomaly=False, return_shap=False,
-                check_input=True):
+                check_input=True, path_smoothing=None):
         """Predict class for X.
 
         The predicted class of an input sample is a vote by the trees in
@@ -735,6 +789,10 @@ class MondrianForestClassifier(ForestClassifier, BaseMondrian):
         check_input : boolean, default (True)
             Allow to bypass several input checking.
 
+        path_smoothing : boolean, optional
+            Override the forest's ``path_smoothing`` setting for this call.
+            ``None`` (default) uses the value chosen at construction time.
+
         Returns
         -------
         y : array-like, shape = (n_samples,)
@@ -748,7 +806,7 @@ class MondrianForestClassifier(ForestClassifier, BaseMondrian):
             TreeSHAP values averaged across all trees. Returned if
             ``return_shap=True``.
         """
-        proba = self.predict_proba(X)
+        proba = self.predict_proba(X, path_smoothing=path_smoothing)
         predictions = self.classes_.take(np.argmax(proba, axis=1), axis=0)
 
         results = [predictions]
@@ -760,7 +818,9 @@ class MondrianForestClassifier(ForestClassifier, BaseMondrian):
             n_classes = self.n_classes_
             ensemble_shap = np.zeros((X.shape[0], self.n_features_, n_classes))
             for est in self.estimators_:
-                ensemble_shap += est._compute_shap(X)
+                ensemble_shap += est._compute_shap(
+                    X, path_smoothing=self._resolve_path_smoothing(
+                        path_smoothing))
             ensemble_shap /= len(self.estimators_)
             results.append(ensemble_shap)
 
@@ -793,3 +853,55 @@ class MondrianForestClassifier(ForestClassifier, BaseMondrian):
         """
         return super(MondrianForestClassifier, self).partial_fit(
             X, y, classes=classes)
+
+    def predict_proba(self, X, path_smoothing=None):
+        """Predict class probabilities for X.
+
+        Probabilities are the mean across all trees.
+
+        Parameters
+        ----------
+        X : array-like of shape = (n_samples, n_features)
+            The input samples.
+
+        path_smoothing : boolean, optional
+            Override the forest's ``path_smoothing`` setting for this call.
+            ``None`` (default) uses the value chosen at construction time.
+
+        Returns
+        -------
+        p : array of shape = (n_samples, n_classes)
+            The class probabilities of the input samples.
+        """
+        smoothing = self._resolve_path_smoothing(path_smoothing)
+
+        check_is_fitted(self)
+        # Check data
+        X = self._validate_X_predict(X)
+
+        # Assign chunk of trees to jobs
+        n_jobs, _, _ = _partition_estimators(self.n_estimators, self.n_jobs)
+
+        # If first_ is True, the forest was imported from sklearn/ONNX
+        # and trees are unsendable, so disable parallelism
+        if getattr(self, 'first_', False):
+            n_jobs = 1
+
+        # avoid storing the output of every estimator by summing them here
+        all_proba = [np.zeros((X.shape[0], j), dtype=np.float64)
+                     for j in np.atleast_1d(self.n_classes_)]
+        lock = threading.Lock()
+        Parallel(n_jobs=n_jobs, verbose=self.verbose,
+                 **_joblib_parallel_args(require="sharedmem"))(
+            delayed(_accumulate_prediction)(
+                lambda x, check_input=False, est=est: est.predict_proba(
+                    x, check_input=check_input, path_smoothing=smoothing),
+                X, all_proba, lock)
+            for est in self.estimators_)
+
+        for proba in all_proba:
+            proba /= len(self.estimators_)
+
+        if len(all_proba) == 1:
+            return all_proba[0]
+        return all_proba

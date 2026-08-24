@@ -27,6 +27,16 @@ uv run python scripts/benchmarks/bench_onnx.py
 | onnxruntime | 1.29.0 |
 | Mode | full |
 
+!!! warning "Predates the constant-default prediction change (#31)"
+    The measured tables below were produced while Mondrian
+    trees/forests still used pure path-smoothed predictions by default.
+    Since the constant-default change, Mondrian models predict
+    piecewise-constant leaf values (`path_smoothing=False`), always export
+    as plain `ai.onnx.ml` tree-ensembles, and **all six previously failing
+    MondrianForest cells pass parity**; smoothing models still get the
+    exact standard-domain graph (with the size-guarded fallback). Rerun
+    `bench_onnx.py` to refresh the numbers.
+
 ## Methodology
 
 - Models: MondrianTree (depth 16), MondrianForest (20 trees, depth 16),
@@ -47,11 +57,14 @@ uv run python scripts/benchmarks/bench_onnx.py
 - The exact Mondrian export reproduces native predict/predict_proba
   (including Mondrian-process path smoothing) to float32 round-off;
   generic sklearn-style ensembles round thresholds/values to float32.
+  (At measurement time path smoothing was the default prediction mode.)
 - At this dataset scale the exact MondrianForest graph would exceed
   ONNX's 2 GB protobuf limit (selection matrices grow with nodes^2),
-  so forests automatically fall back to a plain tree-ensemble export;
-  their tolerance rows measure that documented approximation, while
-  MondrianTree stays exact.
+  so forests automatically fell back to a plain tree-ensemble export;
+  their tolerance rows below measure that documented approximation,
+  while MondrianTree stayed exact. Under the constant-default
+  prediction change (#31) the plain tree-ensemble *is* the native model,
+  so this mismatch no longer occurs.
 - Speed reports the mean wall-clock per full test-set call after 3 warmup
   calls (timed until >= 0.4 s total or 100 calls). NumPy/BLAS and
   onnxruntime are pinned to one thread on both sides.
@@ -82,7 +95,7 @@ Tolerance and speed against `predictions`.
 
 *Check*: max abs err <= 1e-3 and label agreement >= 99.5%.
 
-*Export mode*: Mondrian graphs are either `exact` (reproduces native predict including path smoothing) or `tree-ensemble` (hard tree structure averaged across trees; the size-guarded fallback used when the exact graph would exceed the protobuf limit). Everything else reports `generic`.
+*Export mode*: Mondrian graphs are either `exact` (reproduces native predict including path smoothing) or `tree-ensemble` (hard tree structure averaged across trees; at measurement time the size-guarded fallback used when the exact graph would exceed the protobuf limit — under #31 it is now the default encoding for constant-prediction models). Everything else reports `generic`.
 
 ### Inference speed
 
@@ -140,7 +153,7 @@ Tolerance and speed against `probabilities + labels`.
 
 *Check*: max abs err <= 1e-3 and label agreement >= 99.5%.
 
-*Export mode*: Mondrian graphs are either `exact` (reproduces native predict including path smoothing) or `tree-ensemble` (hard tree structure averaged across trees; the size-guarded fallback used when the exact graph would exceed the protobuf limit). Everything else reports `generic`.
+*Export mode*: Mondrian graphs are either `exact` (reproduces native predict including path smoothing) or `tree-ensemble` (hard tree structure averaged across trees; at measurement time the size-guarded fallback used when the exact graph would exceed the protobuf limit — under #31 it is now the default encoding for constant-prediction models). Everything else reports `generic`.
 
 ### Inference speed
 
@@ -174,6 +187,12 @@ Tolerance and speed against `probabilities + labels`.
 *Speedup*: native_time / ort_time (>1 means onnxruntime is faster).
 
 ## Takeaways
+
+!!! warning "Superseded by #31"
+    The takeaways below describe the pre-#31 behaviour. Since the
+    constant-default change, the six MondrianForest FAIL cells pass
+    (their export is exactly the native model) and Mondrian exports are
+    plain tree-ensembles unless `path_smoothing=True`.
 
 - 28/38 cells meet the tolerance check.
 - All 6 failing cells are MondrianForest exports in `tree-ensemble` mode: above a size guard the exact graph (which reproduces native path smoothing but grows with nodes squared) would exceed ONNX's 2 GB proto limit, so the export falls back to the hard tree structure without smoothing. MondrianTree stays exact and passes.

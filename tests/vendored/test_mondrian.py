@@ -3,6 +3,7 @@ At fit time, the mondrian splitter works independent of labels.
 So a lot of things can be factored between the MondrianTreeRegressor and
 MondrianTreeClassifier
 """
+
 import pickle
 import numpy as np
 from sklearn.base import clone
@@ -24,8 +25,10 @@ from numpy.testing import assert_equal
 from shinrin.mondrian import MondrianTreeClassifier
 from shinrin.mondrian import MondrianTreeRegressor
 
-estimators = [MondrianTreeRegressor(random_state=0),
-              MondrianTreeClassifier(random_state=0)]
+estimators = [
+    MondrianTreeRegressor(random_state=0),
+    MondrianTreeClassifier(random_state=0),
+]
 
 
 def test_tree_predict():
@@ -37,84 +40,94 @@ def test_tree_predict():
     # and the threshold selected at every split is independent of the
     # label.
     for est_true in estimators:
-        est = clone(est_true)
-        est.set_params(random_state=0, max_depth=1)
-        est.fit(X, y)
+        for smoothing in (False, True):
+            est = clone(est_true)
+            est.set_params(random_state=0, max_depth=1, path_smoothing=smoothing)
+            est.fit(X, y)
+            _check_tree_predict_modes(est, T)
 
-        # mtr_tree = est.tree_
-        cand_feature = est.tree_.feature[0]
-        cand_thresh = est.tree_.threshold[0]
-        assert_almost_equal(cand_thresh, -0.38669141)
-        assert_almost_equal(cand_feature, 0.0)
 
-        # Close to (1.0 / np.sum(np.max(X, axis=0) - np.min(X, axis=0)))
-        assert_almost_equal(est.tree_.tau[0], 0.07112633)
+def _check_tree_predict_modes(est, T):
+    # mtr_tree = est.tree_
+    cand_feature = est.tree_.feature[0]
+    cand_thresh = est.tree_.threshold[0]
+    assert_almost_equal(cand_thresh, -0.38669141)
+    assert_almost_equal(cand_feature, 0.0)
 
-        # For [-1, -1]:
-        # P_not_separated = 1.0
-        # Root:
-        # eta_root = 0.0 (inside the bounding boc of the root)
-        # P_root = 1 - exp(0.0) = 0.0
-        # weight_root = P_root
-        # mean_root = 0.0
-        # Leaf:
-        # P_not_separated = 1.0 * (1 - 0.0) = 1.0
-        # weight_leaf = P_not_separated = 1.0
-        # mean_leaf = -1.0
+    # Close to (1.0 / np.sum(np.max(X, axis=0) - np.min(X, axis=0)))
+    assert_almost_equal(est.tree_.tau[0], 0.07112633)
 
-        # For regresssion:
-        # prediction = weight_leaf * P_leaf = -1.0
+    # For [-1, -1]:
+    # P_not_separated = 1.0
+    # Root:
+    # eta_root = 0.0 (inside the bounding boc of the root)
+    # P_root = 1 - exp(0.0) = 0.0
+    # weight_root = P_root
+    # mean_root = 0.0
+    # Leaf:
+    # P_not_separated = 1.0 * (1 - 0.0) = 1.0
+    # weight_leaf = P_not_separated = 1.0
+    # mean_leaf = -1.0
 
-        # For classifier:
-        # proba = weight_leaf * P_leaf = [1.0, 0.0]
+    # For regresssion:
+    # prediction = weight_leaf * P_leaf = -1.0
 
-        # variance = (weight_root * (var_root + mean_root**2) +
-        #             weight_leaf * (var_leaf + mean_leaf**2)) - mean**2
-        # This reduces to weight_leaf * mean_leaf**2 - mean**2 = 1.0 * (1.0 - 1.0)
-        # = 0.0
+    # For classifier:
+    # proba = weight_leaf * P_leaf = [1.0, 0.0]
 
-        # Similarly for [2, 2]:
+    # variance = (weight_root * (var_root + mean_root**2) +
+    #             weight_leaf * (var_leaf + mean_leaf**2)) - mean**2
+    # This reduces to weight_leaf * mean_leaf**2 - mean**2 = 1.0 * (1.0 - 1.0)
+    # = 0.0
 
-        # For regression = weight_leaf * P_leaf = 1.0
-        # prediction = 0.0 + 1.0
-        # Variance reduces to zero
+    # Similarly for [2, 2]:
 
-        # For classification
-        # proba = weight_leaf * P_leaf = [0.0, 1.0]
+    # For regression = weight_leaf * P_leaf = 1.0
+    # prediction = 0.0 + 1.0
+    # Variance reduces to zero
 
-        # For [3, 2]
-        # P_not_separated = 1.0
-        # Root:
-        # Delta_root = 0.07112633
-        # eta_root = 1.0
-        # weight_root = 1 - exp(-0.07112633) = 0.0686
-        # Leaf:
-        # weight_leaf = P_not_separated = (1 - 0.0686) = 0.93134421
+    # For classification
+    # proba = weight_leaf * P_leaf = [0.0, 1.0]
 
-        # For regression:
-        # prediction = mean_root * weight_root + mean_leaf * weight_leaf
-        # prediction = 0.0 * 0.0686 + 0.93134421 * 1.0 = 0.93134421
-        # For classification
-        # proba = weight_root * P_root + weight_leaf * P_leaf
-        # proba = 0.0686 * [0.5, 0.5] + 0.93134421 * [0.0 * 1.0]
+    # For [3, 2]
+    # P_not_separated = 1.0
+    # Root:
+    # Delta_root = 0.07112633
+    # eta_root = 1.0
+    # weight_root = 1 - exp(-0.07112633) = 0.0686
+    # Leaf:
+    # weight_leaf = P_not_separated = (1 - 0.0686) = 0.93134421
 
-        # variance = (weight_root * (var_root + mean_root**2) +
-        #             weight_leaf * (var_leaf + mean_leaf**2)) - mean**2
-        # = 0.0686 * (1 + 0) + 0.93134 * (0 + 1) - 0.93134421**2 = 0.132597
+    # For regression:
+    # prediction = mean_root * weight_root + mean_leaf * weight_leaf
+    # prediction = 0.0 * 0.0686 + 0.93134421 * 1.0 = 0.93134421
+    # For classification
+    # proba = weight_root * P_root + weight_leaf * P_leaf
+    # proba = 0.0686 * [0.5, 0.5] + 0.93134421 * [0.0 * 1.0]
 
-        if isinstance(est, RegressorMixin):
-            T_predict, T_std = est.predict(T, return_std=True)
+    # variance = (weight_root * (var_root + mean_root**2) +
+    #             weight_leaf * (var_leaf + mean_leaf**2)) - mean**2
+    # = 0.0686 * (1 + 0) + 0.93134 * (0 + 1) - 0.93134421**2 = 0.132597
+
+    if isinstance(est, RegressorMixin):
+        T_predict, T_std = est.predict(T, return_std=True)
+        if est.path_smoothing:
             assert_array_almost_equal(T_predict, [-1.0, 1.0, 0.93134421])
             assert_array_almost_equal(T_std, np.sqrt([0.0, 0.0, 0.132597]))
         else:
-            last = (
-                0.0686 * np.array([0.5, 0.5]) +
-                0.93134421 * np.array([0.0 , 1.0])
-            )
-            T_proba = est.predict_proba(T)
-            assert_array_almost_equal(
-                T_proba,
-                [[1.0, 0.0], [0.0, 1.0], last], 4)
+            # Constant mode routes [3, 2] straight to the right leaf:
+            # prediction = leaf mean, std = leaf std = 0 here.
+            assert_array_almost_equal(T_predict, [-1.0, 1.0, 1.0])
+            assert_array_almost_equal(T_std, [0.0, 0.0, 0.0])
+    else:
+        last = 0.0686 * np.array([0.5, 0.5]) + 0.93134421 * np.array([0.0, 1.0])
+        T_proba = est.predict_proba(T)
+        expected = (
+            [[1.0, 0.0], [0.0, 1.0], last]
+            if est.path_smoothing
+            else [[1.0, 0.0], [0.0, 1.0], [0.0, 1.0]]
+        )
+        assert_array_almost_equal(T_proba, expected, 4)
 
 
 def test_reg_boston():
@@ -153,17 +166,19 @@ def test_pure_set():
 
 
 def test_numerical_stability():
-    X = np.array([
-        [152.08097839, 140.40744019, 129.75102234, 159.90493774],
-        [142.50700378, 135.81935120, 117.82884979, 162.75781250],
-        [127.28772736, 140.40744019, 129.75102234, 159.90493774],
-        [132.37025452, 143.71923828, 138.35694885, 157.84558105],
-        [103.10237122, 143.71928406, 138.35696411, 157.84559631],
-        [127.71276855, 143.71923828, 138.35694885, 157.84558105],
-        [120.91514587, 140.40744019, 129.75102234, 159.90493774]])
+    X = np.array(
+        [
+            [152.08097839, 140.40744019, 129.75102234, 159.90493774],
+            [142.50700378, 135.81935120, 117.82884979, 162.75781250],
+            [127.28772736, 140.40744019, 129.75102234, 159.90493774],
+            [132.37025452, 143.71923828, 138.35694885, 157.84558105],
+            [103.10237122, 143.71928406, 138.35696411, 157.84559631],
+            [127.71276855, 143.71923828, 138.35694885, 157.84558105],
+            [120.91514587, 140.40744019, 129.75102234, 159.90493774],
+        ]
+    )
 
-    y = np.array(
-        [1., 0.70209277, 0.53896582, 0., 0.90914464, 0.48026916, 0.49622521])
+    y = np.array([1.0, 0.70209277, 0.53896582, 0.0, 0.90914464, 0.48026916, 0.49622521])
 
     with np.errstate(all="raise"):
         for est in estimators:
@@ -291,8 +306,8 @@ def check_weighted_decision_path_regression(mtr, X_test):
     means1 = []
 
     for startptr, endptr in zip(weights.indptr[:-1], weights.indptr[1:]):
-        curr_nodes = weights.indices[startptr: endptr]
-        curr_weights = weights.data[startptr: endptr]
+        curr_nodes = weights.indices[startptr:endptr]
+        curr_weights = weights.data[startptr:endptr]
         curr_means = node_means[curr_nodes]
         curr_var = node_variances[curr_nodes]
 
@@ -309,7 +324,9 @@ def check_weighted_decision_path_regression(mtr, X_test):
 
 def test_weighted_decision_path_regression():
     X_train, X_test, y_train, y_test = load_scaled_boston()
-    mtr = MondrianTreeRegressor(random_state=0)
+    # The weighted decision path reconstructs predictions only for the
+    # pure Mondrian-process (smoothed) predictor.
+    mtr = MondrianTreeRegressor(random_state=0, path_smoothing=True)
     mtr.fit(X_train, y_train)
     check_weighted_decision_path_regression(mtr, X_test)
     mtr.partial_fit(X_train, y_train)
@@ -318,14 +335,14 @@ def test_weighted_decision_path_regression():
 
 def check_weighted_decision_path_classif(mtc, X_test):
     weights = mtc.weighted_decision_path(X_test)
-    node_probas = (
-        mtc.tree_.value[:, 0, :] / np.expand_dims(mtc.tree_.n_node_samples, axis=1)
+    node_probas = mtc.tree_.value[:, 0, :] / np.expand_dims(
+        mtc.tree_.n_node_samples, axis=1
     )
     probas1 = []
 
     for startptr, endptr in zip(weights.indptr[:-1], weights.indptr[1:]):
-        curr_nodes = weights.indices[startptr: endptr]
-        curr_weights = np.expand_dims(weights.data[startptr: endptr], axis=1)
+        curr_nodes = weights.indices[startptr:endptr]
+        curr_weights = np.expand_dims(weights.data[startptr:endptr], axis=1)
         curr_probas = node_probas[curr_nodes]
         probas1.append(np.sum(curr_weights * curr_probas, axis=0))
 
@@ -338,7 +355,7 @@ def test_weighted_decision_path_classif():
     y_train = np.round(y_train)
     y_test = np.round(y_test)
 
-    mtc = MondrianTreeClassifier(random_state=0)
+    mtc = MondrianTreeClassifier(random_state=0, path_smoothing=True)
     mtc.fit(X_train, np.round(y_train))
     check_weighted_decision_path_classif(mtc, X_test)
 
@@ -346,18 +363,54 @@ def test_weighted_decision_path_classif():
     check_weighted_decision_path_classif(mtc, X_test)
 
 
+def check_constant_prediction_matches_leaves(est, X):
+    """Default (constant) predictions equal the routed leaf's value."""
+    leaves = est.apply(X)
+    if isinstance(est, RegressorMixin):
+        expected = est.tree_.value[leaves, 0, 0]
+        # predictions are computed in float32; leaf values are float64
+        assert_array_almost_equal(est.predict(X), expected, 5)
+        _, std = est.predict(X, return_std=True)
+        assert not np.any(np.isnan(std))
+        assert not np.any(np.isinf(std))
+        assert np.all(std >= 0.0)
+    else:
+        counts = est.tree_.value[leaves, 0, :]
+        proba = counts / counts.sum(axis=1, keepdims=True)
+        assert_array_almost_equal(est.predict_proba(X), proba, 5)
+        # The per-call override restores the pure Mondrian-process mode.
+        smoothed = est.predict_proba(X, path_smoothing=True)
+        assert not np.allclose(smoothed, proba)
+
+
+def test_constant_default_prediction():
+    """The opinionated default predicts piecewise-constant leaf values."""
+    X_train, X_test, y_train, _ = load_scaled_boston()
+    mtr = MondrianTreeRegressor(random_state=0).fit(X_train, y_train)
+    check_constant_prediction_matches_leaves(mtr, X_test)
+
+    mtr.partial_fit(X_train, y_train)
+    check_constant_prediction_matches_leaves(mtr, X_test)
+
+    y_cls = np.round(y_train)
+    mtc = MondrianTreeClassifier(random_state=0).fit(X_train, y_cls)
+    check_constant_prediction_matches_leaves(mtc, X_test)
+
+    # get_params round-trips the new hyperparameter.
+    params = mtc.get_params()
+    assert params["path_smoothing"] is False
+    clone(mtc).set_params(path_smoothing=True)
+
+
 def test_std_positive():
     """Sometimes variance can be slightly negative due to numerical errors."""
     X = np.linspace(-np.pi, np.pi, 20)
-    y = 2*np.sin(X)
+    y = 2 * np.sin(X)
     X_train = np.reshape(X, (-1, 1))
     mr = MondrianTreeRegressor(random_state=0)
     mr.fit(X_train, y)
 
-    X_test = np.array(
-        [[2.87878788],
-         [2.97979798],
-         [3.08080808]])
+    X_test = np.array([[2.87878788], [2.97979798], [3.08080808]])
     _, y_std = mr.predict(X_test, return_std=True)
     assert not np.any(np.isnan(y_std))
     assert not np.any(np.isinf(y_std))
@@ -378,8 +431,17 @@ def check_mean_std_reg_convergence(est, X_train, y_train):
     X_inf = np.vstack((20.0 * np.ones(X_train.shape[1]),
                        -20.0 * np.ones(X_train.shape[1])))
     inf_mean, inf_std = est.predict(X_inf, return_std=True)
-    assert_array_almost_equal(inf_mean, y_train.mean(), 1)
-    assert_array_almost_equal(inf_std, y_train.std(), 2)
+    if est.path_smoothing:
+        # Pure Mondrian-process prediction shrinks towards the root
+        # statistics for points outside every bounding box.
+        assert_array_almost_equal(inf_mean, y_train.mean(), 1)
+        assert_array_almost_equal(inf_std, y_train.std(), 2)
+    else:
+        # Constant (default) mode routes to a single leaf; just require
+        # sane finite values.
+        assert np.all(np.isfinite(inf_mean))
+        assert np.all(np.isfinite(inf_std))
+        assert np.all(inf_std >= 0.0)
 
 
 def test_mean_std_reg_convergence():
@@ -409,11 +471,17 @@ def check_proba_classif_convergence(X_train, y_train, mc):
     # For points completely far away from the training data, this
     # should converge to the empirical distribution of labels.
     # X is scaled between to -1.0 and 1.0
-    X_inf = np.vstack((30.0 * np.ones(X_train.shape[1]),
-                       -30.0 * np.ones(X_train.shape[1])))
+    X_inf = np.vstack(
+        (30.0 * np.ones(X_train.shape[1]), -30.0 * np.ones(X_train.shape[1]))
+    )
     inf_proba = mc.predict_proba(X_inf)
-    emp_proba = np.bincount(y_enc) / float(len(y_enc))
-    assert_array_almost_equal(inf_proba, [emp_proba, emp_proba])
+    if mc.path_smoothing:
+        emp_proba = np.bincount(y_enc) / float(len(y_enc))
+        assert_array_almost_equal(inf_proba, [emp_proba, emp_proba])
+    else:
+        # Constant (default) mode routes to a single leaf; probabilities
+        # must simply remain a valid distribution.
+        assert np.allclose(inf_proba.sum(axis=1), 1.0)
 
 
 def test_proba_classif_convergence():
@@ -441,12 +509,14 @@ def check_tree_attributes(X, y, node_id, tree, check_impurity=True):
     if left_child != -1:
         left_ind = X[:, tree.feature[node_id]] < tree.threshold[node_id]
         check_tree_attributes(
-            X[left_ind], y[left_ind], left_child, tree, check_impurity)
+            X[left_ind], y[left_ind], left_child, tree, check_impurity
+        )
 
     if right_child != -1:
         right_ind = X[:, tree.feature[node_id]] > tree.threshold[node_id]
         check_tree_attributes(
-            X[right_ind], y[right_ind], right_child, tree, check_impurity)
+            X[right_ind], y[right_ind], right_child, tree, check_impurity
+        )
 
 
 def test_tree_attributes():
@@ -476,6 +546,7 @@ def test_apply():
         test_leaves = est_clone.tree_.children_left[est_clone.apply(X_test)]
         assert np.all(train_leaves == -1)
         assert np.all(test_leaves == -1)
+
 
 def check_pickle(est, X, y):
     score1 = est.score(X, y)
@@ -513,7 +584,7 @@ def test_tree_identical_labels():
             assert_equal(c_est.tree_.value, [[[1.0]]])
 
         X = np.reshape(np.linspace(0.0, 1.0, 100), (-1, 1))
-        y = np.array([0.0]*50 + [1.0]*50)
+        y = np.array([0.0] * 50 + [1.0] * 50)
         c_est.fit(X, y)
         leaf_ids = c_est.tree_.children_left == -1
         assert np.any(c_est.tree_.n_node_samples[leaf_ids] > 2)

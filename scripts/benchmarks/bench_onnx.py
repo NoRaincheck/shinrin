@@ -80,9 +80,10 @@ class CellResult:
     fit_s: float | None = None
     export_s: float | None = None
     onnx_bytes: int | None = None
-    # Mondrian models record which encoding was produced: "exact" (native
-    # parity) or "tree-ensemble" (size-guarded approximation); other model
-    # families report "generic".
+    # Mondrian models record which encoding was produced: "tree-ensemble"
+    # (plain ai.onnx.ml encoding; exact for constant-prediction models,
+    # the default) or "exact" (standard-domain graph reproducing path
+    # smoothing); other model families report "generic".
     export_mode: str | None = None
     # tolerance (native vs onnxruntime)
     max_abs_err: float | None = None
@@ -602,14 +603,12 @@ def build_markdown(meta: dict, records: list[dict]) -> str:
         "- Tolerance compares the full test-set outputs: max/mean absolute error,",
         "  classification label agreement, pass/fail against max-abs-error <= 1e-3",
         "  (probabilities and unit-scale predictions) with >= 99.5% label agreement.",
-        "- The exact Mondrian export reproduces native predict/predict_proba",
-        "  (including Mondrian-process path smoothing) to float32 round-off;",
-        "  generic sklearn-style ensembles round thresholds/values to float32.",
-        "- At this dataset scale the exact MondrianForest graph would exceed",
-        "  ONNX's 2 GB protobuf limit (selection matrices grow with nodes^2),",
-        "  so forests automatically fall back to a plain tree-ensemble export;",
-        "  their tolerance rows measure that documented approximation, while",
-        "  MondrianTree stays exact.",
+        "- The Mondrian export encoding follows the estimator's",
+        "  `path_smoothing` prediction mode: constant-prediction models",
+        "  (the default) export as plain tree-ensembles that match native",
+        "  predict exactly; smoothing models get an exact standard-domain",
+        "  graph reproducing path smoothing, with a size-guarded fallback.",
+        "  Generic sklearn-style ensembles round thresholds/values to f32.",
         "- Speed reports the mean wall-clock per full test-set call after 3 warmup",
         "  calls (timed until >= 0.4 s total or 100 calls). NumPy/BLAS and",
         "  onnxruntime are pinned to one thread on both sides.",
@@ -650,11 +649,13 @@ def build_markdown(meta: dict, records: list[dict]) -> str:
             "*Check*: max abs err <= 1e-3 and label agreement >= 99.5%.",
             "",
             (
-                "*Export mode*: Mondrian graphs are either `exact` (reproduces"
-                " native predict including path smoothing) or `tree-ensemble`"
-                " (hard tree structure averaged across trees; the size-guarded"
-                " fallback used when the exact graph would exceed the protobuf"
-                " limit). Everything else reports `generic`."
+                "*Export mode*: Mondrian graphs are either `tree-ensemble`"
+                " (plain ai.onnx.ml encoding of the hard tree structure;"
+                " exact for constant-prediction models, the default) or"
+                " `exact` (standard-domain graph reproducing Mondrian path"
+                " smoothing; used for `path_smoothing=True` models unless"
+                " the protobuf size guard kicks in). Everything else"
+                " reports `generic`."
             ),
             "",
         ]
@@ -698,12 +699,12 @@ def build_markdown(meta: dict, records: list[dict]) -> str:
         other_fail = [r for r in failed if r not in approx_fail]
         if approx_fail:
             L.append(
-                f"- All {len(approx_fail)} failing cells are MondrianForest"
-                " exports in `tree-ensemble` mode: above a size guard the"
-                " exact graph (which reproduces native path smoothing but"
-                " grows with nodes squared) would exceed ONNX's 2 GB proto"
-                " limit, so the export falls back to the hard tree structure"
-                " without smoothing. MondrianTree stays exact and passes."
+                f"- {len(approx_fail)} failing cells export in `tree-ensemble`"
+                " mode: for `path_smoothing=True` models above the size guard"
+                " the exact smoothing graph falls back to the hard tree"
+                " structure, which deviates from the smoothed native predict."
+                " Constant-prediction models (the default) are exact in this"
+                " mode, so a failure here indicates a smoothing model."
             )
         if other_fail:
             L.append("- Other failing cells:")
