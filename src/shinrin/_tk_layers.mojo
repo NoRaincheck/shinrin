@@ -21,6 +21,7 @@ from shinrin._tk_core import (
     gelu_scalar,
     hardware_threads,
     run_partitioned_range,
+    ThreadPool,
 )
 
 
@@ -86,7 +87,106 @@ def _ssmax_base_scales(
     hbuf.unsafe_free()
 
 
+comptime SSMAX_THREAD_MIN_MACS = 1 << 20  # ~1M MACs before row threading pays
+
+
+@fieldwise_init
+struct SsmaxJob(ImplicitlyCopyable, Copyable, Movable):
+    var q: Pointer[Float32, MutUntrackedOrigin]
+    var lo: Int
+    var hi: Int  # row range [lo, hi) owned by this partition
+    var q_rows: Int
+    var n_heads: Int
+    var head_dim: Int
+    var elementwise: Bool
+    var qw0: Pointer[Float32, MutUntrackedOrigin]
+    var qb0: Pointer[Float32, MutUntrackedOrigin]
+    var qw2: Pointer[Float32, MutUntrackedOrigin]
+    var qb2: Pointer[Float32, MutUntrackedOrigin]
+    var hidden: Int
+    var scales: Pointer[Float32, MutUntrackedOrigin]  # shared, read-only
+    var scratch: Pointer[Float32, MutUntrackedOrigin]  # qh then mod_buf
+
+def _ssmax_row_range(
+    mut q: Pointer[Float32, MutUntrackedOrigin],
+    lo: Int,
+    hi: Int,
+    q_rows: Int,
+    n_heads: Int,
+    head_dim: Int,
+    elementwise: Bool,
+    qw0: Pointer[Float32, MutUntrackedOrigin],
+    qb0: Pointer[Float32, MutUntrackedOrigin],
+    qw2: Pointer[Float32, MutUntrackedOrigin],
+    qb2: Pointer[Float32, MutUntrackedOrigin],
+    hidden: Int,
+    scales: Pointer[Float32, MutUntrackedOrigin],
+    qh: Pointer[Float32, MutUntrackedOrigin],
+    mod_buf: Pointer[Float32, MutUntrackedOrigin],
+):
+    """QASSMax core for rows [lo, hi): identical math per row regardless of
+    partitioning, so threaded and serial paths stay bit-identical."""
+    var r = lo
+    while r < hi:
+        var h = 0
+        while h < n_heads:
+            var qp = q + h * q_rows * head_dim + r * head_dim
+            var j = 0
+            while j < hidden:
+                qh[j] = gelu_scalar(_dot(qw0 + j * head_dim, qp, head_dim) + qb0[j])
+                j += 1
+            if elementwise:
+                var d = 0
+                while d < head_dim:
+                    mod_buf[d] = (
+                        1.0 + tanh(_dot(qw2 + d * hidden, qh, hidden) + qb2[d])
+                    )
+                    d += 1
+            else:
+                var acc3 = _dot(qw2, qh, hidden)
+                var m = 1.0 + tanh(acc3 + qb2[0])
+                var dv = SIMD[DType.float32, SIMDW](m)
+                var d = 0
+                while d + SIMDW <= head_dim:
+                    mod_buf.unsafe_store[width=SIMDW](d, dv)
+                    d += SIMDW
+                while d < head_dim:
+                    mod_buf[d] = m
+                    d += 1
+            var d2 = 0
+            if elementwise:
+                while d2 + SIMDW <= head_dim:
+                    qp.unsafe_store[width=SIMDW](
+                        d2,
+                        qp.unsafe_load[width=SIMDW](d2)
+                        * scales.unsafe_load[width=SIMDW](h * head_dim + d2)
+                        * mod_buf.unsafe_load[width=SIMDW](d2),
+                    )
+                    d2 += SIMDW
+            while d2 < head_dim:
+                var s = (
+                    scales[h * head_dim + d2] if elementwise else scales[h]
+                ) * mod_buf[d2]
+                qp[d2] *= s
+                d2 += 1
+            h += 1
+        r += 1
+
+
+@export("shinrin_ssmax_worker")
+def ssmax_worker(raw: P_U8) abi("C") -> None:
+    var jp = raw.unsafe_bitcast[SsmaxJob]()
+    var j = jp[]
+    var qh = j.scratch
+    var mod_buf = j.scratch + j.hidden
+    _ssmax_row_range(
+        j.q, j.lo, j.hi, j.q_rows, j.n_heads, j.head_dim, j.elementwise,
+        j.qw0, j.qb0, j.qw2, j.qb2, j.hidden, j.scales, qh, mod_buf,
+    )
+
+
 def ssmax_apply(
+    pool: UnsafePointer[ThreadPool, MutUntrackedOrigin],
     mut q: Pointer[Float32, MutUntrackedOrigin],
     q_rows: Int,
     n_keys: Int,
@@ -117,10 +217,7 @@ def ssmax_apply(
             var s = ssmax[h] * logn
             var r = 0
             while r < q_rows:
-                var d = 0
-                while d < head_dim:
-                    q[h * q_rows * head_dim + r * head_dim + d] *= s
-                    d += 1
+                _scale_inplace(q + h * q_rows * head_dim + r * head_dim, head_dim, s)
                 r += 1
             h += 1
         return
@@ -146,17 +243,30 @@ def ssmax_apply(
             var r = 0
             while r < q_rows:
                 var base = h * q_rows * head_dim + r * head_dim
-                var d = 0
-                while d < head_dim:
-                    var s = scales[h * head_dim + d] if elementwise else scales[h]
-                    q[base + d] *= s
-                    d += 1
+                if elementwise:
+                    var d = 0
+                    while d + SIMDW <= head_dim:
+                        q.unsafe_store[width=SIMDW](
+                            base + d,
+                            q.unsafe_load[width=SIMDW](base + d)
+                            * scales.unsafe_load[width=SIMDW](h * head_dim + d),
+                        )
+                        d += SIMDW
+                    while d < head_dim:
+                        q[base + d] *= scales[h * head_dim + d]
+                        d += 1
+                else:
+                    _scale_inplace(q + base, head_dim, scales[h])
                 r += 1
             h += 1
         scales.unsafe_free()
         return
 
     # QASSMaxMLP: modulation = 1 + tanh(query_mlp(q)), applied per token.
+    # Row-partitioned across the worker pool when the query MLP dominates
+    # (kinds 4/5 carry hidden x head_dim MACs per row and head); each
+    # partition gets a private scratch slice so rows are independent and
+    # results stay bit-identical to the serial loop (same per-row core).
     var query_out = head_dim if elementwise else 1
     var qw0 = cur
     cur += head_dim * hidden
@@ -165,52 +275,62 @@ def ssmax_apply(
     var qw2 = cur
     cur += query_out * hidden
     var qb2 = cur
+
+    var macs = q_rows * n_heads * hidden * head_dim
+    var parts = 0
+    if pool[].workers > 0 and q_rows >= 2 and macs >= SSMAX_THREAD_MIN_MACS:
+        var threads = hardware_threads()
+        parts = threads if threads < q_rows else q_rows
+        var max_parts = pool[].workers + 1
+        if parts > max_parts:
+            parts = max_parts
+        if parts < 2:
+            parts = 0
+
+    if parts >= 2:
+        # Per-partition scratch: qh (hidden) then mod_buf (head_dim).
+        var scratch_stride = hidden + head_dim + 16
+        var scratch = alloc[Float32](parts * scratch_stride + 16)
+        var jobs = alloc[SsmaxJob](parts)
+        var rchunk = (q_rows + parts - 1) // parts
+        var pidx = 0
+        var lo = 0
+        while pidx < parts and lo < q_rows:
+            var hi = lo + rchunk
+            if hi > q_rows:
+                hi = q_rows
+            jobs.unsafe_offset(pidx)[] = SsmaxJob(
+                q,
+                lo,
+                hi,
+                q_rows,
+                n_heads,
+                head_dim,
+                elementwise,
+                qw0,
+                qb0,
+                qw2,
+                qb2,
+                hidden,
+                scales,
+                scratch + pidx * scratch_stride,
+            )
+            lo = hi
+            pidx += 1
+        comptime WorkerFn = GemmWorkerFn
+        var fp: WorkerFn = ssmax_worker
+        run_partitioned_range(pool, jobs, pidx, fp)
+        scratch.unsafe_free()
+        jobs.unsafe_free()
+        scales.unsafe_free()
+        return
+
     var qh = alloc[Float32](hidden + 16)
     var mod_buf = alloc[Float32](head_dim + 16)
-    var r = 0
-    while r < q_rows:
-        var h = 0
-        while h < n_heads:
-            var qp = q + h * q_rows * head_dim + r * head_dim
-            var j = 0
-            while j < hidden:
-                var acc: Float32 = 0.0
-                var d = 0
-                while d < head_dim:
-                    acc += qw0[j * head_dim + d] * qp[d]
-                    d += 1
-                qh[j] = gelu_scalar(acc + qb0[j])
-                j += 1
-            if elementwise:
-                var d = 0
-                while d < head_dim:
-                    var acc2: Float32 = 0.0
-                    var jj = 0
-                    while jj < hidden:
-                        acc2 += qw2[d * hidden + jj] * qh[jj]
-                        jj += 1
-                    mod_buf[d] = 1.0 + tanh(acc2 + qb2[d])
-                    d += 1
-            else:
-                var acc3: Float32 = 0.0
-                var jj = 0
-                while jj < hidden:
-                    acc3 += qw2[jj] * qh[jj]
-                    jj += 1
-                var m = 1.0 + tanh(acc3 + qb2[0])
-                var d = 0
-                while d < head_dim:
-                    mod_buf[d] = m
-                    d += 1
-            var d2 = 0
-            while d2 < head_dim:
-                var s = (
-                    scales[h * head_dim + d2] if elementwise else scales[h]
-                ) * mod_buf[d2]
-                qp[d2] *= s
-                d2 += 1
-            h += 1
-        r += 1
+    _ssmax_row_range(
+        q, 0, q_rows, q_rows, n_heads, head_dim, elementwise,
+        qw0, qb0, qw2, qb2, hidden, scales, qh, mod_buf,
+    )
     qh.unsafe_free()
     mod_buf.unsafe_free()
     scales.unsafe_free()
@@ -311,7 +431,13 @@ def layer_norm_affine(
     has_weight: Bool,
     has_bias: Bool,
 ):
-    """Row-wise LayerNorm with optional affine (dummy pointers when absent)."""
+    """Row-wise LayerNorm with optional affine (dummy pointers when absent).
+
+    Kept scalar verbatim on purpose: the kv-cache parity test pins the
+    plain and cached paths to bit-equality and the staged parity tests pin
+    mojo to torch/numpy at atol 5e-5; vectorizing the normalize pass
+    changed rounding (FMA contraction) enough to break those contracts.
+    """
     var i = 0
     while i < n:
         var base = i * d
@@ -495,6 +621,13 @@ def _add_row_bias(
     while i < rows:
         var base = i * cols
         var c = 0
+        while c + SIMDW <= cols:
+            m.unsafe_store[width=SIMDW](
+                base + c,
+                m.unsafe_load[width=SIMDW](base + c)
+                + bias.unsafe_load[width=SIMDW](c),
+            )
+            c += SIMDW
         while c < cols:
             m[base + c] += bias[c]
             c += 1
@@ -514,6 +647,62 @@ def _copy_f32(
     while i < n:
         dst[i] = src[i]
         i += 1
+
+
+@always_inline
+def _add_f32(
+    a: Pointer[Float32, MutUntrackedOrigin],
+    b: Pointer[Float32, MutUntrackedOrigin],
+    dst: Pointer[Float32, MutUntrackedOrigin],
+    n: Int,
+):
+    """dst[i] = a[i] + b[i] (dst may alias a or b)."""
+    var i = 0
+    while i + SIMDW <= n:
+        dst.unsafe_store[width=SIMDW](
+            i,
+            a.unsafe_load[width=SIMDW](i) + b.unsafe_load[width=SIMDW](i),
+        )
+        i += SIMDW
+    while i < n:
+        dst[i] = a[i] + b[i]
+        i += 1
+
+
+@always_inline
+def _scale_inplace(
+    p: Pointer[Float32, MutUntrackedOrigin],
+    n: Int,
+    s: Float32,
+):
+    var sv = SIMD[DType.float32, SIMDW](s)
+    var i = 0
+    while i + SIMDW <= n:
+        p.unsafe_store[width=SIMDW](
+            i, p.unsafe_load[width=SIMDW](i) * sv
+        )
+        i += SIMDW
+    while i < n:
+        p[i] *= s
+        i += 1
+
+
+@always_inline
+def _dot(
+    a: Pointer[Float32, MutUntrackedOrigin],
+    b: Pointer[Float32, MutUntrackedOrigin],
+    n: Int,
+) -> Float32:
+    var acc = SIMD[DType.float32, SIMDW](0.0)
+    var i = 0
+    while i + SIMDW <= n:
+        acc += a.unsafe_load[width=SIMDW](i) * b.unsafe_load[width=SIMDW](i)
+        i += SIMDW
+    var s = acc.reduce_add()
+    while i < n:
+        s += a[i] * b[i]
+        i += 1
+    return s
 
 
 @always_inline
@@ -573,6 +762,7 @@ def _softmax_rows_inplace(
 
 @always_inline
 def _heads_attention(
+    pool: UnsafePointer[ThreadPool, MutUntrackedOrigin],
     q_a: Pointer[Float32, MutUntrackedOrigin],
     k_a: Pointer[Float32, MutUntrackedOrigin],
     v_a: Pointer[Float32, MutUntrackedOrigin],
@@ -630,7 +820,7 @@ def _heads_attention(
             p += 1
         comptime WorkerFn = GemmWorkerFn
         var fp: WorkerFn = head_attn_worker
-        run_partitioned_range(jobs, parts, fp)
+        run_partitioned_range(pool, jobs, parts, fp)
         scratch.unsafe_free()
         jobs.unsafe_free()
         return
@@ -641,9 +831,9 @@ def _heads_attention(
         var k_h = k_a + h * k_rows * head_dim
         var v_h = v_a + h * k_rows * head_dim
         var o_h = out_a + h * q_rows * head_dim
-        gemm_nt(q_rows, k_rows, head_dim, q_h, k_h, scores)
+        gemm_nt(pool, q_rows, k_rows, head_dim, q_h, k_h, scores)
         _softmax_rows_inplace(scores, q_rows, k_rows, scale)
-        gemm_nn(q_rows, head_dim, k_rows, scores, v_h, o_h)
+        gemm_nn(pool, q_rows, head_dim, k_rows, scores, v_h, o_h)
         h += 1
 
 
@@ -719,17 +909,23 @@ def _split_heads(
     n_heads: Int,
     head_dim: Int,
 ):
-    """(rows, d_model) row-major -> head-major blocked (n_heads, rows, hd)."""
+    """(rows, d_model) row-major -> head-major blocked (n_heads, rows, hd).
+
+    Both the source run (``i*d_model + h*hd``) and destination run
+    (``h*rows*hd + i*hd``) are contiguous chunks of ``head_dim`` floats,
+    so each is copied with one vectorized memcpy-style pass.
+    """
     var i = 0
     while i < rows:
+        var src_row = src_proj + i * d_model
+        var dst_row_base = i * head_dim
         var h = 0
         while h < n_heads:
-            var dd = 0
-            while dd < head_dim:
-                dst[h * rows * head_dim + i * head_dim + dd] = src_proj[
-                    i * d_model + h * head_dim + dd
-                ]
-                dd += 1
+            _copy_f32(
+                src_row + h * head_dim,
+                dst + h * rows * head_dim + dst_row_base,
+                head_dim,
+            )
             h += 1
         i += 1
 
@@ -748,18 +944,18 @@ def _merge_heads(
     while mi < q_rows:
         var hh = 0
         while hh < n_heads:
-            var dd = 0
-            while dd < head_dim:
-                merged[mi * d_model + hh * head_dim + dd] = out_a[
-                    hh * q_rows * head_dim + mi * head_dim + dd
-                ]
-                dd += 1
+            _copy_f32(
+                out_a + hh * q_rows * head_dim + mi * head_dim,
+                merged + mi * d_model + hh * head_dim,
+                head_dim,
+            )
             hh += 1
         mi += 1
 
 
 @always_inline
 def _attention_tail(
+    pool: UnsafePointer[ThreadPool, MutUntrackedOrigin],
     q_in: Pointer[Float32, MutUntrackedOrigin],
     dst: Pointer[Float32, MutUntrackedOrigin],
     out_a: Pointer[Float32, MutUntrackedOrigin],
@@ -779,18 +975,15 @@ def _attention_tail(
     var merged = alloc[Float32](q_rows * d + 16)
     _merge_heads(out_a, merged, q_rows, d, n_heads, head_dim)
     var res = alloc[Float32](q_rows * d + 16)
-    gemm_nt(q_rows, d, d, merged, p.w_out, res)
+    gemm_nt(pool, q_rows, d, d, merged, p.w_out, res)
     _add_row_bias(res, p.b_out, q_rows, d)
-    var mi = 0
-    while mi < q_rows * d:
-        dst[mi] = q_in[mi] + res[mi]
-        mi += 1
+    _add_f32(q_in, res, dst, q_rows * d)
 
     # -- sublayer 2: FFN ----------------------------------------------------
     var ffn_in = alloc[Float32](q_rows * d + 16)
     layer_norm_affine(dst, ffn_in, q_rows, d, p.ln2_w, p.ln2_b, True, p.ln_has_bias)
     var ffh = alloc[Float32](q_rows * d_ff + 16)
-    gemm_nt(q_rows, d_ff, d, ffn_in, p.w1, ffh)
+    gemm_nt(pool, q_rows, d_ff, d, ffn_in, p.w1, ffh)
     _add_row_bias(ffh, p.b1, q_rows, d_ff)
     var ftotal = q_rows * d_ff
     mi = 0
@@ -803,12 +996,9 @@ def _attention_tail(
     while mi < ftotal:
         ffh[mi] = gelu_scalar(ffh[mi])
         mi += 1
-    gemm_nt(q_rows, d, d_ff, ffh, p.w2, res)
+    gemm_nt(pool, q_rows, d, d_ff, ffh, p.w2, res)
     _add_row_bias(res, p.b2, q_rows, d)
-    mi = 0
-    while mi < q_rows * d:
-        dst[mi] += res[mi]
-        mi += 1
+    _add_f32(dst, res, dst, q_rows * d)
     merged.unsafe_free()
     res.unsafe_free()
     ffn_in.unsafe_free()
@@ -816,6 +1006,7 @@ def _attention_tail(
 
 
 def attention_block_forward(
+    pool: UnsafePointer[ThreadPool, MutUntrackedOrigin],
     q_in: Pointer[Float32, MutUntrackedOrigin],
     k_in: Optional[Pointer[Float32, MutUntrackedOrigin]],
     dst: Pointer[Float32, MutUntrackedOrigin],
@@ -858,11 +1049,11 @@ def attention_block_forward(
     var q_proj = alloc[Float32](q_rows * d + 16)
     var k_proj = alloc[Float32](k_rows * d + 16)
     var v_proj = alloc[Float32](k_rows * d + 16)
-    gemm_nt(q_rows, d, d, qn, p.w_qkv, q_proj)
+    gemm_nt(pool, q_rows, d, d, qn, p.w_qkv, q_proj)
     _add_row_bias(q_proj, p.b_qkv, q_rows, d)
-    gemm_nt(k_rows, d, d, kn, p.w_qkv + d * d, k_proj)
+    gemm_nt(pool, k_rows, d, d, kn, p.w_qkv + d * d, k_proj)
     _add_row_bias(k_proj, p.b_qkv + d, k_rows, d)
-    gemm_nt(k_rows, d, d, kn, p.w_qkv + 2 * d * d, v_proj)
+    gemm_nt(pool, k_rows, d, d, kn, p.w_qkv + 2 * d * d, v_proj)
     _add_row_bias(v_proj, p.b_qkv + 2 * d, k_rows, d)
 
     # -- head-major reshape ------------------------------------------------
@@ -870,21 +1061,8 @@ def attention_block_forward(
     var k_a = alloc[Float32](k_rows * n_heads * head_dim + 16)
     var v_a = alloc[Float32](k_rows * n_heads * head_dim + 16)
     _split_heads(q_proj, q_a, q_rows, d, n_heads, head_dim)
-    var ki = 0
-    while ki < k_rows:
-        var h = 0
-        while h < n_heads:
-            var dd = 0
-            while dd < head_dim:
-                k_a[h * k_rows * head_dim + ki * head_dim + dd] = k_proj[
-                    ki * d + h * head_dim + dd
-                ]
-                v_a[h * k_rows * head_dim + ki * head_dim + dd] = v_proj[
-                    ki * d + h * head_dim + dd
-                ]
-                dd += 1
-            h += 1
-        ki += 1
+    _split_heads(k_proj, k_a, k_rows, d, n_heads, head_dim)
+    _split_heads(v_proj, v_a, k_rows, d, n_heads, head_dim)
 
     # -- RoPE then SSMax (reference applies rope BEFORE ssmax) --------------
     if rope_freqs is not None:
@@ -896,15 +1074,18 @@ def attention_block_forward(
     if kv_k_out is not None:
         _copy_f32(k_a, kv_k_out.value(), k_rows * n_heads * head_dim)
         _copy_f32(v_a, kv_v_out.value(), k_rows * n_heads * head_dim)
-    ssmax_apply(q_a, q_rows, k_rows, n_heads, head_dim, p.kind, p.ssmax, p.ssmax_hidden)
+    ssmax_apply(
+        pool, q_a, q_rows, k_rows, n_heads, head_dim,
+        p.kind, p.ssmax, p.ssmax_hidden
+    )
 
     # -- attention per head -------------------------------------------------
     var out_a = alloc[Float32](q_rows * n_heads * head_dim + 16)
     var scores = alloc[Float32](q_rows * k_rows + 16)
-    _heads_attention(q_a, k_a, v_a, out_a, scores, q_rows, k_rows, n_heads, head_dim)
+    _heads_attention(pool, q_a, k_a, v_a, out_a, scores, q_rows, k_rows, n_heads, head_dim)
 
     # -- merge heads + out projection + residual + FFN ----------------------
-    _attention_tail(q_in, dst, out_a, q_rows, d, n_heads, head_dim, d_ff, p)
+    _attention_tail(pool, q_in, dst, out_a, q_rows, d, n_heads, head_dim, d_ff, p)
 
     qn.unsafe_free()
     if kn_owned:
@@ -920,6 +1101,7 @@ def attention_block_forward(
 
 
 def attention_block_forward_cached(
+    pool: UnsafePointer[ThreadPool, MutUntrackedOrigin],
     q_in: Pointer[Float32, MutUntrackedOrigin],
     dst: Pointer[Float32, MutUntrackedOrigin],
     q_rows: Int,
@@ -949,23 +1131,27 @@ def attention_block_forward_cached(
     var qn = alloc[Float32](q_rows * d + 16)
     layer_norm_affine(q_in, qn, q_rows, d, p.ln1_w, p.ln1_b, True, p.ln_has_bias)
     var q_proj = alloc[Float32](q_rows * d + 16)
-    gemm_nt(q_rows, d, d, qn, p.w_qkv, q_proj)
+    gemm_nt(pool, q_rows, d, d, qn, p.w_qkv, q_proj)
     _add_row_bias(q_proj, p.b_qkv, q_rows, d)
 
     # -- head-major reshape + ssmax on queries ------------------------------
     var q_a = alloc[Float32](q_rows * n_heads * head_dim + 16)
     _split_heads(q_proj, q_a, q_rows, d, n_heads, head_dim)
-    ssmax_apply(q_a, q_rows, k_rows, n_heads, head_dim, p.kind, p.ssmax, p.ssmax_hidden)
+    ssmax_apply(
+        pool, q_a, q_rows, k_rows, n_heads, head_dim,
+        p.kind, p.ssmax, p.ssmax_hidden
+    )
 
     # -- attention against cached K/V ---------------------------------------
     var out_a = alloc[Float32](q_rows * n_heads * head_dim + 16)
     var scores = alloc[Float32](q_rows * k_rows + 16)
     _heads_attention(
-        q_a, cached_k, cached_v, out_a, scores, q_rows, k_rows, n_heads, head_dim
+        pool, q_a, cached_k, cached_v, out_a, scores, q_rows, k_rows,
+        n_heads, head_dim
     )
 
     # -- merge heads + out projection + residual + FFN ----------------------
-    _attention_tail(q_in, dst, out_a, q_rows, d, n_heads, head_dim, d_ff, p)
+    _attention_tail(pool, q_in, dst, out_a, q_rows, d, n_heads, head_dim, d_ff, p)
 
     qn.unsafe_free()
     q_proj.unsafe_free()
@@ -975,6 +1161,7 @@ def attention_block_forward_cached(
 
 
 def isab_forward(
+    pool: UnsafePointer[ThreadPool, MutUntrackedOrigin],
     x: Pointer[Float32, MutUntrackedOrigin],
     ind_vectors: Pointer[Float32, MutUntrackedOrigin],
     dst: Pointer[Float32, MutUntrackedOrigin],
@@ -994,11 +1181,11 @@ def isab_forward(
     """
     var hidden = alloc[Float32](num_inds * d_model + 16)
     attention_block_forward(
-        ind_vectors, x, hidden, num_inds, n, d_model, n_heads, head_dim, d_ff,
-        p1, None, False,
+        pool, ind_vectors, x, hidden, num_inds, n, d_model, n_heads, head_dim,
+        d_ff, p1, None, False,
     )
     attention_block_forward(
-        x, hidden, dst, n, num_inds, d_model, n_heads, head_dim, d_ff,
+        pool, x, hidden, dst, n, num_inds, d_model, n_heads, head_dim, d_ff,
         p2, None, False,
     )
     hidden.unsafe_free()

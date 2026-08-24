@@ -87,16 +87,79 @@ def gelu8(x: SIMD[DType.float32, SIMDW]) -> SIMD[DType.float32, SIMDW]:
 def gemm_nt_rows(m: Int, n: Int, kk: Int, a: Pointer[Float32, MutUntrackedOrigin], b: Pointer[Float32, MutUntrackedOrigin], c: Pointer[Float32, MutUntrackedOrigin], lo: Int, hi: Int):
     # rows [lo, hi) of C (m,n) = A (m,kk) @ B (n,kk)^T -- overwrites those rows.
     # Deterministic per-row: results identical regardless of row partitioning.
+    #
+    # The full-block case processes output elements in 4-row x 2-column
+    # register tiles: eight independent FMA chains instead of four, which
+    # hides multiply-add latency without changing any element's accumulation
+    # order (sequential over kk in SIMDW steps, then the same scalar tail),
+    # so results stay bit-identical to the historical single-column kernel.
     var it = lo
     while it < hi:
-        var j = 0
-        while j < n:
-            var bp = b + j * kk
-            if it + 4 <= hi:
-                var ap0 = a + it * kk
-                var ap1 = a + (it + 1) * kk
-                var ap2 = a + (it + 2) * kk
-                var ap3 = a + (it + 3) * kk
+        if it + 4 <= hi:
+            var ap0 = a + it * kk
+            var ap1 = ap0 + kk
+            var ap2 = ap0 + 2 * kk
+            var ap3 = ap0 + 3 * kk
+            var j = 0
+            while j + 2 <= n:
+                var bp0 = b + j * kk
+                var bp1 = bp0 + kk
+                var acc00 = SIMD[DType.float32, SIMDW](0.0)
+                var acc01 = SIMD[DType.float32, SIMDW](0.0)
+                var acc10 = SIMD[DType.float32, SIMDW](0.0)
+                var acc11 = SIMD[DType.float32, SIMDW](0.0)
+                var acc20 = SIMD[DType.float32, SIMDW](0.0)
+                var acc21 = SIMD[DType.float32, SIMDW](0.0)
+                var acc30 = SIMD[DType.float32, SIMDW](0.0)
+                var acc31 = SIMD[DType.float32, SIMDW](0.0)
+                var t = 0
+                while t + SIMDW <= kk:
+                    var b0 = bp0.unsafe_load[width=SIMDW](t)
+                    var b1 = bp1.unsafe_load[width=SIMDW](t)
+                    var a0 = ap0.unsafe_load[width=SIMDW](t)
+                    acc00 += a0 * b0
+                    acc01 += a0 * b1
+                    var a1 = ap1.unsafe_load[width=SIMDW](t)
+                    acc10 += a1 * b0
+                    acc11 += a1 * b1
+                    var a2 = ap2.unsafe_load[width=SIMDW](t)
+                    acc20 += a2 * b0
+                    acc21 += a2 * b1
+                    var a3 = ap3.unsafe_load[width=SIMDW](t)
+                    acc30 += a3 * b0
+                    acc31 += a3 * b1
+                    t += SIMDW
+                var s00 = acc00.reduce_add()
+                var s01 = acc01.reduce_add()
+                var s10 = acc10.reduce_add()
+                var s11 = acc11.reduce_add()
+                var s20 = acc20.reduce_add()
+                var s21 = acc21.reduce_add()
+                var s30 = acc30.reduce_add()
+                var s31 = acc31.reduce_add()
+                while t < kk:
+                    var b0 = bp0[t]
+                    var b1 = bp1[t]
+                    s00 += ap0[t] * b0
+                    s01 += ap0[t] * b1
+                    s10 += ap1[t] * b0
+                    s11 += ap1[t] * b1
+                    s20 += ap2[t] * b0
+                    s21 += ap2[t] * b1
+                    s30 += ap3[t] * b0
+                    s31 += ap3[t] * b1
+                    t += 1
+                c[it * n + j] = s00
+                c[it * n + j + 1] = s01
+                c[(it + 1) * n + j] = s10
+                c[(it + 1) * n + j + 1] = s11
+                c[(it + 2) * n + j] = s20
+                c[(it + 2) * n + j + 1] = s21
+                c[(it + 3) * n + j] = s30
+                c[(it + 3) * n + j + 1] = s31
+                j += 2
+            while j < n:
+                var bp = b + j * kk
                 var acc0 = SIMD[DType.float32, SIMDW](0.0)
                 var acc1 = SIMD[DType.float32, SIMDW](0.0)
                 var acc2 = SIMD[DType.float32, SIMDW](0.0)
@@ -123,11 +186,15 @@ def gemm_nt_rows(m: Int, n: Int, kk: Int, a: Pointer[Float32, MutUntrackedOrigin
                 c[(it + 1) * n + j] = s1
                 c[(it + 2) * n + j] = s2
                 c[(it + 3) * n + j] = s3
-            else:
-                var r = it
-                while r < hi:
+                j += 1
+        else:
+            var r = it
+            while r < hi:
+                var ap = a + r * kk
+                var j = 0
+                while j < n:
+                    var bp = b + j * kk
                     var acc = SIMD[DType.float32, SIMDW](0.0)
-                    var ap = a + r * kk
                     var t = 0
                     while t + SIMDW <= kk:
                         acc += ap.unsafe_load[width=SIMDW](t) * bp.unsafe_load[width=SIMDW](t)
@@ -137,8 +204,8 @@ def gemm_nt_rows(m: Int, n: Int, kk: Int, a: Pointer[Float32, MutUntrackedOrigin
                         s += ap[t] * bp[t]
                         t += 1
                     c[r * n + j] = s
-                    r += 1
-            j += 1
+                    j += 1
+                r += 1
         it += 4
 
 
@@ -147,9 +214,47 @@ def gemm_nn_rows(m: Int, n: Int, kk: Int, a: Pointer[Float32, MutUntrackedOrigin
     # rows [lo, hi) of C (m,n) = A (m,kk) @ B (kk,n) -- overwrites those rows.
     var it = lo
     while it < hi:
-        var j = 0
-        while j + SIMDW <= n:
-            if it + 4 <= m:
+        if it + 4 <= hi:
+            var j = 0
+            while j + 2 * SIMDW <= n:
+                # Two independent column blocks: eight FMA chains instead of
+                # four; each element's accumulation order is unchanged.
+                var acc0 = SIMD[DType.float32, SIMDW](0.0)
+                var acc1 = SIMD[DType.float32, SIMDW](0.0)
+                var acc2 = SIMD[DType.float32, SIMDW](0.0)
+                var acc3 = SIMD[DType.float32, SIMDW](0.0)
+                var acb0 = SIMD[DType.float32, SIMDW](0.0)
+                var acb1 = SIMD[DType.float32, SIMDW](0.0)
+                var acb2 = SIMD[DType.float32, SIMDW](0.0)
+                var acb3 = SIMD[DType.float32, SIMDW](0.0)
+                var t = 0
+                while t < kk:
+                    var a0 = SIMD[DType.float32, SIMDW](a[it * kk + t])
+                    var bva = b.unsafe_load[width=SIMDW](t * n + j)
+                    var bvb = b.unsafe_load[width=SIMDW](t * n + j + SIMDW)
+                    acc0 += a0 * bva
+                    acb0 += a0 * bvb
+                    var a1 = SIMD[DType.float32, SIMDW](a[(it + 1) * kk + t])
+                    acc1 += a1 * bva
+                    acb1 += a1 * bvb
+                    var a2 = SIMD[DType.float32, SIMDW](a[(it + 2) * kk + t])
+                    acc2 += a2 * bva
+                    acb2 += a2 * bvb
+                    var a3 = SIMD[DType.float32, SIMDW](a[(it + 3) * kk + t])
+                    acc3 += a3 * bva
+                    acb3 += a3 * bvb
+                    t += 1
+                var base = it * n + j
+                c.unsafe_store[width=SIMDW](base, acc0)
+                c.unsafe_store[width=SIMDW](base + n, acc1)
+                c.unsafe_store[width=SIMDW](base + 2 * n, acc2)
+                c.unsafe_store[width=SIMDW](base + 3 * n, acc3)
+                c.unsafe_store[width=SIMDW](base + SIMDW, acb0)
+                c.unsafe_store[width=SIMDW](base + n + SIMDW, acb1)
+                c.unsafe_store[width=SIMDW](base + 2 * n + SIMDW, acb2)
+                c.unsafe_store[width=SIMDW](base + 3 * n + SIMDW, acb3)
+                j += 2 * SIMDW
+            while j + SIMDW <= n:
                 var acc0 = SIMD[DType.float32, SIMDW](0.0)
                 var acc1 = SIMD[DType.float32, SIMDW](0.0)
                 var acc2 = SIMD[DType.float32, SIMDW](0.0)
@@ -167,28 +272,42 @@ def gemm_nn_rows(m: Int, n: Int, kk: Int, a: Pointer[Float32, MutUntrackedOrigin
                 c.unsafe_store[width=SIMDW](base + n, acc1)
                 c.unsafe_store[width=SIMDW](base + 2 * n, acc2)
                 c.unsafe_store[width=SIMDW](base + 3 * n, acc3)
-            else:
-                var r = it
-                while r < m:
+                j += SIMDW
+            while j < n:
+                var r = 0
+                while r < 4:
+                    var acc: Float32 = 0.0
+                    var t = 0
+                    while t < kk:
+                        acc += a[(it + r) * kk + t] * b[t * n + j]
+                        t += 1
+                    c[(it + r) * n + j] = acc
+                    r += 1
+                j += 1
+        else:
+            var r = it
+            while r < hi:
+                var j = 0
+                while j + SIMDW <= n:
                     var accr = SIMD[DType.float32, SIMDW](0.0)
                     var t = 0
                     while t < kk:
-                        accr += SIMD[DType.float32, SIMDW](a[r * kk + t]) * b.unsafe_load[width=SIMDW](t * n + j)
+                        accr += (
+                            SIMD[DType.float32, SIMDW](a[r * kk + t])
+                            * b.unsafe_load[width=SIMDW](t * n + j)
+                        )
                         t += 1
                     c.unsafe_store[width=SIMDW](r * n + j, accr)
-                    r += 1
-            j += SIMDW
-        while j < n:
-            var r = 0
-            while r < 4 and it + r < hi:
-                var acc: Float32 = 0.0
-                var t = 0
-                while t < kk:
-                    acc += a[(it + r) * kk + t] * b[t * n + j]
-                    t += 1
-                c[(it + r) * n + j] = acc
+                    j += SIMDW
+                while j < n:
+                    var acc: Float32 = 0.0
+                    var t = 0
+                    while t < kk:
+                        acc += a[r * kk + t] * b[t * n + j]
+                        t += 1
+                    c[r * n + j] = acc
+                    j += 1
                 r += 1
-            j += 1
         it += 4
 
 
@@ -311,7 +430,7 @@ def gemm_worker(raw: P_U8) abi("C") -> None:
 comptime GemmWorkerFn = def(P_U8) thin abi("C") -> None
 
 
-def _gemm_dispatch(kind: Int, m: Int, n: Int, kk: Int, a: Pointer[Float32, MutUntrackedOrigin], b: Pointer[Float32, MutUntrackedOrigin], c: Pointer[Float32, MutUntrackedOrigin]):
+def _gemm_dispatch(pool: UnsafePointer[ThreadPool, MutUntrackedOrigin], kind: Int, m: Int, n: Int, kk: Int, a: Pointer[Float32, MutUntrackedOrigin], b: Pointer[Float32, MutUntrackedOrigin], c: Pointer[Float32, MutUntrackedOrigin]):
     var threads = hardware_threads()
     if (
         m < 24
@@ -339,56 +458,19 @@ def _gemm_dispatch(kind: Int, m: Int, n: Int, kk: Int, a: Pointer[Float32, MutUn
 
     comptime WorkerFn = GemmWorkerFn
     var fp: WorkerFn = gemm_worker
-    var tids = alloc[P_U8](spawned)
-
-    # Partition 0 runs on the calling thread; partitions 1..spawned-1 spawn.
-    var t = 1
-    while t < spawned:
-        var rc = external_call[
-            "pthread_create",
-            Int32,
-            Pointer[P_U8, MutUntrackedOrigin],  # pthread_t *
-            Int,                                # const pthread_attr_t * (NULL)
-            WorkerFn,                           # start routine
-            P_U8,                               # void *arg
-        ](
-            tids.unsafe_offset(t - 1),
-            0,
-            fp,
-            jobs.unsafe_offset(t).unsafe_bitcast[UInt8](),
-        )
-        if rc != 0:
-            # Spawn failed: run this partition synchronously so results stay correct.
-            gemm_worker(jobs.unsafe_offset(t).unsafe_bitcast[UInt8]())
-        t += 1
-
-    var jp0 = jobs.unsafe_offset(0)
-    if jp0[].kind == 0:
-        gemm_nt_rows(jp0[].m, jp0[].n, jp0[].kk, jp0[].a, jp0[].b, jp0[].c, jp0[].lo, jp0[].hi)
-    else:
-        gemm_nn_rows(jp0[].m, jp0[].n, jp0[].kk, jp0[].a, jp0[].b, jp0[].c, jp0[].lo, jp0[].hi)
-
-    t = 1
-    while t < spawned:
-        _ = external_call[
-            "pthread_join",
-            Int32,
-            P_U8,  # pthread_t
-            Int,   # void **retval (NULL)
-        ](tids.unsafe_offset(t - 1)[], 0)
-        t += 1
+    run_partitioned_range(pool, jobs, spawned, fp)
 
 
 @always_inline
-def gemm_nt(m: Int, n: Int, kk: Int, a: Pointer[Float32, MutUntrackedOrigin], b: Pointer[Float32, MutUntrackedOrigin], c: Pointer[Float32, MutUntrackedOrigin]):
+def gemm_nt(pool: UnsafePointer[ThreadPool, MutUntrackedOrigin], m: Int, n: Int, kk: Int, a: Pointer[Float32, MutUntrackedOrigin], b: Pointer[Float32, MutUntrackedOrigin], c: Pointer[Float32, MutUntrackedOrigin]):
     # C (m,n) = A (m,kk) @ B (n,kk)^T -- overwrites C (threaded for large sizes)
-    _gemm_dispatch(0, m, n, kk, a, b, c)
+    _gemm_dispatch(pool, 0, m, n, kk, a, b, c)
 
 
 @always_inline
-def gemm_nn(m: Int, n: Int, kk: Int, a: Pointer[Float32, MutUntrackedOrigin], b: Pointer[Float32, MutUntrackedOrigin], c: Pointer[Float32, MutUntrackedOrigin]):
+def gemm_nn(pool: UnsafePointer[ThreadPool, MutUntrackedOrigin], m: Int, n: Int, kk: Int, a: Pointer[Float32, MutUntrackedOrigin], b: Pointer[Float32, MutUntrackedOrigin], c: Pointer[Float32, MutUntrackedOrigin]):
     # C (m,n) = A (m,kk) @ B (kk,n) -- overwrites C (threaded for large sizes)
-    _gemm_dispatch(1, m, n, kk, a, b, c)
+    _gemm_dispatch(pool, 1, m, n, kk, a, b, c)
 
 
 # =============================================================================
@@ -398,18 +480,32 @@ def gemm_nn(m: Int, n: Int, kk: Int, a: Pointer[Float32, MutUntrackedOrigin], b:
 
 def run_partitioned_range[
     T: AnyType
-](jobs: Pointer[T, MutUntrackedOrigin], n_parts: Int, worker_fp: GemmWorkerFn):
+](
+    pool: UnsafePointer[ThreadPool, MutUntrackedOrigin],
+    jobs: Pointer[T, MutUntrackedOrigin],
+    n_parts: Int,
+    worker_fp: GemmWorkerFn,
+):
     """Run ``worker_fp`` over ``n_parts`` consecutive job records.
 
     Record ``t`` lives at ``jobs.unsafe_offset(t)``; the worker reads its own
-    work range out of the record. Partitions 1..spawned-1 are spawned first,
-    partition 0 then runs on the calling thread, and finally all spawned
-    workers are joined. A failed spawn runs that partition synchronously (its
-    tid slot is never joined), so results stay correct regardless of thread
-    availability.
+    work range out of the record. Partition 0 always runs on the calling
+    thread. With a live pool, partitions 1..n_parts-1 are executed by the
+    pool's parked workers (no thread creation); otherwise one pthread is
+    spawned per remaining partition and joined, with a failed spawn running
+    that partition synchronously so results stay correct regardless of
+    thread availability.
     """
+    if n_parts < 2:
+        worker_fp(jobs.unsafe_bitcast[UInt8]())
+        return
+
+    if pool[].workers > 0:
+        pool_run(pool, jobs, n_parts, worker_fp)
+        return
+
     var threads = hardware_threads()
-    if threads < 2 or n_parts < 2:
+    if threads < 2:
         worker_fp(jobs.unsafe_bitcast[UInt8]())
         return
 
@@ -448,3 +544,232 @@ def run_partitioned_range[
             Int,   # void **retval (NULL)
         ](tids.unsafe_offset(t)[], 0)
         t += 1
+
+
+# =============================================================================
+# Persistent worker pool (scoped to one top-level entry-point call)
+# =============================================================================
+# A stack-anchored pool created once per exported entry-point invocation
+# (predict / fit / cache build) and shut down at scope exit. Workers park on
+# a condition variable between parallel regions, eliminating the per-region
+# pthread_create/join cost; lifecycle stays deterministic and no global
+# state is required. The Python GIL serializes entry points, so at most one
+# pool executes work at any time even when several models are alive.
+
+comptime _POOL_MUTEX_BYTES = 96
+comptime _POOL_COND_BYTES = 96
+
+comptime _PTHREAD_MUTEX_TIMED_NP = 0
+
+
+struct PoolWorkerArg(Copyable, Movable):
+    var pool: UnsafePointer[ThreadPool, MutUntrackedOrigin]
+    var index: Int
+    var job: P_U8  # rewritten by the dispatcher before every wake
+
+    def __init__(
+        out self,
+        pool: UnsafePointer[ThreadPool, MutUntrackedOrigin],
+        index: Int,
+    ):
+        self.pool = pool
+        self.index = index
+        self.job = pool[].mu  # placeholder until first dispatch
+
+
+struct ThreadPool(Movable):
+    var mu: P_U8
+    var work_cv: P_U8
+    var done_cv: P_U8
+    var tids: Pointer[P_U8, MutUntrackedOrigin]
+    var args: Pointer[PoolWorkerArg, MutUntrackedOrigin]
+    var seen: Pointer[Int, MutUntrackedOrigin]
+    var workers: Int  # spawned workers; partitions beyond this run inline
+    var gen: Int  # dispatch sequence; workers wake when it advances
+    var done: Int  # workers that finished the current dispatch
+    var shutdown: Bool
+    var job_base: P_U8
+    var parts: Int
+    var worker_fn: GemmWorkerFn
+
+
+def _pm_init(mut m: P_U8) -> None:
+    _ = external_call["pthread_mutex_init", Int32](m, 0)
+
+
+def _pm_lock(mut m: P_U8) -> None:
+    _ = external_call["pthread_mutex_lock", Int32](m)
+
+
+def _pm_unlock(mut m: P_U8) -> None:
+    _ = external_call["pthread_mutex_unlock", Int32](m)
+
+
+def _pm_destroy(mut m: P_U8) -> None:
+    _ = external_call["pthread_mutex_destroy", Int32](m)
+
+
+def _pcv_init(mut c: P_U8) -> None:
+    _ = external_call["pthread_cond_init", Int32](c, 0)
+
+
+def _pcv_wait(mut c: P_U8, mut m: P_U8) -> None:
+    _ = external_call["pthread_cond_wait", Int32](c, m)
+
+
+def _pcv_signal(mut c: P_U8) -> None:
+    _ = external_call["pthread_cond_signal", Int32](c)
+
+
+def _pcv_broadcast(mut c: P_U8) -> None:
+    _ = external_call["pthread_cond_broadcast", Int32](c)
+
+
+def _pcv_destroy(mut c: P_U8) -> None:
+    _ = external_call["pthread_cond_destroy", Int32](c)
+
+
+@export("shinrin_pool_worker")
+def pool_worker(raw: P_U8) abi("C") -> None:
+    var arg = raw.unsafe_bitcast[PoolWorkerArg]()
+    var pool = arg[].pool
+    var idx = arg[].index
+    _pm_lock(pool[].mu)
+    while True:
+        while pool[].gen == pool[].seen.unsafe_offset(idx)[] and not pool[].shutdown:
+            _pcv_wait(pool[].work_cv, pool[].mu)
+        if pool[].shutdown:
+            _pm_unlock(pool[].mu)
+            return
+        pool[].seen.unsafe_offset(idx)[] = pool[].gen
+        # Snapshot this worker's job record while holding the lock: the next
+        # dispatch cannot begin until every worker has counted done, so the
+        # snapshot stays valid for the whole job. The dispatcher wrote our
+        # partition's record pointer into args[idx].job before waking us.
+        var my_job = arg[].job
+        var parts_now = pool[].parts
+        var fn_now = pool[].worker_fn
+        _pm_unlock(pool[].mu)
+        # Partition idx+1 (partition 0 runs on the dispatching thread).
+        if idx + 1 < parts_now:
+            fn_now(my_job)
+        _pm_lock(pool[].mu)
+        pool[].done += 1
+        _pcv_signal(pool[].done_cv)
+
+
+def pool_noop_worker(raw: P_U8) abi("C") -> None:
+    pass
+
+
+def pool_init(pool: UnsafePointer[ThreadPool, MutUntrackedOrigin], requested: Int) -> None:
+    """Initialize ``pool`` and spawn up to ``requested - 1`` parked workers.
+
+    ``requested <= 0`` means use every online CPU. With fewer than two CPUs
+    the pool stays empty and every region runs inline.
+    """
+    var threads = hardware_threads()
+    var n = threads - 1
+    if requested > 0 and requested - 1 < n:
+        n = requested - 1
+    if n < 0:
+        n = 0
+    pool[].mu = alloc[Byte](_POOL_MUTEX_BYTES)
+    pool[].work_cv = alloc[Byte](_POOL_COND_BYTES)
+    pool[].done_cv = alloc[Byte](_POOL_COND_BYTES)
+    pool[].tids = alloc[P_U8](n)
+    pool[].args = alloc[PoolWorkerArg](n)
+    pool[].seen = alloc[Int](n)
+    pool[].gen = 0
+    pool[].done = 0
+    pool[].shutdown = False
+    pool[].job_base = pool[].mu  # placeholder; unused by workers
+    pool[].parts = 0
+    pool[].worker_fn = pool_noop_worker
+    pool[].workers = 0
+    _pm_init(pool[].mu)
+    _pcv_init(pool[].work_cv)
+    _pcv_init(pool[].done_cv)
+    var handle: GemmWorkerFn = pool_worker
+    var i = 0
+    while i < n:
+        pool[].seen.unsafe_offset(i)[] = 0
+        pool[].args.unsafe_offset(i)[] = PoolWorkerArg(pool, i)
+        i += 1
+    while pool[].workers < n:
+        var rc = external_call[
+            "pthread_create",
+            Int32,
+            Pointer[P_U8, MutUntrackedOrigin],
+            Int,
+            GemmWorkerFn,
+            P_U8,
+        ](
+            pool[].tids.unsafe_offset(pool[].workers),
+            0,
+            handle,
+            pool[].args.unsafe_offset(pool[].workers).unsafe_bitcast[UInt8](),
+        )
+        if rc != 0:
+            return  # keep whatever workers spawned; regions degrade inline
+        pool[].workers += 1
+
+
+def pool_run[
+    T: AnyType
+](
+    pool: UnsafePointer[ThreadPool, MutUntrackedOrigin],
+    jobs: Pointer[T, MutUntrackedOrigin],
+    parts: Int,
+    worker_fn: GemmWorkerFn,
+) -> None:
+    """Execute partitions 0..parts-1; partition 0 runs on the caller.
+
+    Per-partition record pointers are published through ``args[i].job``.
+    """
+    _pm_lock(pool[].mu)
+    var w = 1
+    while w <= pool[].workers and w < parts:
+        pool[].args.unsafe_offset(w - 1)[].job = jobs.unsafe_offset(w).unsafe_bitcast[
+            UInt8
+        ]()
+        w += 1
+    pool[].parts = parts
+    pool[].worker_fn = worker_fn
+    pool[].done = 0
+    pool[].gen += 1
+    _pcv_broadcast(pool[].work_cv)
+    _pm_unlock(pool[].mu)
+
+    worker_fn(jobs.unsafe_bitcast[UInt8]())
+
+    _pm_lock(pool[].mu)
+    while pool[].done < pool[].workers:
+        _pcv_wait(pool[].done_cv, pool[].mu)
+    _pm_unlock(pool[].mu)
+
+
+def pool_shutdown(pool: UnsafePointer[ThreadPool, MutUntrackedOrigin]) -> None:
+    """Stop and join all workers, then release pool resources."""
+    _pm_lock(pool[].mu)
+    pool[].shutdown = True
+    _pcv_broadcast(pool[].work_cv)
+    _pm_unlock(pool[].mu)
+    var i = 0
+    while i < pool[].workers:
+        _ = external_call[
+            "pthread_join",
+            Int32,
+            P_U8,
+            Int,
+        ](pool[].tids.unsafe_offset(i)[], 0)
+        i += 1
+    _pm_destroy(pool[].mu)
+    _pcv_destroy(pool[].work_cv)
+    _pcv_destroy(pool[].done_cv)
+    pool[].mu.unsafe_free()
+    pool[].work_cv.unsafe_free()
+    pool[].done_cv.unsafe_free()
+    pool[].tids.unsafe_free()
+    pool[].args.unsafe_free()
+    pool[].seen.unsafe_free()

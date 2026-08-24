@@ -29,12 +29,16 @@ from std.python import Python, PythonObject
 from std.python.bindings import PythonModuleBuilder
 from shinrin._tk_core import (
     SIMDW,
+    ThreadPool,
     gemm_nn,
     gemm_nt,
     gelu8,
     gelu_scalar,
     iface_dim,
     np_module,
+    pool_init,
+    pool_run,
+    pool_shutdown,
     ptr_f32,
     ptr_f64,
     ptr_i64,
@@ -398,13 +402,26 @@ struct TabICLInference(ImplicitlyCopyable, Movable, Writable):
         var total = max(n_test, 1) * self.config.out_dim
         var out_arr = np.empty(Python.tuple(Int(total)), "float32")
         var output = ptr_f32(out_arr)
-        _ = self.forward_impl(
-            col_input, row_input, target, n_train, n_test, n_classes, output
+        var pool_ptr = UnsafePointer[ThreadPool, MutUntrackedOrigin](
+            alloc[ThreadPool](1)
         )
+        pool_init(pool_ptr, 0)
+        try:
+            _ = self.forward_impl(
+                pool_ptr, col_input, row_input, target, n_train, n_test,
+                n_classes, output
+            )
+        except e:
+            pool_shutdown(pool_ptr)
+            pool_ptr.free()
+            raise e
+        pool_shutdown(pool_ptr)
+        pool_ptr.free()
         return out_arr
 
     def forward_impl(
         mut self,
+        pool: UnsafePointer[ThreadPool, MutUntrackedOrigin],
         col_input: Pointer[Float32, MutUntrackedOrigin],  # (n_train, group_size)
         row_input: Pointer[Float32, MutUntrackedOrigin],  # (n_test, embed_dim)
         target: Pointer[Int, MutUntrackedOrigin],         # (n_train,)
@@ -421,7 +438,7 @@ struct TabICLInference(ImplicitlyCopyable, Movable, Writable):
 
         # ---- ColEmbedding: in_linear, optional y_encoder, then ISABs ------
         var col_embed = alloc[Float32](n_train * e + 16)
-        gemm_nt(
+        gemm_nt(pool, 
             n_train, e, cfg.col_feature_group_size,
             col_input, self.params + self._off_in_linear_w, col_embed,
         )
@@ -468,7 +485,7 @@ struct TabICLInference(ImplicitlyCopyable, Movable, Writable):
                 e, cff, cfg.col_nhead, chd, 0,
                 cfg.col_ssmax_n_hidden, cfg.bias_free_ln,
             )
-            isab_forward(
+            isab_forward(pool, 
                 col_embed, self.params + blk, col_embed,
                 n_train, cfg.col_num_inds, e, cfg.col_nhead, chd, cff, p1, p2,
             )
@@ -497,7 +514,7 @@ struct TabICLInference(ImplicitlyCopyable, Movable, Writable):
                 self.params, off, e, cff, cfg.row_nhead, rhd, 0,
                 cfg.col_ssmax_n_hidden, cfg.bias_free_ln,
             )
-            attention_block_forward(
+            attention_block_forward(pool, 
                 row_combined, None, row_combined,
                 n_test, n_test, e, cfg.row_nhead, rhd, cff,
                 p, self.params + self._off_rope_freqs, cfg.row_rope_interleaved,
@@ -587,7 +604,7 @@ struct TabICLInference(ImplicitlyCopyable, Movable, Writable):
                 cfg.icl_nhead, ihd, cfg.icl_ssmax_kind,
                 cfg.icl_ssmax_n_hidden, cfg.bias_free_ln,
             )
-            attention_block_forward(
+            attention_block_forward(pool, 
                 icl_cur, None, icl_cur, mc, mc, d_icl, cfg.icl_nhead, ihd,
                 cfg.icl_dim_feedforward(), p, None, False,
             )
@@ -609,7 +626,7 @@ struct TabICLInference(ImplicitlyCopyable, Movable, Writable):
         var decoder_b2 = self.params + self._off_decoder_b2
 
         var decoded = alloc[Float32](mc * d_icl * 2 + 16)
-        gemm_nt(mc, d_icl * 2, d_icl, icl_cur, decoder_w1, decoded)
+        gemm_nt(pool, mc, d_icl * 2, d_icl, icl_cur, decoder_w1, decoded)
         i = 0
         while i < mc:
             var b = 0
@@ -637,7 +654,7 @@ struct TabICLInference(ImplicitlyCopyable, Movable, Writable):
             i += 1
 
         var logits = alloc[Float32](mc * cfg.out_dim + 16)
-        gemm_nt(mc, cfg.out_dim, d_icl * 2, decoded, decoder_w2, logits)
+        gemm_nt(pool, mc, cfg.out_dim, d_icl * 2, decoded, decoder_w2, logits)
         i = 0
         while i < mc:
             var b = 0
@@ -673,7 +690,7 @@ struct TabICLInference(ImplicitlyCopyable, Movable, Writable):
             i += 1
 
         var attn_scores = alloc[Float32](n_test * mc + 16)
-        gemm_nt(n_test, mc, d_icl, test_proj, class_embed, attn_scores)
+        gemm_nt(pool, n_test, mc, d_icl, test_proj, class_embed, attn_scores)
 
         i = 0
         while i < n_test:
@@ -697,7 +714,7 @@ struct TabICLInference(ImplicitlyCopyable, Movable, Writable):
                 c += 1
             i += 1
 
-        gemm_nn(n_test, cfg.out_dim, mc, attn_scores, logits, output)
+        gemm_nn(pool, n_test, cfg.out_dim, mc, attn_scores, logits, output)
 
         col_embed.unsafe_free()
         row_combined.unsafe_free()
@@ -716,6 +733,7 @@ struct TabICLInference(ImplicitlyCopyable, Movable, Writable):
 
     def stage_col_impl(
         mut self,
+        pool: UnsafePointer[ThreadPool, MutUntrackedOrigin],
         x: Pointer[Float32, MutUntrackedOrigin],       # (n_rows, n_features)
         target: PythonObject,                            # (train_size,) i64/f32
         n_rows: Int,
@@ -786,7 +804,7 @@ struct TabICLInference(ImplicitlyCopyable, Movable, Writable):
                         ]
                         i += 1
                     t += 1
-                gemm_nt(
+                gemm_nt(pool, 
                     n_rows, e, s, pos, self.params + self._off_in_linear_w, cur
                 )
                 var b = self._off_in_linear_b
@@ -844,12 +862,12 @@ struct TabICLInference(ImplicitlyCopyable, Movable, Writable):
                 )
                 if capturing:
                     var slot = (g * cfg.col_num_blocks + blk) * 2 * n_inds * e
-                    attention_block_forward(
+                    attention_block_forward(pool, 
                         self.params + boff, cur, hidden,
                         n_inds, train_size, e, cfg.col_nhead, chd, cff,
                         p1, None, False,
                     )
-                    attention_block_forward(
+                    attention_block_forward(pool, 
                         cur, hidden, cur,
                         n_rows, n_inds, e, cfg.col_nhead, chd, cff,
                         p2, None, False,
@@ -857,12 +875,12 @@ struct TabICLInference(ImplicitlyCopyable, Movable, Writable):
                         col_kv_out.value() + slot + n_inds * e,
                     )
                 else:
-                    attention_block_forward(
+                    attention_block_forward(pool, 
                         self.params + boff, cur, hidden,
                         n_inds, train_size, e, cfg.col_nhead, chd, cff,
                         p1, None, False,
                     )
-                    attention_block_forward(
+                    attention_block_forward(pool, 
                         cur, hidden, cur,
                         n_rows, n_inds, e, cfg.col_nhead, chd, cff,
                         p2, None, False,
@@ -915,7 +933,13 @@ struct TabICLInference(ImplicitlyCopyable, Movable, Writable):
         while i < n * kk:
             b[i] = b_in[i]
             i += 1
-        gemm_nt(m, n, kk, a, b, c)
+        var pool_ptr = UnsafePointer[ThreadPool, MutUntrackedOrigin](
+            alloc[ThreadPool](1)
+        )
+        pool_init(pool_ptr, 0)
+        gemm_nt(pool_ptr, m, n, kk, a, b, c)
+        pool_shutdown(pool_ptr)
+        pool_ptr.free()
         var np = np_module()
         var arr = np.empty(m * n)
         var ob = ptr_f64(arr)
@@ -957,6 +981,10 @@ struct TabICLInference(ImplicitlyCopyable, Movable, Writable):
             self.params, boff, e, cff, nh, chd, 0,
             cfg.col_ssmax_n_hidden, cfg.bias_free_ln,
         )
+        var pool_ptr = UnsafePointer[ThreadPool, MutUntrackedOrigin](
+            alloc[ThreadPool](1)
+        )
+        pool_init(pool_ptr, 0)
 
         var qn = alloc[Float32](R * e + 16)
         layer_norm_affine(q_in, qn, R, e, p.ln1_w, p.ln1_b, True, p.ln_has_bias)
@@ -976,7 +1004,7 @@ struct TabICLInference(ImplicitlyCopyable, Movable, Writable):
         while bi2 < 3 * e:
             bcopy[bi2] = p.b_qkv[bi2]
             bi2 += 1
-        gemm_nt(R, e, e, qn, wcopy, q_proj)
+        gemm_nt(pool_ptr, R, e, e, qn, wcopy, q_proj)
         # dump raw gemm output before bias
         var qproj_raw = alloc[Float32](R * e + 16)
         var ri = 0
@@ -984,9 +1012,9 @@ struct TabICLInference(ImplicitlyCopyable, Movable, Writable):
             qproj_raw[ri] = q_proj[ri]
             ri += 1
         _add_row_bias(q_proj, bcopy, R, e)
-        gemm_nt(K, e, e, kn, wcopy + e * e, k_proj)
+        gemm_nt(pool_ptr, K, e, e, kn, wcopy + e * e, k_proj)
         _add_row_bias(k_proj, bcopy + e, K, e)
-        gemm_nt(K, e, e, kn, wcopy + 2 * e * e, v_proj)
+        gemm_nt(pool_ptr, K, e, e, kn, wcopy + 2 * e * e, v_proj)
         _add_row_bias(v_proj, bcopy + 2 * e, K, e)
 
         var q_a = alloc[Float32](R * nh * chd + 16)
@@ -1031,7 +1059,7 @@ struct TabICLInference(ImplicitlyCopyable, Movable, Writable):
             var k_h = k_a + h2 * K * chd
             var v_h = v_a + h2 * K * chd
             var o_h = out_a + h2 * R * chd
-            gemm_nt(R, K, chd, q_h, k_h, scores)
+            gemm_nt(pool_ptr, R, K, chd, q_h, k_h, scores)
             if h2 == 0:
                 var cp = 0
                 while cp < R * K:
@@ -1060,7 +1088,7 @@ struct TabICLInference(ImplicitlyCopyable, Movable, Writable):
                     scores[base_s + s] /= sum_v
                     s += 1
                 ts += 1
-            gemm_nn(R, chd, K, scores, v_h, o_h)
+            gemm_nn(pool_ptr, R, chd, K, scores, v_h, o_h)
             h2 += 1
 
         var merged = alloc[Float32](R * e + 16)
@@ -1077,7 +1105,7 @@ struct TabICLInference(ImplicitlyCopyable, Movable, Writable):
                 hh += 1
             mi += 1
         var res = alloc[Float32](R * e + 16)
-        gemm_nt(R, e, e, merged, p.w_out, res)
+        gemm_nt(pool_ptr, R, e, e, merged, p.w_out, res)
         _add_row_bias(res, p.b_out, R, e)
         var dst = alloc[Float32](R * e + 16)
         mi = 0
@@ -1197,6 +1225,8 @@ struct TabICLInference(ImplicitlyCopyable, Movable, Writable):
                 j2 += 1
             cursor += sz
             i2 += 1
+        pool_shutdown(pool_ptr)
+        pool_ptr.free()
         return out_arr
 
     @staticmethod
@@ -1223,9 +1253,20 @@ struct TabICLInference(ImplicitlyCopyable, Movable, Writable):
         )
         var out_arr = np.empty(Python.tuple(Int(total)), "float32")
         var col_out = ptr_f32(out_arr)
-        _ = self.stage_col_impl(
-            x, parts[1], n_rows, train_size, n_features, col_out
+        var pool_ptr = UnsafePointer[ThreadPool, MutUntrackedOrigin](
+            alloc[ThreadPool](1)
         )
+        pool_init(pool_ptr, 0)
+        try:
+            _ = self.stage_col_impl(
+                pool_ptr, x, parts[1], n_rows, train_size, n_features, col_out
+            )
+        except e:
+            pool_shutdown(pool_ptr)
+            pool_ptr.free()
+            raise e
+        pool_shutdown(pool_ptr)
+        pool_ptr.free()
         return out_arr
 
     # =====================================================================
@@ -1234,6 +1275,7 @@ struct TabICLInference(ImplicitlyCopyable, Movable, Writable):
 
     def stage_row_impl(
         mut self,
+        pool: UnsafePointer[ThreadPool, MutUntrackedOrigin],
         col_out: Pointer[Float32, MutUntrackedOrigin],  # (n_rows, G*E)
         n_rows: Int,
         n_groups: Int,
@@ -1307,7 +1349,7 @@ struct TabICLInference(ImplicitlyCopyable, Movable, Writable):
                     e, cff, cfg.row_nhead, rhd, 0,
                     cfg.col_ssmax_n_hidden, cfg.bias_free_ln,
                 )
-                attention_block_forward(
+                attention_block_forward(pool, 
                     cur, None, cur, n_groups, n_groups, e,
                     cfg.row_nhead, rhd, cff, p,
                     rope_freqs, cfg.row_rope_interleaved,
@@ -1321,7 +1363,7 @@ struct TabICLInference(ImplicitlyCopyable, Movable, Writable):
                 e, cff, cfg.row_nhead, rhd, 0,
                 cfg.col_ssmax_n_hidden, cfg.bias_free_ln,
             )
-            attention_block_forward(
+            attention_block_forward(pool, 
                 cur, cur, cur, num_cls, n_groups, e,
                 cfg.row_nhead, rhd, cff, plast,
                 rope_freqs, cfg.row_rope_interleaved,
@@ -1364,7 +1406,18 @@ struct TabICLInference(ImplicitlyCopyable, Movable, Writable):
         var total = n_rows * self.config.row_num_cls * self.config.embed_dim
         var out_arr = np.empty(Python.tuple(Int(total)), "float32")
         var reps = ptr_f32(out_arr)
-        _ = self.stage_row_impl(col_out, n_rows, n_groups, reps)
+        var pool_ptr = UnsafePointer[ThreadPool, MutUntrackedOrigin](
+            alloc[ThreadPool](1)
+        )
+        pool_init(pool_ptr, 0)
+        try:
+            _ = self.stage_row_impl(pool_ptr, col_out, n_rows, n_groups, reps)
+        except e:
+            pool_shutdown(pool_ptr)
+            pool_ptr.free()
+            raise e
+        pool_shutdown(pool_ptr)
+        pool_ptr.free()
         return out_arr
 
     # =====================================================================
@@ -1373,6 +1426,7 @@ struct TabICLInference(ImplicitlyCopyable, Movable, Writable):
 
     def _y_encode_reps_impl(
         mut self,
+        pool: UnsafePointer[ThreadPool, MutUntrackedOrigin],
         reps: Pointer[Float32, MutUntrackedOrigin],  # (train_size, icl_dim)
         target: PythonObject,
         train_size: Int,
@@ -1414,6 +1468,7 @@ struct TabICLInference(ImplicitlyCopyable, Movable, Writable):
 
     def _icl_decode_impl(
         mut self,
+        pool: UnsafePointer[ThreadPool, MutUntrackedOrigin],
         reps: Pointer[Float32, MutUntrackedOrigin],  # (n_rows, icl_dim)
         n_rows: Int,
         dst: Pointer[Float32, MutUntrackedOrigin],  # (n_rows, out_dim)
@@ -1434,7 +1489,7 @@ struct TabICLInference(ImplicitlyCopyable, Movable, Writable):
         )
 
         var decoded = alloc[Float32](n_rows * d_icl * 2 + 16)
-        gemm_nt(n_rows, d_icl * 2, d_icl, reps, self.params + self._off_decoder_w1, decoded)
+        gemm_nt(pool, n_rows, d_icl * 2, d_icl, reps, self.params + self._off_decoder_w1, decoded)
         var t = 0
         while t < n_rows:
             var b = 0
@@ -1461,7 +1516,7 @@ struct TabICLInference(ImplicitlyCopyable, Movable, Writable):
             decoded[t] = gelu_scalar(decoded[t])
             t += 1
 
-        gemm_nt(n_rows, cfg.out_dim, d_icl * 2, decoded, self.params + self._off_decoder_w2, dst)
+        gemm_nt(pool, n_rows, cfg.out_dim, d_icl * 2, decoded, self.params + self._off_decoder_w2, dst)
         t = 0
         while t < n_rows:
             var b = 0
@@ -1481,6 +1536,7 @@ struct TabICLInference(ImplicitlyCopyable, Movable, Writable):
 
     def predict_from_representations_impl(
         mut self,
+        pool: UnsafePointer[ThreadPool, MutUntrackedOrigin],
         reps: Pointer[Float32, MutUntrackedOrigin],  # (n_rows, icl_dim)
         target: PythonObject,
         n_rows: Int,
@@ -1501,7 +1557,7 @@ struct TabICLInference(ImplicitlyCopyable, Movable, Writable):
             raise Error("target length must be within [1, n_rows]")
 
         # y_encoder augmentation on the train prefix (shared helper).
-        _ = self._y_encode_reps_impl(reps, target, train_size)
+        _ = self._y_encode_reps_impl(pool, reps, target, train_size)
 
         # ICL blocks: plain pre-norm attention whose keys/values are
         # restricted to the train prefix (torch Encoder.forward with
@@ -1516,14 +1572,14 @@ struct TabICLInference(ImplicitlyCopyable, Movable, Writable):
                 cfg.icl_nhead, ihd, cfg.icl_ssmax_kind,
                 cfg.icl_ssmax_n_hidden, cfg.bias_free_ln,
             )
-            attention_block_forward(
+            attention_block_forward(pool, 
                 reps, reps, reps, n_rows, train_size, d_icl,
                 cfg.icl_nhead, ihd, icl_ff, p, None, False,
             )
             blk += 1
 
         # Predictor LayerNorm + decoder head (shared helper).
-        _ = self._icl_decode_impl(reps, n_rows, dst)
+        _ = self._icl_decode_impl(pool, reps, n_rows, dst)
         return 0
 
     @staticmethod
@@ -1551,9 +1607,20 @@ struct TabICLInference(ImplicitlyCopyable, Movable, Writable):
         var total = n_rows * self.config.out_dim
         var out_arr = np.empty(Python.tuple(Int(total)), "float32")
         var outp = ptr_f32(out_arr)
-        _ = self.predict_from_representations_impl(
-            reps, parts[1], n_rows, outp
+        var pool_ptr = UnsafePointer[ThreadPool, MutUntrackedOrigin](
+            alloc[ThreadPool](1)
         )
+        pool_init(pool_ptr, 0)
+        try:
+            _ = self.predict_from_representations_impl(
+                pool_ptr, reps, parts[1], n_rows, outp
+            )
+        except e:
+            pool_shutdown(pool_ptr)
+            pool_ptr.free()
+            raise e
+        pool_shutdown(pool_ptr)
+        pool_ptr.free()
         return out_arr
 
     # =====================================================================
@@ -1562,6 +1629,7 @@ struct TabICLInference(ImplicitlyCopyable, Movable, Writable):
 
     def stage_col_cached_impl(
         mut self,
+        pool: UnsafePointer[ThreadPool, MutUntrackedOrigin],
         x: Pointer[Float32, MutUntrackedOrigin],       # (n_test, n_features)
         n_test: Int,
         train_size: Int,
@@ -1609,7 +1677,7 @@ struct TabICLInference(ImplicitlyCopyable, Movable, Writable):
                         ]
                         i += 1
                     t += 1
-                gemm_nt(
+                gemm_nt(pool, 
                     n_test, e, s, pos, self.params + self._off_in_linear_w, cur
                 )
                 var b = self._off_in_linear_b
@@ -1643,7 +1711,7 @@ struct TabICLInference(ImplicitlyCopyable, Movable, Writable):
                         cfg.col_ssmax_n_hidden, cfg.bias_free_ln,
                     )
                     var slot = (g * cfg.col_num_blocks + blk) * 2 * n_inds * e
-                    attention_block_forward_cached(
+                    attention_block_forward_cached(pool, 
                         cur, cur, n_test, n_inds,
                         e, cfg.col_nhead, chd, cff, p2,
                         col_cache + slot,
@@ -1714,37 +1782,51 @@ struct TabICLInference(ImplicitlyCopyable, Movable, Writable):
         var icl_cache = ptr_f32(icl_arr)
 
         # Col stage over the training rows with K/V capture.
-        var col_out = alloc[Float32](train_size * G * e + 16)
-        _ = self.stage_col_impl(
-            x, target, train_size, train_size, n_features, col_out, col_cache
+        var pool_ptr = UnsafePointer[ThreadPool, MutUntrackedOrigin](
+            alloc[ThreadPool](1)
         )
-
-        # Row stage gives the train representations; y-encode them in place
-        # exactly like predict_from_representations_impl does.
-        var reps = alloc[Float32](train_size * ce + 16)
-        _ = self.stage_row_impl(col_out, train_size, G, reps)
-        _ = self._y_encode_reps_impl(reps, target, train_size)
-
-        # ICL blocks capture K/V restricted to the train prefix.
-        var blk = 0
-        while blk < cfg.icl_num_blocks:
-            var off = self._off_icl_blocks + blk * self._icl_attn_size
-            var p = attn_params_at(
-                self.params, off, d_icl, icl_ff,
-                cfg.icl_nhead, ihd, cfg.icl_ssmax_kind,
-                cfg.icl_ssmax_n_hidden, cfg.bias_free_ln,
+        pool_init(pool_ptr, 0)
+        try:
+            var col_out = alloc[Float32](train_size * G * e + 16)
+            _ = self.stage_col_impl(
+                pool_ptr,
+                x, target, train_size, train_size, n_features, col_out,
+                col_cache
             )
-            var slot = blk * 2 * train_size * d_icl
-            attention_block_forward(
-                reps, reps, reps, train_size, train_size, d_icl,
-                cfg.icl_nhead, ihd, icl_ff, p, None, False,
-                icl_cache + slot,
-                icl_cache + slot + train_size * d_icl,
-            )
-            blk += 1
 
-        col_out.unsafe_free()
-        reps.unsafe_free()
+            # Row stage gives the train representations; y-encode them in
+            # place exactly like predict_from_representations_impl does.
+            var reps = alloc[Float32](train_size * ce + 16)
+            _ = self.stage_row_impl(pool_ptr, col_out, train_size, G, reps)
+            _ = self._y_encode_reps_impl(pool_ptr, reps, target, train_size)
+
+            # ICL blocks capture K/V restricted to the train prefix.
+            var blk = 0
+            while blk < cfg.icl_num_blocks:
+                var off = self._off_icl_blocks + blk * self._icl_attn_size
+                var p = attn_params_at(
+                    self.params, off, d_icl, icl_ff,
+                    cfg.icl_nhead, ihd, cfg.icl_ssmax_kind,
+                    cfg.icl_ssmax_n_hidden, cfg.bias_free_ln,
+                )
+                var slot = blk * 2 * train_size * d_icl
+                attention_block_forward(
+                    pool_ptr,
+                    reps, reps, reps, train_size, train_size, d_icl,
+                    cfg.icl_nhead, ihd, icl_ff, p, None, False,
+                    icl_cache + slot,
+                    icl_cache + slot + train_size * d_icl,
+                )
+                blk += 1
+
+            col_out.unsafe_free()
+            reps.unsafe_free()
+        except e:
+            pool_shutdown(pool_ptr)
+            pool_ptr.free()
+            raise e
+        pool_shutdown(pool_ptr)
+        pool_ptr.free()
         return Python.tuple(col_arr, icl_arr)
 
     @staticmethod
@@ -1793,38 +1875,50 @@ struct TabICLInference(ImplicitlyCopyable, Movable, Writable):
             raise Error("icl cache size mismatch for this train size")
 
         var col_out = alloc[Float32](n_test * G * e + 16)
-        _ = self.stage_col_cached_impl(
-            x, n_test, train_size, n_features, col_out, col_cache
-        )
-        var reps = alloc[Float32](n_test * ce + 16)
-        _ = self.stage_row_impl(col_out, n_test, G, reps)
-
-        # ICL blocks attend the test queries to the cached train K/V, then
-        # the shared LayerNorm + decoder produces raw outputs per row.
-        var blk = 0
-        while blk < cfg.icl_num_blocks:
-            var off = self._off_icl_blocks + blk * self._icl_attn_size
-            var p = attn_params_at(
-                self.params, off, d_icl, icl_ff,
-                cfg.icl_nhead, ihd, cfg.icl_ssmax_kind,
-                cfg.icl_ssmax_n_hidden, cfg.bias_free_ln,
-            )
-            var slot = blk * 2 * train_size * d_icl
-            attention_block_forward_cached(
-                reps, reps, n_test, train_size,
-                d_icl, cfg.icl_nhead, ihd, icl_ff, p,
-                icl_cache + slot,
-                icl_cache + slot + train_size * d_icl,
-            )
-            blk += 1
-
         var np = np_module()
         var total = n_test * cfg.out_dim
         var out_arr = np.empty(Python.tuple(Int(total)), "float32")
-        _ = self._icl_decode_impl(reps, n_test, ptr_f32(out_arr))
+        var pool_ptr = UnsafePointer[ThreadPool, MutUntrackedOrigin](
+            alloc[ThreadPool](1)
+        )
+        pool_init(pool_ptr, 0)
+        try:
+            _ = self.stage_col_cached_impl(
+                pool_ptr, x, n_test, train_size, n_features, col_out, col_cache
+            )
+            var reps = alloc[Float32](n_test * ce + 16)
+            _ = self.stage_row_impl(pool_ptr, col_out, n_test, G, reps)
 
-        col_out.unsafe_free()
-        reps.unsafe_free()
+            # ICL blocks attend the test queries to the cached train K/V,
+            # then the shared LayerNorm + decoder produces raw outputs.
+            var blk = 0
+            while blk < cfg.icl_num_blocks:
+                var off = self._off_icl_blocks + blk * self._icl_attn_size
+                var p = attn_params_at(
+                    self.params, off, d_icl, icl_ff,
+                    cfg.icl_nhead, ihd, cfg.icl_ssmax_kind,
+                    cfg.icl_ssmax_n_hidden, cfg.bias_free_ln,
+                )
+                var slot = blk * 2 * train_size * d_icl
+                attention_block_forward_cached(
+                    pool_ptr,
+                    reps, reps, n_test, train_size,
+                    d_icl, cfg.icl_nhead, ihd, icl_ff, p,
+                    icl_cache + slot,
+                    icl_cache + slot + train_size * d_icl,
+                )
+                blk += 1
+
+            _ = self._icl_decode_impl(pool_ptr, reps, n_test, ptr_f32(out_arr))
+
+            col_out.unsafe_free()
+            reps.unsafe_free()
+        except e:
+            pool_shutdown(pool_ptr)
+            pool_ptr.free()
+            raise e
+        pool_shutdown(pool_ptr)
+        pool_ptr.free()
         return out_arr
 
 
