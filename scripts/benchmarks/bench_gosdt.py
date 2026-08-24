@@ -14,14 +14,19 @@ GOSDTClassifier) against a typical decision tree classifier
 
 The binarizer uses n_estimators=20, max_depth=2 by default: upstream's
 defaults (100 x depth 3) produce hundreds of threshold columns whose column
-elimination refits and whose search spaces explode under shinrin's
-single-threaded GOSDT build.
+elimination refits and whose resulting search spaces explode.
 
 Metrics: binarize/fit/predict wall-clock times, held-out accuracy, tree
 size, and (GOSDT only) the certified optimality bounds.
 
 Usage:
     python scripts/benchmarks/bench_gosdt.py [--repeats N]
+        [--workers 1,2,4,8]
+
+With ``--workers``, a parallel-scaling sweep is run instead: the GOSDT stage
+is fitted once per listed ``worker_limit`` value on each dataset (binarizing
+only once) and fit-time speedups are reported alongside the certified loss,
+which must be identical across all worker counts.
 """
 
 from __future__ import annotations
@@ -171,6 +176,98 @@ def print_table(rows: list[dict[str, Any]], flush: bool = False) -> None:
         )
 
 
+def bench_worker_scaling(
+    name: str,
+    X: np.ndarray,
+    y: np.ndarray,
+    depth_budget: int,
+    regularization: float,
+    workers: list[int],
+    **kwargs,
+) -> list[dict[str, Any]]:
+    """Fit the GOSDT stage once per worker count and report scaling.
+
+    The binarizer (if any) runs exactly once per dataset so that only the
+    search itself is timed across ``worker_limit`` values.
+    """
+    prebinarized = bool(kwargs.pop("prebinarized", False))
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.25, random_state=0, stratify=y
+    )
+    if prebinarized:
+        Xb_train_raw, Xb_test_raw = X_train.astype(np.uint8), X_test.astype(np.uint8)
+    else:
+        enc = ThresholdGuessBinarizer(n_estimators=20, max_depth=2, random_state=0)
+        Xb_train_raw = enc.fit_transform(X_train, y_train)
+        Xb_test_raw = enc.transform(X_test)
+    Xb_train = np.asarray(Xb_train_raw) > 0.5
+    Xb_test = np.asarray(Xb_test_raw) > 0.5
+
+    rows: list[dict[str, Any]] = []
+    for worker_limit in workers:
+        clf = GOSDTClassifier(
+            regularization=regularization,
+            depth_budget=depth_budget,
+            worker_limit=worker_limit,
+        )
+        t0 = time.perf_counter()
+        clf.fit(Xb_train, y_train)
+        fit_s = time.perf_counter() - t0
+        preds = clf.predict(Xb_test)
+        leaves, nodes = gosdt_tree_stats(clf)
+        result = clf.get_result()
+        rows.append(
+            {
+                "dataset": name,
+                "workers": worker_limit,
+                "fit_s": fit_s,
+                "test_acc": accuracy_score(y_test, preds),
+                "nodes": nodes,
+                "leaves": leaves,
+                "loss": result["model_loss"],
+                "lower_bound": result["lower_bound"],
+                "upper_bound": result["upper_bound"],
+                "gap": result["upper_bound"] - result["lower_bound"],
+            }
+        )
+        print(
+            f"  workers={worker_limit}: fit={fit_s:.3f}s loss={result['model_loss']:.6f} "
+            f"bounds=[{result['lower_bound']:.6f}, {result['upper_bound']:.6f}] "
+            f"acc={accuracy_score(y_test, preds):.4f}",
+            flush=True,
+        )
+
+    # Certified-loss parity: parallel search must not change the optimum.
+    losses = {row["loss"] for row in rows}
+    bounds = {(row["lower_bound"], row["upper_bound"]) for row in rows}
+    status = "OK" if len(losses) == 1 and len(bounds) == 1 else "MISMATCH"
+    print(f"  parity: {status}", flush=True)
+    return rows
+
+
+def print_scaling_table(rows: list[dict[str, Any]]) -> None:
+    header = (
+        f"{'dataset':<38} {'workers':>7} {'fit s':>9} {'speedup':>8} "
+        f"{'test acc':>9} {'leaves':>7} {'cert gap':>9}"
+    )
+    print()
+    print(header)
+    print("-" * len(header))
+    by_dataset: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        by_dataset.setdefault(row["dataset"], []).append(row)
+    for dataset_rows in by_dataset.values():
+        base_s = dataset_rows[0]["fit_s"]
+        for row in dataset_rows:
+            speedup = base_s / row["fit_s"] if row["fit_s"] > 0 else float("nan")
+            gap = "-" if row["gap"] is None else f"{row['gap']:.4f}"
+            print(
+                f"{row['dataset']:<38} {row['workers']:>7} {row['fit_s']:>9.3f} "
+                f"{speedup:>7.2f}x {row['test_acc']:>9.4f} {row['leaves']:>7} {gap:>9}",
+                flush=True,
+            )
+
+
 WORKLOADS = [
     ("iris (real, n=150, d=4, 3 classes)", "iris", {}),
     (
@@ -192,6 +289,16 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--regularization", type=float, default=0.05)
     parser.add_argument("--depth-budget", type=int, default=4)
+    parser.add_argument(
+        "--workers",
+        type=str,
+        default=None,
+        help=(
+            "Comma-separated worker_limit values for a parallel-scaling "
+            "sweep (e.g. --workers 1,2,4,8). Runs the GOSDT stage only; "
+            "CART baselines are skipped."
+        ),
+    )
     args = parser.parse_args()
 
     datasets: list[tuple[str, np.ndarray, np.ndarray, dict]] = []
@@ -203,6 +310,25 @@ def main() -> None:
         else:
             X, y = make_classification(**kwargs)
         datasets.append((name, np.asarray(X), np.asarray(y), dict(kwargs)))
+
+    if args.workers is not None:
+        workers = [int(w) for w in args.workers.split(",") if w.strip()]
+        print(
+            f"GOSDT worker-scaling sweep (depth_budget={args.depth_budget}, "
+            f"regularization={args.regularization}, workers={workers}, "
+            "75/25 stratified split)"
+        )
+        rows: list[dict[str, Any]] = []
+        for name, X, y, extra in datasets:
+            print()
+            print(f"### {name}", flush=True)
+            rows.extend(
+                bench_worker_scaling(
+                    name, X, y, args.depth_budget, args.regularization, workers, **extra
+                )
+            )
+        print_scaling_table(rows)
+        return
 
     print(
         f"GOSDT vs CART benchmark (depth_budget={args.depth_budget}, "
@@ -219,6 +345,7 @@ def main() -> None:
     print()
     print("notes: cart+d matches GOSDT's depth budget; 'cert gap' is the")
     print("certified upper_bound - lower_bound optimality interval (GOSDT only).")
+    print("use --workers for the parallel-scaling sweep.")
 
 
 if __name__ == "__main__":

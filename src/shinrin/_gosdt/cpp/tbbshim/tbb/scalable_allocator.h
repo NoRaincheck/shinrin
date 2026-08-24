@@ -1,7 +1,7 @@
 /*
- * Serial shim for oneTBB's scalable_allocator, used by the vendored GOSDT
- * engine. Maps to std::allocator; the engine is run single-threaded
- * (worker_limit = 1) so no concurrent allocator is required.
+ * Shim for oneTBB's scalable_allocator. Maps to std::allocator; no
+ * concurrent allocator is required (GMP-backed bitmasks allocate through
+ * libc malloc, which is thread-safe).
  */
 #ifndef SHINRIN_TBB_SHIM_SCALABLE_ALLOCATOR_H
 #define SHINRIN_TBB_SHIM_SCALABLE_ALLOCATOR_H

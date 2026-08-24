@@ -3,6 +3,7 @@
 
 #include <tbb/tick_count.h>
 
+#include <atomic>
 #include <chrono>
 #include <fstream>
 #include <iostream>
@@ -83,21 +84,27 @@ class Optimizer {
     std::vector<LocalState> m_local_states;
 
     time_point<high_resolution_clock> m_start_time;
-    unsigned long ticks = 0;              // Number of ticks passed
+    unsigned long ticks = 0;              // Number of ticks passed (worker 0 only)
     unsigned long tick_duration = 10000;  // Number of iterations per tick
-    bool active = true;                   // Flag indicating whether the optimization is still active
+    // Termination flag polled by every worker each iteration; written by
+    // worker 0. Atomic so that termination is observed promptly and without a
+    // data race.
+    std::atomic<bool> active = true;
 
     // Analytics State
     Bitmask root;                    // Root indicator
     std::vector<int> translator;  // Root indicator
 
-    float global_boundary = std::numeric_limits<float>::max();     // Global optimality gap
-    float global_upperbound = std::numeric_limits<float>::max();   // Global upperbound of the objective
-    float global_lowerbound = -std::numeric_limits<float>::max();  // Global lowerbound of the
-                                                                   // objective
+    // Global objective boundary. Written by whichever worker processes the
+    // root vertex, read by all workers; atomic to avoid data races (writes
+    // are additionally serialized by the graph lock held at the call sites).
+    std::atomic<float> global_boundary = std::numeric_limits<float>::max();     // Global optimality gap
+    std::atomic<float> global_upperbound = std::numeric_limits<float>::max();   // Global upperbound of the objective
+    std::atomic<float> global_lowerbound = -std::numeric_limits<float>::max();  // Global lowerbound of the
+                                                                                // objective
     std::vector<unsigned int> work_distribution;                   // Distribution of work done for each percentile
-    unsigned int explore = 0.0;                                    // Distributtion of work from downward message
-    unsigned int exploit = 0.0;                                    // Distribution of work from upward message
+    std::atomic<unsigned int> explore = 0;                         // Distribution of work from downward message
+    std::atomic<unsigned int> exploit = 0;                         // Distribution of work from upward message
 
     float cart(Bitmask const &capture_set, Bitmask const &feature_set, unsigned int id);
 

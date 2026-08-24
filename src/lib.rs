@@ -2804,8 +2804,8 @@ fn corels_predict_wrap<'py>(
 // GOSDT (vendored gosdt-guesses) bindings
 //
 // The vendored C++ engine lives in `src/shinrin/_gosdt/cpp` and is compiled
-// into this extension by `build.rs` together with a serial TBB shim and the
-// bundled mini-gmp. This replaces upstream's pybind11 module (_libgosdt).
+// into this extension by `build.rs` together with a lock-based TBB shim and
+// the bundled mini-gmp. This replaces upstream's pybind11 module (_libgosdt).
 // =============================================================================
 
 mod gosdt_bridge {
@@ -2830,6 +2830,7 @@ mod gosdt_bridge {
             upperbound_guess: f32,
             time_limit: u32,
             model_limit: u32,
+            worker_limit: u32,
             verbose: c_int,
             diagnostics: c_int,
             depth_budget: c_uchar,
@@ -2865,10 +2866,10 @@ mod gosdt_bridge {
 /// Returns a dict mirroring upstream's `GOSDTResult` attributes.
 #[pyfunction]
 #[pyo3(signature = (regularization, upperbound_guess, time_limit, model_limit,
-                    verbose, diagnostics, depth_budget, reference_lb, look_ahead,
-                    similar_support, cancellation, feature_transform, rule_list,
-                    non_binary, trace_path, tree_path, profile_path, xy, costs,
-                    feature_map, reference))]
+                    worker_limit, verbose, diagnostics, depth_budget, reference_lb,
+                    look_ahead, similar_support, cancellation, feature_transform,
+                    rule_list, non_binary, trace_path, tree_path, profile_path, xy,
+                    costs, feature_map, reference))]
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::type_complexity)]
 fn gosdt_fit<'py>(
@@ -2877,6 +2878,7 @@ fn gosdt_fit<'py>(
     upperbound_guess: f32,
     time_limit: u32,
     model_limit: u32,
+    worker_limit: u32,
     verbose: bool,
     diagnostics: bool,
     depth_budget: u8,
@@ -2973,6 +2975,7 @@ fn gosdt_fit<'py>(
             upperbound_guess,
             time_limit,
             model_limit,
+            worker_limit,
             verbose as i32,
             diagnostics as i32,
             depth_budget,
