@@ -278,7 +278,7 @@ class NumericBinarizer(TransformerMixin, BaseEstimator):
     def feature_map(self):
         """
         Extract the feature map from the encoder. This is a dictionary that can be passed to
-        the GOSDTClassifier to generate N-ary trees.
+        the SPOTClassifier to generate N-ary trees.
         
         Returns
         -------

@@ -1,6 +1,6 @@
 # GOSDT Benchmarks
 
-Comparison of shinrin's vendored **GOSDTClassifier** (globally optimal sparse
+Comparison of shinrin's vendored **SPOTClassifier** (formerly GOSDTClassifier; globally optimal sparse
 decision trees with reference-ensemble guesses) against a typical decision
 tree classifier, scikit-learn's CART (`DecisionTreeClassifier`):
 
@@ -9,7 +9,7 @@ tree classifier, scikit-learn's CART (`DecisionTreeClassifier`):
 - **cart+d** — CART with `max_depth` set to GOSDT's depth budget
   (matched-complexity reference).
 - **gosdt** — full reference-ensemble pipeline: `ThresholdGuessBinarizer`
-  (n_estimators=20, max_depth=2) + `GOSDTClassifier`
+  (n_estimators=20, max_depth=2) + `SPOTClassifier`
   (regularization=0.05, depth_budget=4). Binarization time is reported
   separately; datasets that are already binary (compas) skip it.
 
@@ -103,5 +103,5 @@ regularization=0.02, depth_budget=5):
 - Runtime is dominated by the search's branch-and-bound, which parallelizes
   well on search-heavy workloads (~4x with 8 workers on M1 Max; scaling is
   bounded by the coarse graph lock and by Amdahl's law on small searches).
-  Pass `worker_limit=0` (or a concrete count) to `GOSDTClassifier` to opt in;
+  Pass `worker_limit=0` (or a concrete count) to `SPOTClassifier` to opt in;
   the default remains single-threaded.

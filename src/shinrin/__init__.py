@@ -26,7 +26,6 @@ __all__ = [
     "ExtraTreeQuantileRegressor",
     "ExtraTreesQuantileRegressor",
     "ExtraTreesRegressor",
-    "GOSDTClassifier",
     "MLPClassifier",
     "MLPRegressor",
     "MondrianForestClassifier",
@@ -38,6 +37,7 @@ __all__ = [
     "RandomForestQuantileRegressor",
     "RandomForestRegressor",
     "Rule",
+    "SPOTClassifier",
     "SkopeRules",
     "TabICLClassifier",
     "TabICLRegressor",
@@ -63,7 +63,6 @@ __all__ = [
 # Mapping of public name → (module_path, attr_name)
 _IMPORT_MAP: dict[str, tuple[str, str]] = {
     "CorelsClassifier": ("shinrin._corels.corels", "CorelsClassifier"),
-    "GOSDTClassifier": ("shinrin._spot.classifier", "GOSDTClassifier"),
     "NumericBinarizer": ("shinrin._spot.binarizer", "NumericBinarizer"),
     "OrdtClassifier": ("shinrin._ordt", "OrdtClassifier"),
     "ExtraTreesRegressor": ("shinrin._skgarden.forest", "ExtraTreesRegressor"),
@@ -105,6 +104,7 @@ _IMPORT_MAP: dict[str, tuple[str, str]] = {
     "Rule": ("shinrin._skrules.rule", "Rule"),
     "replace_feature_name": ("shinrin._skrules.rule", "replace_feature_name"),
     "SkopeRules": ("shinrin._skrules.skope_rules", "SkopeRules"),
+    "SPOTClassifier": ("shinrin._spot.classifier", "SPOTClassifier"),
     "TabICLClassifier": ("shinrin.tabicl", "TabICLClassifier"),
     "TabICLRegressor": ("shinrin.tabicl", "TabICLRegressor"),
     "TabMClassifier": ("shinrin.tabm", "TabMClassifier"),

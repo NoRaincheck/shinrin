@@ -266,7 +266,7 @@ class ThresholdGuessBinarizer(TransformerMixin, BaseEstimator):
     def feature_map(self):
         """
         Extracts the mapping of original features to the transformed features. This can be passed to 
-        the GOSDTClassifier to generate N-ary trees.
+        the SPOTClassifier to generate N-ary trees.
         
         Returns
         -------

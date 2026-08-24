@@ -1,16 +1,18 @@
-"""Vendored GOSDT ("Fast Sparse Decision Tree Optimization via Reference
-Ensembles"), derived from https://github.com/ubc-systopia/gosdt-guesses.
+"""Vendored SPOT (SParse OpTimal) engine — optimal sparse decision trees.
+
+Renamed from GOSDT; derived from https://github.com/ubc-systopia/gosdt-guesses
+("Fast Sparse Decision Tree Optimization via Reference Ensembles").
 """
 
 from .binarizer import NumericBinarizer
-from .classifier import GOSDTClassifier
+from .classifier import SPOTClassifier
 from .status import Status
 from .threshold_guessing import ThresholdGuessBinarizer
 from .tree import Tree
 
 __all__ = [
-    "GOSDTClassifier",
     "NumericBinarizer",
+    "SPOTClassifier",
     "Status",
     "ThresholdGuessBinarizer",
     "Tree",

@@ -1,9 +1,12 @@
-# GOSDT Optimal Sparse Decision Trees
+# SPOT Optimal Sparse Decision Trees (formerly GOSDT)
 
-GOSDT learns *globally optimal* sparse decision trees: instead of growing a
-tree greedily, it searches the space of trees with branch-and-bound and
-returns the tree minimizing regularized training loss. The vendored
-implementation is the canonical one for:
+SPOT (**SP**arse **O**p**T**imal) learns *globally optimal* sparse decision
+trees: instead of growing a tree greedily, it searches the space of trees with
+branch-and-bound and returns the tree minimizing regularized training loss.
+The model was formerly exported as `GOSDTClassifier`; it was renamed to SPOT
+to free the GOSDT name and to distinguish the single-optimal-tree trainer from
+`SPOTSETClassifier`, which enumerates the whole Rashomon set of near-optimal
+trees. The vendored implementation is the canonical one for:
 
 - McTavish et al., *Fast Sparse Decision Tree Optimization via Reference
   Ensembles* (AAAI 2022) — predictions from a blackbox reference model
@@ -13,7 +16,8 @@ implementation is the canonical one for:
 
 Shinrin vendors
 [ubc-systopia/gosdt-guesses](https://github.com/ubc-systopia/gosdt-guesses)
-(BSD-3-Clause) and compiles its C++ engine into `shinrin._native` with
+(BSD-3-Clause) — renamed SPOT in this project — and compiles its C++ engine
+into `shinrin._native` with
 lock-based replacements for oneTBB and bundled mini-GMP — no TBB or libgmp
 system dependencies, so wheels are fully self-contained.
 
@@ -29,14 +33,14 @@ Continuous features are binarized with threshold guesses from a gradient
 boosting ensemble before optimization:
 
 ```python
-from shinrin import GOSDTClassifier, ThresholdGuessBinarizer
+from shinrin import SPOTClassifier, ThresholdGuessBinarizer
 
 # 1) Binarize via reference-ensemble threshold guesses
 enc = ThresholdGuessBinarizer(n_estimators=20, max_depth=2, random_state=0)
 X_bin = enc.fit_transform(X, y)
 
 # 2) Fit a certifiably optimal sparse tree
-clf = GOSDTClassifier(regularization=0.05, depth_budget=4)
+clf = SPOTClassifier(regularization=0.05, depth_budget=4)
 clf.fit(X_bin > 0.5, y)
 
 print(str(clf.trees_[0]))       # the optimal tree
@@ -58,7 +62,7 @@ clf.fit(X_bin > 0.5, y, y_ref=rf.predict(X_bin))
 `y_ref` must share `y`'s classes; passing it enables the reference
 lower-bound machinery automatically.
 
-## GOSDTClassifier
+## SPOTClassifier
 
 ### Parameters
 

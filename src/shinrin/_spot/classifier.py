@@ -1,11 +1,13 @@
-"""Vendored GOSDT classifier ("Fast Sparse Decision Tree Optimization via
-Reference Ensembles").
+"""Vendored SPOT (SParse OpTimal) classifier — optimal sparse decision trees
+("Fast Sparse Decision Tree Optimization via Reference Ensembles").
 
-Derived from https://github.com/ubc-systopia/gosdt-guesses (BSD-3-Clause).
-The upstream pybind11 module is replaced by bindings to the vendored C++
-engine compiled into ``shinrin._native`` (with a lock-based TBB shim and
-bundled mini-gmp, so no system dependencies are required). See LICENSE and
-NOTICE for provenance.
+SPOT was formerly exported as ``GOSDTClassifier``; the engine is the vendored
+gosdt-guesses implementation (https://github.com/ubc-systopia/gosdt-guesses,
+BSD-3-Clause), renamed to avoid confusion with the SPOTSET Rashomon-set
+trainer vendored from treeFARMS. The upstream pybind11 module is replaced by
+bindings to the vendored C++ engine compiled into ``shinrin._native`` (with a
+lock-based TBB shim and bundled mini-gmp, so no system dependencies are
+required). See LICENSE and NOTICE for provenance.
 """
 
 import json
@@ -22,9 +24,12 @@ from .status import Status
 from .tree import Tree
 
 
-class GOSDTClassifier(ClassifierMixin, BaseEstimator):
+class SPOTClassifier(ClassifierMixin, BaseEstimator):
     f"""
     Decision Tree Classifier that produces optimal sparce decision trees.
+
+    Renamed from ``GOSDTClassifier`` — SPOT stands for SParse OpTimal; the
+    underlying algorithm is unchanged.
 
     For more information on the method used please refer to the following papers:
     - "Generalized and Scalable Optimal Sparse Decision Trees"
@@ -91,11 +96,11 @@ class GOSDTClassifier(ClassifierMixin, BaseEstimator):
     --------
     A minimal example with the well known Iris dataset.
 
-    >>> from shinrin._spot import ThresholdGuessBinarizer, GOSDTClassifier
+    >>> from shinrin._spot import ThresholdGuessBinarizer, SPOTClassifier
     >>> from sklearn.datasets import load_iris
     >>> X, y = load_iris(return_X_y=True, as_frame=True)
     >>> X_bin = ThresholdGuessBinarizer().fit_transform(X, y)
-    >>> clf = GOSDTClassifier(regularization=0.1, verbose=True)
+    >>> clf = SPOTClassifier(regularization=0.1, verbose=True)
     >>> clf.fit(X_bin, y)
     """
 
@@ -164,7 +169,7 @@ class GOSDTClassifier(ClassifierMixin, BaseEstimator):
 
     def fit(self, X, y, y_ref=None, input_features=None, cost_matrix=None, feature_map=None):
         """
-        Fit the GOSDTClassifier to X, y.
+        Fit the SPOTClassifier to X, y.
 
         Parameters
         ----------
@@ -334,7 +339,7 @@ class GOSDTClassifier(ClassifierMixin, BaseEstimator):
         if self.debug:
             self.__save_debug_state(X, y, y_ref)
 
-        # Call the vendored GOSDT engine
+        # Call the vendored SPOT engine
         result = gosdt_fit(
             regularization=regularization,
             upperbound_guess=float(self.upperbound_guess) if self.upperbound_guess is not None else 0.0,

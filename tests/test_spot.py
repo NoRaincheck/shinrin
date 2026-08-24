@@ -1,4 +1,4 @@
-"""Tests for the vendored GOSDT classifier (reference-ensemble optimal
+"""Tests for the vendored SPOT (SParse OpTimal) classifier (reference-ensemble optimal
 sparse decision trees).
 
 Ported/adapted from gosdt-guesses' test suite to the shinrin namespace.
@@ -8,7 +8,7 @@ Requires the ``sklearn`` optional extra.
 import numpy as np
 import pytest
 
-from shinrin import GOSDTClassifier, ThresholdGuessBinarizer
+from shinrin import SPOTClassifier, ThresholdGuessBinarizer
 from shinrin._spot import Status
 
 try:
@@ -22,7 +22,7 @@ def test_single_class():
     X, y = make_classification(
         n_samples=100, n_features=20, n_informative=2, n_classes=1
     )
-    clf = GOSDTClassifier()
+    clf = SPOTClassifier()
     clf.fit(X, y)
     y_pred = clf.predict(X)
     assert len(set(y_pred)) == 1
@@ -31,7 +31,7 @@ def test_single_class():
 def test_toy_exact():
     X = np.array([[1, 0], [0, 1], [1, 1], [0, 0]])
     y = np.array([1, 0, 1, 0])
-    clf = GOSDTClassifier(regularization=0.05, allow_small_reg=True)
+    clf = SPOTClassifier(regularization=0.05, allow_small_reg=True)
     clf.fit(X, y)
 
     preds = clf.predict(X)
@@ -47,7 +47,7 @@ def test_iris_end_to_end():
     enc = ThresholdGuessBinarizer(n_estimators=10, max_depth=2, random_state=0)
     X_bin = enc.fit_transform(X, y)
 
-    clf = GOSDTClassifier(regularization=0.1, depth_budget=3, verbose=False)
+    clf = SPOTClassifier(regularization=0.1, depth_budget=3, verbose=False)
     clf.fit(X_bin, y)
 
     accuracy = clf.score(X_bin, y)
@@ -73,10 +73,10 @@ def test_reference_ensemble_path():
     rf = RandomForestClassifier(n_estimators=20, random_state=0).fit(X_bin, y)
     y_ref = rf.predict(X_bin)
 
-    clf_with_ref = GOSDTClassifier(regularization=0.05)
+    clf_with_ref = SPOTClassifier(regularization=0.05)
     clf_with_ref.fit(X_bin, y, y_ref=y_ref)
 
-    clf_plain = GOSDTClassifier(regularization=0.05)
+    clf_plain = SPOTClassifier(regularization=0.05)
     clf_plain.fit(X_bin, y)
 
     assert clf_with_ref.result_.status == Status.CONVERGED
@@ -101,7 +101,7 @@ def test_worker_limit_parity():
 
     baseline = None
     for worker_limit in (1, 3, 0):
-        clf = GOSDTClassifier(
+        clf = SPOTClassifier(
             regularization=0.1, depth_budget=2, worker_limit=worker_limit
         )
         clf.fit(X_bin, y)
@@ -123,7 +123,7 @@ def test_worker_limit_parity():
 
 
 def test_predict_before_fit_raises():
-    clf = GOSDTClassifier()
+    clf = SPOTClassifier()
     with pytest.raises(ValueError):
         clf.predict([[1, 0]])
 
@@ -131,7 +131,7 @@ def test_predict_before_fit_raises():
 def test_predict_model_number_validation():
     X = np.array([[1, 0], [0, 1], [1, 1], [0, 0]])
     y = np.array([1, 0, 1, 0])
-    clf = GOSDTClassifier(regularization=0.05, allow_small_reg=True)
+    clf = SPOTClassifier(regularization=0.05, allow_small_reg=True)
     clf.fit(X, y)
 
     with pytest.raises(ValueError):
@@ -143,16 +143,16 @@ def test_invalid_inputs():
     y = np.array([1, 0, 1])
 
     with pytest.raises(ValueError):
-        GOSDTClassifier(regularization=-1.0)
+        SPOTClassifier(regularization=-1.0)
 
     with pytest.raises(ValueError):
-        GOSDTClassifier(depth_budget=-1)
+        SPOTClassifier(depth_budget=-1)
 
     with pytest.raises(ValueError):
-        GOSDTClassifier(upperbound_guess=1.5).fit(X, y)
+        SPOTClassifier(upperbound_guess=1.5).fit(X, y)
 
     with pytest.raises(ValueError):
-        GOSDTClassifier(time_limit=-1)
+        SPOTClassifier(time_limit=-1)
 
 
 def test_time_limit_returns_partial():
@@ -161,7 +161,7 @@ def test_time_limit_returns_partial():
     X = rng.integers(0, 2, size=(400, 30)).astype(np.uint8)
     y = (X[:, 0] ^ X[:, 1] & X[:, 2] | X[:, 3]).astype(np.uint8)
 
-    clf = GOSDTClassifier(regularization=0.001, allow_small_reg=True, time_limit=1)
+    clf = SPOTClassifier(regularization=0.001, allow_small_reg=True, time_limit=1)
     clf.fit(X, y)
 
     assert len(clf.trees_) >= 1
