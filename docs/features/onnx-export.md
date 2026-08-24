@@ -59,6 +59,24 @@ input_name = session.get_inputs()[0].name
 predictions = session.run(None, {input_name: X_test})[0]
 ```
 
+!!! note
+    Tree and forest exports use the standalone ``ai.onnx.ml.TreeEnsemble``
+    operator (``ai.onnx.ml`` opset 5) so runtimes must ship support for it;
+    it is available in onnxruntime >= 1.20 and every recent onnx package.
+    Inputs and outputs keep the float32/float64 dtype of the export-time
+    data (TabM graphs are always float32). Regression graphs expose a
+    ``predictions`` vector; classification graphs expose ``probabilities``
+    plus integer ``labels`` (or string labels when ``class_names`` is
+    given).
+
+!!! warning
+    Mondrian trees and forests predict by smoothing along the decision
+    path - part of the Mondrian-process algorithm. ONNX exports encode
+    plain decision-tree semantics (hard leaf lookups), so their outputs
+    match the tree structure exactly but not the smoothed native
+    ``predict``. Random forests, extra trees and TabM exports reproduce
+    native inference to float round-off.
+
 ## Supported Models
 
 | Model | Status |
