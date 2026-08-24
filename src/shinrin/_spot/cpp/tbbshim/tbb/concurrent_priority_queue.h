@@ -14,8 +14,9 @@
 
 #include <cstddef>
 #include <functional>
-#include <mutex>
 #include <queue>
+
+#include "shim_lock.h"
 #include <vector>
 
 namespace tbb {

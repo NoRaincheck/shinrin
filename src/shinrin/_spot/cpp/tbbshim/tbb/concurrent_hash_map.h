@@ -34,15 +34,9 @@
 #include <utility>
 #include <vector>
 
-namespace tbb {
+#include "shim_lock.h"
 
-// Single process-wide lock shared by all shim containers. An inline function
-// with a static local guarantees exactly one instance across translation
-// units, and magic statics make initialization thread-safe.
-inline std::recursive_mutex &shim_lock(void) {
-    static std::recursive_mutex lock;
-    return lock;
-}
+namespace tbb {
 
 template <typename Key, typename Value, typename HashCompare,
           typename Allocator = std::allocator<std::pair<Key const, Value>>>

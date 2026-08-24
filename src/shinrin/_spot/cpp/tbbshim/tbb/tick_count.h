@@ -27,6 +27,8 @@ class tick_count {
             std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count());
     }
 
+    tick_count() : seconds_(0.0) {}
+
     interval_t operator-(tick_count const &other) const { return interval_t(seconds_ - other.seconds_); }
 
    private:

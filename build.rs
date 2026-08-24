@@ -8,6 +8,7 @@ fn main() {
     // fresh Rust bindings.
     println!("cargo:rerun-if-changed=src/shinrin/_corels/cpp");
     println!("cargo:rerun-if-changed=src/shinrin/_spot/cpp");
+    println!("cargo:rerun-if-changed=src/shinrin/_spotset/cpp");
     println!("cargo:rerun-if-env-changed=SHINRIN_CORELS_NO_GMP");
     // Setting SHINRIN_CORELS_NO_GMP=1 builds CORELS without -DGMP, using
     // its word-array bit-vector fallback (useful for benchmarking the
@@ -93,6 +94,50 @@ fn main() {
     }
 
     gosdt.compile("shinrin_spot");
+
+    // ------------------------------------------------------------------
+    // Vendored SPOTSET engine (treeFARMS, "Exploring the Whole Rashomon
+    // Set of Sparse Decision Trees", NeurIPS 2022) + C ABI bridge. A fork
+    // of the same gosdt-guesses lineage as SPOT, so every engine symbol is
+    // wrapped in `namespace spotset` to keep both engines safely co-linked
+    // in one shared library. Shares the TBB shim, mini-gmp and nlohmann
+    // json (>= engine's bundled 3.7) with the other vendored trees.
+    let spotset_dir = PathBuf::from("src/shinrin/_spotset/cpp");
+    let mut spotset = cc::Build::new();
+    spotset.cpp(true)
+        .std("c++20")
+        .define("GMP", None)
+        .include(corels_cpp_dir.join("gmpshim"))
+        .include(gosdt_dir.join("tbbshim"))
+        .include(spotset_dir.clone())
+        .include(&gosdt_dir) // <nlohmann/json.hpp>
+        .flag_if_supported("-O3")
+        .warnings(false);
+
+    for name in [
+        "engine/additive_metrics.cpp",
+        "engine/bitmask.cpp",
+        "engine/configuration.cpp",
+        "engine/dataset.cpp",
+        "engine/encoder.cpp",
+        "engine/gosdt.cpp",
+        "engine/graph.cpp",
+        "engine/index.cpp",
+        "engine/local_state.cpp",
+        "engine/message.cpp",
+        "engine/model.cpp",
+        "engine/model_set.cpp",
+        "engine/optimizer.cpp",
+        "engine/queue.cpp",
+        "engine/state.cpp",
+        "engine/task.cpp",
+        "engine/tile.cpp",
+        "engine/trie.cpp",
+    ] {
+        spotset.file(spotset_dir.join(name));
+    }
+
+    spotset.compile("shinrin_spotset");
 
     // mini-gmp: GMP's portable mpz_t implementation, vendored from the
     // official 6.3.0 tarball (see minigmp/README.md). Provides the GMP
