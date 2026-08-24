@@ -27,8 +27,15 @@ def _make(seed: int, n: int, f: int):
     return X, y
 
 
-def _predict_twice(n_train: int, n_test: int, n_features: int, seed: int,
-                   estimators: int, batch_size: int, repeats: int = 3):
+def _predict_twice(
+    n_train: int,
+    n_test: int,
+    n_features: int,
+    seed: int,
+    estimators: int,
+    batch_size: int,
+    repeats: int = 3,
+):
     from shinrin.tabicl import TabICLClassifier
 
     X, y = _make(seed, n_train + n_test, n_features)
@@ -58,8 +65,7 @@ def test_mojo_pool_determinism_small_shapes():
         (1, 300, 50, 10),
         (2, 97, 43, 5),  # odd sizes -> uneven row partitions
     ]:
-        _predict_twice(n_train, n_test, n_features, seed,
-                       estimators=4, batch_size=200)
+        _predict_twice(n_train, n_test, n_features, seed, estimators=4, batch_size=200)
 
 
 def test_mojo_pool_determinism_batch_cliff():
