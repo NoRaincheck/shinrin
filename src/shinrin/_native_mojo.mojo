@@ -1354,6 +1354,7 @@ struct CoreTree(Defaultable, Movable, Writable):
         x_obj: PythonObject,
         return_std_obj: PythonObject,
         is_regression_obj: PythonObject,
+        path_smoothing_obj: PythonObject,
     ) raises -> PythonObject:
         var np = numpy_mod()
         ref t = self_ptr[]
@@ -1363,6 +1364,7 @@ struct CoreTree(Defaultable, Movable, Writable):
         var xp = ptr_f32(x_obj)
         var return_std = Bool(py=return_std_obj)
         var is_regression = Bool(py=is_regression_obj)
+        var path_smoothing = Bool(py=path_smoothing_obj)
 
         var n_classes = t.max_n_classes
         var value_stride = t.value_stride
@@ -1389,20 +1391,27 @@ struct CoreTree(Defaultable, Movable, Writable):
                 parent_tau = Float64(node.tau)
 
                 var eta = 0.0
-                for f in range(n_features):
-                    var x_val = Float64(xp[i * n_features + f])
-                    var d1 = x_val - Float64(t.ub_flat[node_id * t.n_features + f])
-                    var d2 = Float64(t.lb_flat[node_id * t.n_features + f]) - x_val
-                    eta += fmax(d1, 0.0) + fmax(d2, 0.0)
+                if path_smoothing:
+                    for f in range(n_features):
+                        var x_val = Float64(xp[i * n_features + f])
+                        var d1 = x_val - Float64(t.ub_flat[node_id * t.n_features + f])
+                        var d2 = Float64(t.lb_flat[node_id * t.n_features + f]) - x_val
+                        eta += fmax(d1, 0.0) + fmax(d2, 0.0)
 
+                # With path smoothing every visited node contributes
+                # w_j = p_nsy * p_js; in constant mode only the leaf
+                # contributes (p_nsy stays 1.0 because p_js is 0).
                 var w_j: Float64
                 var p_js: Float64
                 if node.left_child == TREE_LEAF:
                     w_j = p_nsy
                     p_js = 0.0
-                else:
+                elif path_smoothing:
                     p_js = 1.0 - exp(-delta * eta)
                     w_j = p_nsy * p_js
+                else:
+                    w_j = 0.0
+                    p_js = 0.0
 
                 if is_regression:
                     mean_p[i] = Float32(

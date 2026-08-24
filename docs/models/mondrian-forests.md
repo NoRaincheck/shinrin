@@ -2,6 +2,18 @@
 
 Mondrian Forests are ensembles of Mondrian Trees that provide improved accuracy through aggregation of multiple tree predictions.
 
+## Prediction modes
+
+!!! important "Opinionated default: constant predictions"
+    By default (`path_smoothing=False`) each tree predicts a
+    **piecewise-constant leaf value** and the forest averages across trees —
+    the same behaviour as scikit-learn's forests, and exactly what the plain
+    ONNX `ai.onnx.ml` tree-ensemble export computes. Set
+    `path_smoothing=True` to use the *pure* Mondrian-process predictor,
+    where every node on each tree's decision path contributes with a
+    Mondrian-process weight (see
+    [Mondrian Trees](mondrian-trees.md#prediction-modes)).
+
 ## MondrianForestRegressor
 
 An ensemble of Mondrian trees for regression.
@@ -11,8 +23,8 @@ from shinrin import MondrianForestRegressor
 
 forest = MondrianForestRegressor(
     n_estimators=10,
-    max_depth=8,
-    min_weight=0.001,
+    max_depth=None,
+    min_samples_split=2,
     random_state=0,
 )
 forest.fit(X, y)
@@ -24,9 +36,11 @@ predictions = forest.predict(X)
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `n_estimators` | `int` | `10` | Number of trees in the forest |
-| `max_depth` | `int` | `8` | Maximum depth of each tree |
-| `min_weight` | `float` | `0.001` | Minimum leaf weight |
+| `max_depth` | `int` | `None` | Maximum depth of each tree |
+| `min_samples_split` | `int or float` | `2` | Minimum samples required to split a node |
+| `bootstrap` | `bool` | `False` | Bootstrap samples when building trees |
 | `random_state` | `int` | `None` | Random seed for reproducibility |
+| `path_smoothing` | `bool` | `False` | Use pure Mondrian-process weighted-path predictions instead of constant leaf values |
 
 ### Attributes
 
@@ -44,8 +58,8 @@ from shinrin import MondrianForestClassifier
 
 forest = MondrianForestClassifier(
     n_estimators=10,
-    max_depth=8,
-    min_weight=0.001,
+    max_depth=None,
+    min_samples_split=2,
     random_state=0,
 )
 forest.fit(X, y)

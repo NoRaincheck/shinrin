@@ -125,6 +125,48 @@ def test_regression_predictions_parity(backends):
     np.testing.assert_array_equal(rust_tree.apply(X), mojo_tree.apply(X))
 
 
+@pytest.mark.parametrize("path_smoothing", [True, False])
+def test_predict_mode_parity(backends, path_smoothing):
+    """Both prediction modes must agree bit-for-bit across backends."""
+    rust, mojo = backends
+    X, y = make_data(200)
+
+    # Scaled points land outside the training bounding boxes so the two
+    # modes actually diverge.
+    X_out = X * 3.0
+
+    rust_reg = fit_regression_tree(rust, X, y)
+    mojo_reg = fit_regression_tree(mojo, X, y)
+    assert_trees_identical(rust_reg, mojo_reg)
+
+    mean_r, std_r = rust_reg.predict(
+        X_out, return_std=True, path_smoothing=path_smoothing
+    )
+    mean_m, std_m = mojo_reg.predict(
+        X_out, return_std=True, path_smoothing=path_smoothing
+    )
+    np.testing.assert_allclose(mean_r, mean_m, rtol=1e-12, atol=0.0)
+    np.testing.assert_allclose(std_r, std_m, rtol=1e-12, atol=0.0)
+
+    # Constant mode must reproduce the raw leaf values exactly.
+    if not path_smoothing:
+        leaf_vals = np.array([rust_reg.value[nid][0] for nid in rust_reg.apply(X_out)])
+        np.testing.assert_allclose(mean_r, leaf_vals.ravel(), rtol=1e-6)
+
+    y_bin = (y > np.median(y)).astype(np.float64)
+    rust_clf = fit_classification_tree(rust, X, y_bin)
+    mojo_clf = fit_classification_tree(mojo, X, y_bin)
+    assert_trees_identical(rust_clf, mojo_clf)
+
+    proba_r = rust_clf.predict(
+        X_out, is_regression=False, path_smoothing=path_smoothing
+    )[0]
+    proba_m = mojo_clf.predict(
+        X_out, is_regression=False, path_smoothing=path_smoothing
+    )[0]
+    np.testing.assert_allclose(proba_r, proba_m, rtol=1e-12, atol=0.0)
+
+
 def test_classification_parity(backends):
     rust, mojo = backends
     X, y_cont = make_data(150)

@@ -222,8 +222,13 @@ class Tree:
     def apply(self, X):
         return self._core.apply(_as_f32_2d(X))
 
-    def predict(self, X, return_std=False, is_regression=True):
-        return self._core.predict(_as_f32_2d(X), bool(return_std), bool(is_regression))
+    def predict(self, X, return_std=False, is_regression=True, path_smoothing=False):
+        return self._core.predict(
+            _as_f32_2d(X),
+            bool(return_std),
+            bool(is_regression),
+            bool(path_smoothing),
+        )
 
     def decision_path(self, X):
         return self._core.decision_path(_as_f32_2d(X))

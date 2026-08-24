@@ -70,18 +70,24 @@ predictions = session.run(None, {input_name: X_test})[0]
     is given).
 
 !!! note
-    The Mondrian export is a self-contained standard-domain graph that
-    reproduces native ``predict``/``predict_proba`` exactly — including
-    the Mondrian-process smoothing along decision paths — to float32
-    round-off. Generic sklearn-style forests round thresholds and leaf
-    values to float32, keeping agreement near 1e-6.
+    The Mondrian export encoding follows the estimator's
+    ``path_smoothing`` prediction mode so exported predictions match native
+    ``predict``/``predict_proba`` exactly. Default constant-prediction
+    models (``path_smoothing=False``) export as a plain ``ai.onnx.ml``
+    tree-ensemble of the hard tree structure — small, fast, and exact.
+    Smoothing models (``path_smoothing=True``) export as a self-contained
+    standard-domain graph reproducing the Mondrian-process smoothing along
+    decision paths to float32 round-off, falling back to the plain
+    tree-ensemble for ensembles whose exact graph would exceed ONNX's
+    protobuf size limit. Generic sklearn-style forests round thresholds and
+    leaf values to float32, keeping agreement near 1e-6.
 
 ## Supported Models
 
 | Model | Status |
 |---|---|
-| `MondrianTreeRegressor` / `MondrianTreeClassifier` | ✅ Exact (standard-domain graph) |
-| `MondrianForestRegressor` / `MondrianForestClassifier` | ✅ Exact (standard-domain graph) |
+| `MondrianTreeRegressor` / `MondrianTreeClassifier` | ✅ Exact (`ai.onnx.ml` tree-ensemble; standard-domain graph when `path_smoothing=True`) |
+| `MondrianForestRegressor` / `MondrianForestClassifier` | ✅ Exact (`ai.onnx.ml` tree-ensemble; standard-domain graph when `path_smoothing=True`) |
 | `RandomForestRegressor` / `ExtraTreesRegressor` | ✅ Supported (`ai.onnx.ml`) |
 | `*QuantileRegressor` trees & forests | ✅ Supported (quantile baked in at export) |
 | `MLPRegressor` / `MLPClassifier` | ✅ Supported (preprocessing baked in) |

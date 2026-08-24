@@ -2,6 +2,21 @@
 
 Mondrian Trees are a type of decision tree built using Mondrian processes, which provide a Bayesian nonparametric approach to tree construction.
 
+## Prediction modes
+
+!!! important "Opinionated default: constant predictions"
+    By default (`path_smoothing=False`) predictions are **piecewise-constant
+    leaf values**: each sample follows a single root-to-leaf path and
+    receives the leaf's stored value. This matches scikit-learn's tree and
+    forest behaviour and the plain ONNX `ai.onnx.ml` tree-ensemble export,
+    but deliberately deviates from the *pure* Mondrian-process predictor.
+
+    Set `path_smoothing=True` at construction (or pass
+    `path_smoothing=True` per `predict()` / `predict_proba()` call) to
+    restore the original Mondrian-process weighting, where every node on
+    the decision path contributes to the prediction and far-away samples
+    shrink towards the root statistics.
+
 ## MondrianTreeRegressor
 
 A single Mondrian tree for regression tasks.
@@ -10,8 +25,8 @@ A single Mondrian tree for regression tasks.
 from shinrin import MondrianTreeRegressor
 
 tree = MondrianTreeRegressor(
-    max_depth=8,
-    min_weight=0.001,
+    max_depth=None,
+    min_samples_split=2,
     random_state=0,
 )
 tree.fit(X, y)
@@ -21,9 +36,10 @@ tree.fit(X, y)
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
-| `max_depth` | `int` | `8` | Maximum depth of the tree |
-| `min_weight` | `float` | `0.001` | Minimum leaf weight |
+| `max_depth` | `int` | `None` | Maximum depth of the tree |
+| `min_samples_split` | `int or float` | `2` | Minimum samples required to split a node |
 | `random_state` | `int` | `None` | Random seed for reproducibility |
+| `path_smoothing` | `bool` | `False` | Use pure Mondrian-process weighted-path predictions instead of constant leaf values |
 
 ### Attributes
 
@@ -44,8 +60,9 @@ tree.fit(X, y)
 ## SHAP values via `pred_contribs()`
 
 Both Mondrian trees and forests expose `pred_contribs(X)`, which returns
-TreeSHAP contributions such that `prediction = base_value + sum(shap_values)`.
-The last column/axis holds the base value: `(n_samples, n_features + 1)` for
+TreeSHAP contributions such that `prediction = base_value + sum(shap_values)`
+under the estimator's active prediction mode. The last column/axis holds the
+base value: `(n_samples, n_features + 1)` for
 regression, `(n_samples, n_features + 1, n_classes)` for classification.
 
 ```python
@@ -64,8 +81,8 @@ A single Mondrian tree for classification tasks.
 from shinrin import MondrianTreeClassifier
 
 tree = MondrianTreeClassifier(
-    max_depth=8,
-    min_weight=0.001,
+    max_depth=None,
+    min_samples_split=2,
     random_state=0,
 )
 tree.fit(X, y)
