@@ -117,10 +117,7 @@ def ssmax_apply(
             var s = ssmax[h] * logn
             var r = 0
             while r < q_rows:
-                var d = 0
-                while d < head_dim:
-                    q[h * q_rows * head_dim + r * head_dim + d] *= s
-                    d += 1
+                _scale_inplace(q + h * q_rows * head_dim + r * head_dim, head_dim, s)
                 r += 1
             h += 1
         return
@@ -146,11 +143,20 @@ def ssmax_apply(
             var r = 0
             while r < q_rows:
                 var base = h * q_rows * head_dim + r * head_dim
-                var d = 0
-                while d < head_dim:
-                    var s = scales[h * head_dim + d] if elementwise else scales[h]
-                    q[base + d] *= s
-                    d += 1
+                if elementwise:
+                    var d = 0
+                    while d + SIMDW <= head_dim:
+                        q.unsafe_store[width=SIMDW](
+                            base + d,
+                            q.unsafe_load[width=SIMDW](base + d)
+                            * scales.unsafe_load[width=SIMDW](h * head_dim + d),
+                        )
+                        d += SIMDW
+                    while d < head_dim:
+                        q[base + d] *= scales[h * head_dim + d]
+                        d += 1
+                else:
+                    _scale_inplace(q + base, head_dim, scales[h])
                 r += 1
             h += 1
         scales.unsafe_free()
@@ -174,35 +180,36 @@ def ssmax_apply(
             var qp = q + h * q_rows * head_dim + r * head_dim
             var j = 0
             while j < hidden:
-                var acc: Float32 = 0.0
-                var d = 0
-                while d < head_dim:
-                    acc += qw0[j * head_dim + d] * qp[d]
-                    d += 1
-                qh[j] = gelu_scalar(acc + qb0[j])
+                qh[j] = gelu_scalar(_dot(qw0 + j * head_dim, qp, head_dim) + qb0[j])
                 j += 1
             if elementwise:
                 var d = 0
                 while d < head_dim:
-                    var acc2: Float32 = 0.0
-                    var jj = 0
-                    while jj < hidden:
-                        acc2 += qw2[d * hidden + jj] * qh[jj]
-                        jj += 1
-                    mod_buf[d] = 1.0 + tanh(acc2 + qb2[d])
+                    mod_buf[d] = (
+                        1.0 + tanh(_dot(qw2 + d * hidden, qh, hidden) + qb2[d])
+                    )
                     d += 1
             else:
-                var acc3: Float32 = 0.0
-                var jj = 0
-                while jj < hidden:
-                    acc3 += qw2[jj] * qh[jj]
-                    jj += 1
+                var acc3 = _dot(qw2, qh, hidden)
                 var m = 1.0 + tanh(acc3 + qb2[0])
+                var dv = SIMD[DType.float32, SIMDW](m)
                 var d = 0
+                while d + SIMDW <= head_dim:
+                    mod_buf.unsafe_store[width=SIMDW](d, dv)
+                    d += SIMDW
                 while d < head_dim:
                     mod_buf[d] = m
                     d += 1
             var d2 = 0
+            if elementwise:
+                while d2 + SIMDW <= head_dim:
+                    qp.unsafe_store[width=SIMDW](
+                        d2,
+                        qp.unsafe_load[width=SIMDW](d2)
+                        * scales.unsafe_load[width=SIMDW](h * head_dim + d2)
+                        * mod_buf.unsafe_load[width=SIMDW](d2),
+                    )
+                    d2 += SIMDW
             while d2 < head_dim:
                 var s = (
                     scales[h * head_dim + d2] if elementwise else scales[h]
@@ -311,7 +318,13 @@ def layer_norm_affine(
     has_weight: Bool,
     has_bias: Bool,
 ):
-    """Row-wise LayerNorm with optional affine (dummy pointers when absent)."""
+    """Row-wise LayerNorm with optional affine (dummy pointers when absent).
+
+    Kept scalar verbatim on purpose: the kv-cache parity test pins the
+    plain and cached paths to bit-equality and the staged parity tests pin
+    mojo to torch/numpy at atol 5e-5; vectorizing the normalize pass
+    changed rounding (FMA contraction) enough to break those contracts.
+    """
     var i = 0
     while i < n:
         var base = i * d
@@ -495,6 +508,13 @@ def _add_row_bias(
     while i < rows:
         var base = i * cols
         var c = 0
+        while c + SIMDW <= cols:
+            m.unsafe_store[width=SIMDW](
+                base + c,
+                m.unsafe_load[width=SIMDW](base + c)
+                + bias.unsafe_load[width=SIMDW](c),
+            )
+            c += SIMDW
         while c < cols:
             m[base + c] += bias[c]
             c += 1
@@ -514,6 +534,62 @@ def _copy_f32(
     while i < n:
         dst[i] = src[i]
         i += 1
+
+
+@always_inline
+def _add_f32(
+    a: Pointer[Float32, MutUntrackedOrigin],
+    b: Pointer[Float32, MutUntrackedOrigin],
+    dst: Pointer[Float32, MutUntrackedOrigin],
+    n: Int,
+):
+    """dst[i] = a[i] + b[i] (dst may alias a or b)."""
+    var i = 0
+    while i + SIMDW <= n:
+        dst.unsafe_store[width=SIMDW](
+            i,
+            a.unsafe_load[width=SIMDW](i) + b.unsafe_load[width=SIMDW](i),
+        )
+        i += SIMDW
+    while i < n:
+        dst[i] = a[i] + b[i]
+        i += 1
+
+
+@always_inline
+def _scale_inplace(
+    p: Pointer[Float32, MutUntrackedOrigin],
+    n: Int,
+    s: Float32,
+):
+    var sv = SIMD[DType.float32, SIMDW](s)
+    var i = 0
+    while i + SIMDW <= n:
+        p.unsafe_store[width=SIMDW](
+            i, p.unsafe_load[width=SIMDW](i) * sv
+        )
+        i += SIMDW
+    while i < n:
+        p[i] *= s
+        i += 1
+
+
+@always_inline
+def _dot(
+    a: Pointer[Float32, MutUntrackedOrigin],
+    b: Pointer[Float32, MutUntrackedOrigin],
+    n: Int,
+) -> Float32:
+    var acc = SIMD[DType.float32, SIMDW](0.0)
+    var i = 0
+    while i + SIMDW <= n:
+        acc += a.unsafe_load[width=SIMDW](i) * b.unsafe_load[width=SIMDW](i)
+        i += SIMDW
+    var s = acc.reduce_add()
+    while i < n:
+        s += a[i] * b[i]
+        i += 1
+    return s
 
 
 @always_inline
@@ -719,17 +795,23 @@ def _split_heads(
     n_heads: Int,
     head_dim: Int,
 ):
-    """(rows, d_model) row-major -> head-major blocked (n_heads, rows, hd)."""
+    """(rows, d_model) row-major -> head-major blocked (n_heads, rows, hd).
+
+    Both the source run (``i*d_model + h*hd``) and destination run
+    (``h*rows*hd + i*hd``) are contiguous chunks of ``head_dim`` floats,
+    so each is copied with one vectorized memcpy-style pass.
+    """
     var i = 0
     while i < rows:
+        var src_row = src_proj + i * d_model
+        var dst_row_base = i * head_dim
         var h = 0
         while h < n_heads:
-            var dd = 0
-            while dd < head_dim:
-                dst[h * rows * head_dim + i * head_dim + dd] = src_proj[
-                    i * d_model + h * head_dim + dd
-                ]
-                dd += 1
+            _copy_f32(
+                src_row + h * head_dim,
+                dst + h * rows * head_dim + dst_row_base,
+                head_dim,
+            )
             h += 1
         i += 1
 
@@ -748,12 +830,11 @@ def _merge_heads(
     while mi < q_rows:
         var hh = 0
         while hh < n_heads:
-            var dd = 0
-            while dd < head_dim:
-                merged[mi * d_model + hh * head_dim + dd] = out_a[
-                    hh * q_rows * head_dim + mi * head_dim + dd
-                ]
-                dd += 1
+            _copy_f32(
+                out_a + hh * q_rows * head_dim + mi * head_dim,
+                merged + mi * d_model + hh * head_dim,
+                head_dim,
+            )
             hh += 1
         mi += 1
 
@@ -781,10 +862,7 @@ def _attention_tail(
     var res = alloc[Float32](q_rows * d + 16)
     gemm_nt(q_rows, d, d, merged, p.w_out, res)
     _add_row_bias(res, p.b_out, q_rows, d)
-    var mi = 0
-    while mi < q_rows * d:
-        dst[mi] = q_in[mi] + res[mi]
-        mi += 1
+    _add_f32(q_in, res, dst, q_rows * d)
 
     # -- sublayer 2: FFN ----------------------------------------------------
     var ffn_in = alloc[Float32](q_rows * d + 16)
@@ -805,10 +883,7 @@ def _attention_tail(
         mi += 1
     gemm_nt(q_rows, d, d_ff, ffh, p.w2, res)
     _add_row_bias(res, p.b2, q_rows, d)
-    mi = 0
-    while mi < q_rows * d:
-        dst[mi] += res[mi]
-        mi += 1
+    _add_f32(dst, res, dst, q_rows * d)
     merged.unsafe_free()
     res.unsafe_free()
     ffn_in.unsafe_free()
@@ -870,21 +945,8 @@ def attention_block_forward(
     var k_a = alloc[Float32](k_rows * n_heads * head_dim + 16)
     var v_a = alloc[Float32](k_rows * n_heads * head_dim + 16)
     _split_heads(q_proj, q_a, q_rows, d, n_heads, head_dim)
-    var ki = 0
-    while ki < k_rows:
-        var h = 0
-        while h < n_heads:
-            var dd = 0
-            while dd < head_dim:
-                k_a[h * k_rows * head_dim + ki * head_dim + dd] = k_proj[
-                    ki * d + h * head_dim + dd
-                ]
-                v_a[h * k_rows * head_dim + ki * head_dim + dd] = v_proj[
-                    ki * d + h * head_dim + dd
-                ]
-                dd += 1
-            h += 1
-        ki += 1
+    _split_heads(k_proj, k_a, k_rows, d, n_heads, head_dim)
+    _split_heads(v_proj, v_a, k_rows, d, n_heads, head_dim)
 
     # -- RoPE then SSMax (reference applies rope BEFORE ssmax) --------------
     if rope_freqs is not None:
