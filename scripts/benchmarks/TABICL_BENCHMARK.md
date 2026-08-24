@@ -68,34 +68,27 @@ entirely (test chunks attend cached train-side K/V).
 ## Results — estimator sweep, Apple Silicon (M1 Max), macOS
 
 Quick grid (`300 x 10`, i.e. 300 train rows x 10 features, 200 test rows;
-`n_estimators=8`, `batch_size=200`, `kv_cache=False`, CPU only,
-2026-08):
+`n_estimators=8`, `batch_size=200`, `kv_cache=False`, CPU only;
+2026-08, mojo kernels after the SIMD/register-tile work below):
 
 | Task | numpy fit | numpy predict | torch fit | torch predict | mojo fit | mojo predict | score (all) |
 |---|---|---|---|---|---|---|---|
-| classification | 0.066s | 3.996s (20.0 ms/1k) | 0.112s | 1.286s (6.4 ms/1k) | 0.063s | 7.457s (37.3 ms/1k) | 0.750 |
-| regression | 0.065s | 4.002s (20.0 ms/1k) | 0.111s | 1.351s (6.8 ms/1k) | 0.057s | 7.422s (37.1 ms/1k) | 0.999 |
-| mixed categorical | 0.077s | 3.955s (19.8 ms/1k) | 0.110s | 1.286s (6.4 ms/1k) | 0.058s | 7.364s (36.8 ms/1k) | 0.915 |
+| classification | 0.066s | 3.996s (20.0 ms/1k) | 0.112s | 1.286s (6.4 ms/1k) | 0.058s | 4.197s (21.0 ms/1k) | 0.750 |
+| regression | 0.065s | 4.002s (20.0 ms/1k) | 0.111s | 1.351s (6.8 ms/1k) | 0.056s | 4.284s (21.4 ms/1k) | 0.999 |
+| mixed categorical | 0.077s | 3.955s (19.8 ms/1k) | 0.110s | 1.286s (6.4 ms/1k) | 0.058s | 4.215s (21.1 ms/1k) | 0.915 |
 
 - All three backends produce **identical scores** on every task — expected,
   since they load the same checkpoint and implement the same graph; this is
   the estimator-level agreement signal for the sweep.
-- On CPU, torch predict is ~3× faster than NumPy here (fused kernels vs
-  unfused Python-level matmuls); NumPy stays the correctness reference.
-- Mojo predict is ~2× slower than NumPy and ~6× slower than torch. Two
-  causes, in order of impact:
-  1. **No KV cache / per-chunk re-attention** *(fixed — see sweep below
-     and status section)*: the estimator decodes test rows in chunks;
-     each uncached call re-runs attention over the train context from
-     scratch.
-  2. **Partially-optimized kernels**: GEMMs, softmax and GELU are
-     SIMD-vectorized and the GEMMs are multithreaded via pthreads
-     (output rows split across workers, bit-exact vs serial); the per-head
-     attention loop is now threaded as well, but LayerNorm, RoPE and
-     qassmax elementwise loops are still single-threaded scalar code.
-- With the default `batch_size=8` the same quick-grid Mojo predict would
-  take roughly an order of magnitude longer without KV caching (see the
-  sweep below). `kv_cache=True` removes this cliff.
+- On CPU, torch predict remains ~3× faster than both reference backends
+  (fused SDPA-style kernels vs unfused matmul chains).
+- Mojo predict used to be ~2× slower than NumPy here; after vectorizing
+  the elementwise attention paths and register-tiling `gemm_nt` /
+  `gemm_nn` (see kernel history below) it is at rough parity with NumPy
+  (~44% faster than its pre-optimization numbers). Remaining known gaps:
+  LayerNorm/RoPE stay scalar by design (parity contracts pin exact
+  accumulation orders), no fused online-softmax attention yet, and
+  threads are created/joined per parallel region.
 
 ## Ternary PTQ ablation (1500 x 40, 400 test rows)
 
@@ -106,13 +99,13 @@ identical across backends (same quantized checkpoint).
 
 | Variant | numpy predict | acc | torch predict | acc | mojo predict | acc |
 |---|---|---|---|---|---|---|
-| fp | 46.5s | 0.938 | 10.4s | 0.938 | 64.4s | 0.938 |
-| ternary/row | 44.4s | 0.250 | 9.6s | 0.250 | 60.9s | 0.250 |
-| ternary/tensor | 43.9s | 0.250 | 9.6s | 0.250 | 61.3s | 0.250 |
+| fp | 46.5s | 0.938 | 10.4s | 0.938 | 37.7s | 0.938 |
+| ternary/row | 44.4s | 0.250 | 9.6s | 0.250 | 39.8s | 0.250 |
+| ternary/tensor | 43.9s | 0.250 | 9.6s | 0.250 | 39.1s | 0.250 |
 
-- Quantized inference is only ~4–5% faster: the ternary scheme
-  dequantizes to fp values before the GEMMs, so matmul cost is unchanged;
-  only weight-loading/memory traffic shrinks slightly.
+- Quantized inference runs at essentially the same speed as fp: the
+  ternary scheme dequantizes to fp values before the GEMMs, so matmul
+  cost is unchanged; only weight-loading/memory traffic shrinks slightly.
 - Accuracy collapses to chance level on this synthetic case. This matches
   the load-time warning: PTQ currently spares Q/K/V projections but still
   ternarizes the MLP linears and attention output projections, which this
@@ -121,26 +114,66 @@ identical across backends (same quantized checkpoint).
 
 ## Batch-size / KV-cache sweep (1000 x 20, 200 test rows)
 
-Predict time per call, `n_estimators=8`, classification, 2026-08. Cache
-build adds a one-time ~16s (numpy) / ~4s (torch) / ~18s (mojo) to `fit`.
+Predict time per call, `n_estimators=8`, classification, 2026-08 (mojo
+column after the kernel work below). Cache build adds a one-time ~16s
+(numpy) / ~4s (torch) / ~12s (mojo) to `fit`.
 
 | Config | numpy | torch | mojo |
 |---|---|---|---|
-| bs=8, no cache | 119.4s | 32.6s | 225.4s |
-| bs=32, no cache | 42.3s | 11.0s | 71.3s |
-| bs=128, no cache | 20.9s | 4.8s | 29.5s |
-| bs=8, kv_cache | 4.74s | 4.92s | 4.71s |
-| bs=32, kv_cache | 2.67s | 1.87s | 3.53s |
-| bs=128, kv_cache | 2.19s | 1.08s | 3.11s |
+| bs=8, no cache | 119.4s | 32.6s | 115.2s |
+| bs=32, no cache | 42.3s | 11.0s | 39.3s |
+| bs=128, no cache | 20.9s | 4.8s | 17.7s |
+| bs=8, kv_cache | 4.74s | 4.92s | 3.26s |
+| bs=32, kv_cache | 2.67s | 1.87s | 2.37s |
+| bs=128, kv_cache | 2.19s | 1.08s | 1.96s |
 
 - Without caching, shrinking `batch_size` from 128 to 8 costs **~6–8×**
   more attention work on every backend (the chunking cliff).
 - With the KV cache the batch-size dependence nearly vanishes (test
   chunks attend cached train-side K/V): at `bs=8` the cache is worth
-  **25×** on NumPy, **6.6×** on torch and **48×** on mojo.
-- Cached mojo predict is now on par with (or faster than) uncached NumPy
-  at every batch size — the native KV path makes the experimental
-  backend practically usable despite its slower uncached kernels.
+  **25×** on NumPy, **6.6×** on torch and **35×** on mojo.
+- Cached mojo is now faster than cached numpy at every batch size and
+  within ~2× of torch — the native KV path makes the experimental
+  backend practically usable.
+
+## Mojo kernel performance history
+
+Self-time attribution comes from `scripts/benchmarks/profile_tabicl_mojo.py`
+(macOS `sample`, workload 1000 train x 40 features, 300 test rows,
+`n_estimators=8`). Baseline compute split: `gemm_nt_rows` ~60%,
+`ssmax_apply` ~15%, threaded head attention ~13%, split/merge/residual
+glue ~9%; only ~17% of thread-time was compute (rest parked in per-region
+pthread create/join cycles).
+
+Landed (predict on that workload, M1 Max):
+
+- **Elementwise SIMD pass**: vectorized `_split_heads`/`_merge_heads`
+  chunk copies, bias adds, residual adds, SSMax scaling and qassmax dots;
+  new `_dot`/`_scale_inplace`/`_add_f32` helpers. All bit-exact vs the
+  prior kernels (parity suite pins staged outputs at atol 5e-5 and
+  plain-vs-cached KV equality exactly). 42.3s → 31.5s (-26%).
+- **GEMM register tiles**: `gemm_nt_rows` full-block path now computes
+  4x2 output tiles (eight independent FMA chains instead of four;
+  accumulation order per element unchanged). A 4x4 variant spilled
+  registers and regressed, so it was rejected. 31.5s → 25.3s (-20%).
+- **gemm_nn dual column blocks** plus a partition-bound fix (workers no
+  longer write past their row range when chunk sizes are not multiples
+  of four). 25.3s → 25.0s.
+
+Open work, roughly in impact order:
+
+- Persistent thread pool (kernels currently pthread create/join per call,
+  and most thread-time is parked); also thread LayerNorm/RoPE/SSMax over
+  rows once a pool exists.
+- GEMM panel packing/blocking for large problems.
+- Fused online-softmax attention (SDPA-style), removing the materialized
+  score matrix and the split/merge transposes.
+- Sanitizer coverage: blocked by the Mojo toolchain — `--sanitize
+  address/thread` instrumentation compiles, but neither `mojo build` nor
+  the `mojo run` JIT can resolve the sanitizer runtime symbols (the
+  toolchain bundles no ASAN/TSAN runtime, and JIT sessions do not resolve
+  against `DYLD_INSERT_LIBRARIES`-loaded runtimes). Revisit when the
+  toolchain ships a linkable runtime.
 
 ## Mojo backend status
 
@@ -156,12 +189,12 @@ Implemented natively and covered by parity tests
   keys) in one pass; `predict_with_cache(X_test, cache)` skips attn1 and
   the train-side re-attention entirely. Cached outputs are **bit-exact**
   vs the plain path (identical kernels on identical K/V; pinned in
-  `test_mojo_kv_cache_parity`) and ~13× faster per repeated predict call
-  (2000 train rows, 200-row batches: ~4.47s → ~0.34s per call on M1 Max),
+  `test_mojo_kv_cache_parity`) and ~13× faster per repeated predict call,
   which removes the `batch_size` cliff described above.
 - Head-threaded attention: the per-head score/softmax/AV loop inside each
-  attention block partitions heads across pthreads, bit-exact vs serial
-  (~1.9× faster predict at 2000 train rows).
+  attention block partitions heads across pthreads, bit-exact vs serial.
+- SIMD elementwise paths and register-tiled GEMMs (see kernel performance
+  history above), all bit-exact vs their pre-optimization kernels.
 - Estimator API: `representations()`, `predict_from_representations()`,
   `forward()`, `build_cache()`, `predict_with_cache()`; classification
   softmax and regression quantile decoding.
@@ -173,16 +206,5 @@ Implemented natively and covered by parity tests
   `fit()` time with a warning; a kernel-level `NotImplementedError`
   remains as a safety net for direct API users.
 
-Open work, roughly in impact order:
-
-- Thread the remaining elementwise passes (LayerNorm, qassmax) — the
-  GEMM/softmax/GELU core and the per-head attention loop are already
-  SIMD + pthread-parallel.
-- GEMM panel packing/blocking; persistent thread pool (kernels currently
-  pthread create/join per call).
-- Sanitizer coverage: blocked by the Mojo toolchain — `--sanitize
-  address/thread` instrumentation compiles, but neither `mojo build` nor
-  the `mojo run` JIT can resolve the sanitizer runtime symbols (the
-  toolchain bundles no ASAN/TSAN runtime, and JIT sessions do not resolve
-  against `DYLD_INSERT_LIBRARIES`-loaded runtimes). Revisit when the
-  toolchain ships a linkable runtime.
+Open work is listed at the end of the kernel performance history section
+above.
