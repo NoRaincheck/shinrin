@@ -154,9 +154,9 @@ def _base_record(
     return {
         "task": task,
         "backend": backend,
-        "n_train": int(len(X_train)),
+        "n_train": len(X_train),
         "n_features": int(X_train.shape[1]),
-        "n_test": int(len(X_test)),
+        "n_test": len(X_test),
         "kv_cache": bool(getattr(model, "kv_cache", False)),
         "batch_size": int(getattr(model, "batch_size", 0)),
         "quantization": str(getattr(model, "quantization", "none")),
@@ -320,8 +320,8 @@ def bench_quant_ablation(args: argparse.Namespace) -> list[dict[str, Any]]:
                 extra["ptq_sparsity"] = round(
                     _ptq_sparsity(CLASSIFIER_CHECKPOINT, granularity), 4
                 )
-            except Exception:  # noqa: BLE001 - sparsity is informational
-                pass
+            except Exception as exc:  # noqa: BLE001 - sparsity is informational
+                print(f"  ({label}: sparsity unavailable: {type(exc).__name__}: {exc})")
         records.append(
             _fit_predict_record(
                 model,

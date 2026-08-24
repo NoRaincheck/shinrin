@@ -28,36 +28,54 @@ To run:
     uv run python scripts/benchmarks/bench_tabicl.py --quick --backend numpy
     uv run python scripts/benchmarks/bench_tabicl.py --backend torch
     just build-tabicl-mojo                                       # once
-    uv run python scripts/benchmarks/bench_tabicl.py --backend mojo --quick
+    uv run python scripts/benchmarks/bench_tabicl.py --backend mojo --quant-ablation --cache-sweep
 
 ## Methodology
 
-- Grid: {300, 1000, 1000x100 features, 5000} samples; classification
-  (5-class), regression, and one mixed categorical case per size.
-  (`--quick` restricts the grid to 300 x 10.)
-- `fit()` time covers preprocessing + ensemble view construction (+ KV-cache
-  build when enabled); `predict()` covers the ensemble forward passes over
-  200–1000 test rows only. Warmup run then ≥3 timed repeats reporting
-  mean ± std wall-clock.
-- Scores are reported as non-degeneracy guards (> majority baseline);
-  synthetic datasets are not a substitute for public-benchmark accuracy.
-- `batch_size` bounds how many test rows are decoded per call. Chunks never
-  change results (each chunk attends only over the train prefix), but fewer,
-  larger chunks mean fewer O(n²) attention passes. All backends benefit;
-  with `kv_cache=True` the chunking cliff disappears entirely (test chunks
-  attend cached train-side K/V), so the sweep below pins `batch_size=200`
-  for every backend.
+Three sections, all merged per backend into
+`scripts/benchmarks/tabicl_results.json` (raw data behind the tables
+below; `--smoke` writes a suffixed file instead):
+
+- **Estimator sweep** (default): fit / predict / score for classification
+  (5-class), regression, and one mixed categorical case per grid size —
+  {300, 1000, 1000x100 features, 5000} samples; `--quick` restricts the
+  grid to 300 x 10. Reports wall-clock mean ± std over a warmup run plus
+  ≥3 timed repeats, plus predict throughput (ms per 1k test rows).
+- **Ternary PTQ ablation** (`--quant-ablation`): fp vs ternary
+  post-training quantization (per-row / per-tensor scales) of the
+  classifier checkpoint on a fixed case (1500 train x 40 features, 400
+  test rows, `sklearn.datasets.make_classification`, 4 classes). Reports
+  timing, held-out accuracy, and the effective zero fraction induced in
+  the ternarized weights (~32–34%: MLP linears + attention output
+  projections only; Q/K/V projections, biases and norms stay fp).
+- **Batch-size / KV-cache sweep** (`--cache-sweep`): predict time across
+  `batch_size x kv_cache` combos on a fixed mid-size case (1000 train x
+  20 features, 200 test rows), isolating the chunking cliff and the
+  KV-cache fix. The one-time cache build cost shows up as extra `fit`
+  time and amortizes after a handful of predict calls.
+
+`fit()` covers preprocessing + ensemble view construction (+ KV-cache
+build when enabled); `predict()` covers the ensemble forward passes.
+Scores are non-degeneracy guards (> majority baseline); synthetic
+datasets are not a substitute for public-benchmark accuracy.
+
+`batch_size` bounds how many test rows are decoded per call. Chunks never
+change results materially (each chunk attends only over the train
+prefix), but fewer, larger chunks mean fewer O(n²) attention passes. All
+backends benefit; with `kv_cache=True` the chunking cliff disappears
+entirely (test chunks attend cached train-side K/V).
 
 ## Results — estimator sweep, Apple Silicon (M1 Max), macOS
 
 Quick grid (`300 x 10`, i.e. 300 train rows x 10 features, 200 test rows;
-`n_estimators=8`, `batch_size=200`, `kv_cache=False`, CPU only):
+`n_estimators=8`, `batch_size=200`, `kv_cache=False`, CPU only,
+2026-08):
 
 | Task | numpy fit | numpy predict | torch fit | torch predict | mojo fit | mojo predict | score (all) |
 |---|---|---|---|---|---|---|---|
-| classification | 0.067s | 3.94s | 0.110s | 1.34s | 0.055s | 8.30s | 0.750 |
-| regression | 0.073s | 3.95s | 0.116s | 1.38s | 0.060s | 8.39s | 0.999 |
-| mixed categorical | 0.064s | 3.92s | 0.111s | 1.31s | 0.059s | 8.38s | 0.915 |
+| classification | 0.066s | 3.996s (20.0 ms/1k) | 0.112s | 1.286s (6.4 ms/1k) | 0.063s | 7.457s (37.3 ms/1k) | 0.750 |
+| regression | 0.065s | 4.002s (20.0 ms/1k) | 0.111s | 1.351s (6.8 ms/1k) | 0.057s | 7.422s (37.1 ms/1k) | 0.999 |
+| mixed categorical | 0.077s | 3.955s (19.8 ms/1k) | 0.110s | 1.286s (6.4 ms/1k) | 0.058s | 7.364s (36.8 ms/1k) | 0.915 |
 
 - All three backends produce **identical scores** on every task — expected,
   since they load the same checkpoint and implement the same graph; this is
@@ -66,17 +84,63 @@ Quick grid (`300 x 10`, i.e. 300 train rows x 10 features, 200 test rows;
   unfused Python-level matmuls); NumPy stays the correctness reference.
 - Mojo predict is ~2× slower than NumPy and ~6× slower than torch. Two
   causes, in order of impact:
-  1. **No KV cache / per-chunk re-attention** *(fixed since this sweep —
-     see status below)*: the estimator decodes test rows in chunks; each
-     Mojo call re-ran the full O(n_train²) ICL attention from scratch.
+  1. **No KV cache / per-chunk re-attention** *(fixed — see sweep below
+     and status section)*: the estimator decodes test rows in chunks;
+     each uncached call re-runs attention over the train context from
+     scratch.
   2. **Partially-optimized kernels**: GEMMs, softmax and GELU are
      SIMD-vectorized and the GEMMs are multithreaded via pthreads
      (output rows split across workers, bit-exact vs serial); the per-head
      attention loop is now threaded as well, but LayerNorm, RoPE and
      qassmax elementwise loops are still single-threaded scalar code.
-- With the default `batch_size=8` the Mojo predict column would be ~85s
-  instead of ~8.3s without KV caching — same outputs, 25× more attention
-  passes. `kv_cache=True` removes this cliff.
+- With the default `batch_size=8` the same quick-grid Mojo predict would
+  take roughly an order of magnitude longer without KV caching (see the
+  sweep below). `kv_cache=True` removes this cliff.
+
+## Ternary PTQ ablation (1500 x 40, 400 test rows)
+
+Held-out accuracy (4-class task, chance = 0.25) and predict time,
+`n_estimators=8`, `batch_size=200`, 2026-08. Effective zero fraction of
+the ternarized weights: **32.45%** (per-row) / **34.46%** (per-tensor),
+identical across backends (same quantized checkpoint).
+
+| Variant | numpy predict | acc | torch predict | acc | mojo predict | acc |
+|---|---|---|---|---|---|---|
+| fp | 46.5s | 0.938 | 10.4s | 0.938 | 64.4s | 0.938 |
+| ternary/row | 44.4s | 0.250 | 9.6s | 0.250 | 60.9s | 0.250 |
+| ternary/tensor | 43.9s | 0.250 | 9.6s | 0.250 | 61.3s | 0.250 |
+
+- Quantized inference is only ~4–5% faster: the ternary scheme
+  dequantizes to fp values before the GEMMs, so matmul cost is unchanged;
+  only weight-loading/memory traffic shrinks slightly.
+- Accuracy collapses to chance level on this synthetic case. This matches
+  the load-time warning: PTQ currently spares Q/K/V projections but still
+  ternarizes the MLP linears and attention output projections, which this
+  checkpoint does not tolerate. Treat TabICL ternary PTQ as
+  experimental-only until a quantization-aware recipe exists.
+
+## Batch-size / KV-cache sweep (1000 x 20, 200 test rows)
+
+Predict time per call, `n_estimators=8`, classification, 2026-08. Cache
+build adds a one-time ~16s (numpy) / ~4s (torch) / ~18s (mojo) to `fit`.
+
+| Config | numpy | torch | mojo |
+|---|---|---|---|
+| bs=8, no cache | 119.4s | 32.6s | 225.4s |
+| bs=32, no cache | 42.3s | 11.0s | 71.3s |
+| bs=128, no cache | 20.9s | 4.8s | 29.5s |
+| bs=8, kv_cache | 4.74s | 4.92s | 4.71s |
+| bs=32, kv_cache | 2.67s | 1.87s | 3.53s |
+| bs=128, kv_cache | 2.19s | 1.08s | 3.11s |
+
+- Without caching, shrinking `batch_size` from 128 to 8 costs **~6–8×**
+  more attention work on every backend (the chunking cliff).
+- With the KV cache the batch-size dependence nearly vanishes (test
+  chunks attend cached train-side K/V): at `bs=8` the cache is worth
+  **25×** on NumPy, **6.6×** on torch and **48×** on mojo.
+- Cached mojo predict is now on par with (or faster than) uncached NumPy
+  at every batch size — the native KV path makes the experimental
+  backend practically usable despite its slower uncached kernels.
 
 ## Mojo backend status
 
