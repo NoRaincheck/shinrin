@@ -71,6 +71,7 @@ lo, hi = reg.predict(X_test, output_type="quantiles",
 | `quantization_granularity` | `str` | `"per_row"` | Absmean scale per output row (`"per_row"`) or per matrix (`"per_tensor"`) |
 | `device` | `str` | `None` | Torch device (`"cuda"`); torch backend only |
 | `random_state` | `int` | `42` | Seed for ensemble shuffling |
+| `verbose` | `bool` | `False` | Verbose input preprocessing |
 | `backend` | `str` | `"auto"` | `auto`, `torch`, `numpy` or `mojo` |
 
 ## Experimental: ternary post-training quantization

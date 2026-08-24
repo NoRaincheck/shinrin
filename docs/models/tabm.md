@@ -47,8 +47,12 @@ model.fit(X, y)
 | `learning_rate_init` | `float` | `1e-3` | Initial learning rate |
 | `max_iter` | `int` | `200` | Maximum epochs (or L-BFGS iterations) |
 | `tol` | `float` | `1e-4` | Convergence tolerance |
+| `verbose` | `bool` | `False` | Print per-epoch progress |
 | `early_stopping` | `bool` | `False` | Hold out validation data and stop early |
+| `validation_fraction` | `float` | `0.1` | Validation split fraction (when `early_stopping`) |
+| `n_iter_no_change` | `int` | `10` | Patience in epochs for early stopping |
 | `random_state` | `int` | `None` | Random seed for reproducibility |
+| `activation` | `str` | `"relu"` | Backbone activation (`"relu"` only) |
 | `k` | `int` | `32` | Number of ensemble members |
 | `arch_type` | `str` | `"tabm"` | `"tabm"`, `"tabm-mini"` or `"tabm-packed"` |
 | `dropout` | `float` | `0.1` | Backbone dropout rate |
