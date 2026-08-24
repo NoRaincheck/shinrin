@@ -39,6 +39,14 @@ from warnings import warn
 
 MAX_INT = np.iinfo(np.int32).max
 
+# Legacy criterion aliases accepted for backwards compatibility.
+_CRITERION_ALIASES = {"mse": "squared_error", "mae": "absolute_error"}
+
+
+def _normalize_criterion(criterion):
+    """Map legacy ``'mse'``/``'mae'`` to modern scikit-learn names."""
+    return _CRITERION_ALIASES.get(criterion, criterion)
+
 
 def _partition_estimators(n_estimators, n_jobs):
     """Private function used to partition estimators between jobs."""
@@ -336,13 +344,14 @@ class RandomForestRegressor(_sk_RandomForestRegressor):
     ----------
     .. [1] L. Breiman, "Random Forests", Machine Learning, 45(1), 5-32, 2001.
     """
-    def __init__(self, n_estimators=10, criterion='mse', max_depth=None,
+    def __init__(self, n_estimators=10, criterion='squared_error', max_depth=None,
                  min_samples_split=2, min_samples_leaf=1,
-                 min_weight_fraction_leaf=0.0, max_features='auto',
+                 min_weight_fraction_leaf=0.0, max_features=1.0,
                  max_leaf_nodes=None, bootstrap=True, oob_score=False,
                  n_jobs=1, random_state=None, verbose=0, warm_start=False,
                  min_variance=0.0):
         self.min_variance = min_variance
+        criterion = _normalize_criterion(criterion)
         super(RandomForestRegressor, self).__init__(
             n_estimators=n_estimators, criterion=criterion,
             max_depth=max_depth,
@@ -378,7 +387,7 @@ class RandomForestRegressor(_sk_RandomForestRegressor):
         mean = super(RandomForestRegressor, self).predict(X)
 
         if return_std:
-            if self.criterion != "mse":
+            if self.criterion not in ("mse", "squared_error"):
                 raise ValueError(
                     "Expected impurity to be 'mse', got %s instead"
                     % self.criterion)
@@ -520,13 +529,14 @@ class ExtraTreesRegressor(_sk_ExtraTreesRegressor):
     ----------
     .. [1] L. Breiman, "Random Forests", Machine Learning, 45(1), 5-32, 2001.
     """
-    def __init__(self, n_estimators=10, criterion='mse', max_depth=None,
+    def __init__(self, n_estimators=10, criterion='squared_error', max_depth=None,
                  min_samples_split=2, min_samples_leaf=1,
-                 min_weight_fraction_leaf=0.0, max_features='auto',
+                 min_weight_fraction_leaf=0.0, max_features=1.0,
                  max_leaf_nodes=None, bootstrap=False, oob_score=False,
                  n_jobs=1, random_state=None, verbose=0, warm_start=False,
                  min_variance=0.0):
         self.min_variance = min_variance
+        criterion = _normalize_criterion(criterion)
         super(ExtraTreesRegressor, self).__init__(
             n_estimators=n_estimators, criterion=criterion,
             max_depth=max_depth,
@@ -563,7 +573,7 @@ class ExtraTreesRegressor(_sk_ExtraTreesRegressor):
         mean = super(ExtraTreesRegressor, self).predict(X)
 
         if return_std:
-            if self.criterion != "mse":
+            if self.criterion not in ("mse", "squared_error"):
                 raise ValueError(
                     "Expected impurity to be 'mse', got %s instead"
                     % self.criterion)
