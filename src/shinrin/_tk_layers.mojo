@@ -21,6 +21,7 @@ from shinrin._tk_core import (
     gelu_scalar,
     hardware_threads,
     run_partitioned_range,
+    ThreadPool,
 )
 
 
@@ -649,6 +650,7 @@ def _softmax_rows_inplace(
 
 @always_inline
 def _heads_attention(
+    pool: UnsafePointer[ThreadPool, MutUntrackedOrigin],
     q_a: Pointer[Float32, MutUntrackedOrigin],
     k_a: Pointer[Float32, MutUntrackedOrigin],
     v_a: Pointer[Float32, MutUntrackedOrigin],
@@ -706,7 +708,7 @@ def _heads_attention(
             p += 1
         comptime WorkerFn = GemmWorkerFn
         var fp: WorkerFn = head_attn_worker
-        run_partitioned_range(jobs, parts, fp)
+        run_partitioned_range(pool, jobs, parts, fp)
         scratch.unsafe_free()
         jobs.unsafe_free()
         return
@@ -717,9 +719,9 @@ def _heads_attention(
         var k_h = k_a + h * k_rows * head_dim
         var v_h = v_a + h * k_rows * head_dim
         var o_h = out_a + h * q_rows * head_dim
-        gemm_nt(q_rows, k_rows, head_dim, q_h, k_h, scores)
+        gemm_nt(pool, q_rows, k_rows, head_dim, q_h, k_h, scores)
         _softmax_rows_inplace(scores, q_rows, k_rows, scale)
-        gemm_nn(q_rows, head_dim, k_rows, scores, v_h, o_h)
+        gemm_nn(pool, q_rows, head_dim, k_rows, scores, v_h, o_h)
         h += 1
 
 
@@ -841,6 +843,7 @@ def _merge_heads(
 
 @always_inline
 def _attention_tail(
+    pool: UnsafePointer[ThreadPool, MutUntrackedOrigin],
     q_in: Pointer[Float32, MutUntrackedOrigin],
     dst: Pointer[Float32, MutUntrackedOrigin],
     out_a: Pointer[Float32, MutUntrackedOrigin],
@@ -860,7 +863,7 @@ def _attention_tail(
     var merged = alloc[Float32](q_rows * d + 16)
     _merge_heads(out_a, merged, q_rows, d, n_heads, head_dim)
     var res = alloc[Float32](q_rows * d + 16)
-    gemm_nt(q_rows, d, d, merged, p.w_out, res)
+    gemm_nt(pool, q_rows, d, d, merged, p.w_out, res)
     _add_row_bias(res, p.b_out, q_rows, d)
     _add_f32(q_in, res, dst, q_rows * d)
 
@@ -868,7 +871,7 @@ def _attention_tail(
     var ffn_in = alloc[Float32](q_rows * d + 16)
     layer_norm_affine(dst, ffn_in, q_rows, d, p.ln2_w, p.ln2_b, True, p.ln_has_bias)
     var ffh = alloc[Float32](q_rows * d_ff + 16)
-    gemm_nt(q_rows, d_ff, d, ffn_in, p.w1, ffh)
+    gemm_nt(pool, q_rows, d_ff, d, ffn_in, p.w1, ffh)
     _add_row_bias(ffh, p.b1, q_rows, d_ff)
     var ftotal = q_rows * d_ff
     mi = 0
@@ -881,7 +884,7 @@ def _attention_tail(
     while mi < ftotal:
         ffh[mi] = gelu_scalar(ffh[mi])
         mi += 1
-    gemm_nt(q_rows, d, d_ff, ffh, p.w2, res)
+    gemm_nt(pool, q_rows, d, d_ff, ffh, p.w2, res)
     _add_row_bias(res, p.b2, q_rows, d)
     _add_f32(dst, res, dst, q_rows * d)
     merged.unsafe_free()
@@ -891,6 +894,7 @@ def _attention_tail(
 
 
 def attention_block_forward(
+    pool: UnsafePointer[ThreadPool, MutUntrackedOrigin],
     q_in: Pointer[Float32, MutUntrackedOrigin],
     k_in: Optional[Pointer[Float32, MutUntrackedOrigin]],
     dst: Pointer[Float32, MutUntrackedOrigin],
@@ -933,11 +937,11 @@ def attention_block_forward(
     var q_proj = alloc[Float32](q_rows * d + 16)
     var k_proj = alloc[Float32](k_rows * d + 16)
     var v_proj = alloc[Float32](k_rows * d + 16)
-    gemm_nt(q_rows, d, d, qn, p.w_qkv, q_proj)
+    gemm_nt(pool, q_rows, d, d, qn, p.w_qkv, q_proj)
     _add_row_bias(q_proj, p.b_qkv, q_rows, d)
-    gemm_nt(k_rows, d, d, kn, p.w_qkv + d * d, k_proj)
+    gemm_nt(pool, k_rows, d, d, kn, p.w_qkv + d * d, k_proj)
     _add_row_bias(k_proj, p.b_qkv + d, k_rows, d)
-    gemm_nt(k_rows, d, d, kn, p.w_qkv + 2 * d * d, v_proj)
+    gemm_nt(pool, k_rows, d, d, kn, p.w_qkv + 2 * d * d, v_proj)
     _add_row_bias(v_proj, p.b_qkv + 2 * d, k_rows, d)
 
     # -- head-major reshape ------------------------------------------------
@@ -963,10 +967,10 @@ def attention_block_forward(
     # -- attention per head -------------------------------------------------
     var out_a = alloc[Float32](q_rows * n_heads * head_dim + 16)
     var scores = alloc[Float32](q_rows * k_rows + 16)
-    _heads_attention(q_a, k_a, v_a, out_a, scores, q_rows, k_rows, n_heads, head_dim)
+    _heads_attention(pool, q_a, k_a, v_a, out_a, scores, q_rows, k_rows, n_heads, head_dim)
 
     # -- merge heads + out projection + residual + FFN ----------------------
-    _attention_tail(q_in, dst, out_a, q_rows, d, n_heads, head_dim, d_ff, p)
+    _attention_tail(pool, q_in, dst, out_a, q_rows, d, n_heads, head_dim, d_ff, p)
 
     qn.unsafe_free()
     if kn_owned:
@@ -982,6 +986,7 @@ def attention_block_forward(
 
 
 def attention_block_forward_cached(
+    pool: UnsafePointer[ThreadPool, MutUntrackedOrigin],
     q_in: Pointer[Float32, MutUntrackedOrigin],
     dst: Pointer[Float32, MutUntrackedOrigin],
     q_rows: Int,
@@ -1011,7 +1016,7 @@ def attention_block_forward_cached(
     var qn = alloc[Float32](q_rows * d + 16)
     layer_norm_affine(q_in, qn, q_rows, d, p.ln1_w, p.ln1_b, True, p.ln_has_bias)
     var q_proj = alloc[Float32](q_rows * d + 16)
-    gemm_nt(q_rows, d, d, qn, p.w_qkv, q_proj)
+    gemm_nt(pool, q_rows, d, d, qn, p.w_qkv, q_proj)
     _add_row_bias(q_proj, p.b_qkv, q_rows, d)
 
     # -- head-major reshape + ssmax on queries ------------------------------
@@ -1023,11 +1028,12 @@ def attention_block_forward_cached(
     var out_a = alloc[Float32](q_rows * n_heads * head_dim + 16)
     var scores = alloc[Float32](q_rows * k_rows + 16)
     _heads_attention(
-        q_a, cached_k, cached_v, out_a, scores, q_rows, k_rows, n_heads, head_dim
+        pool, q_a, cached_k, cached_v, out_a, scores, q_rows, k_rows,
+        n_heads, head_dim
     )
 
     # -- merge heads + out projection + residual + FFN ----------------------
-    _attention_tail(q_in, dst, out_a, q_rows, d, n_heads, head_dim, d_ff, p)
+    _attention_tail(pool, q_in, dst, out_a, q_rows, d, n_heads, head_dim, d_ff, p)
 
     qn.unsafe_free()
     q_proj.unsafe_free()
@@ -1037,6 +1043,7 @@ def attention_block_forward_cached(
 
 
 def isab_forward(
+    pool: UnsafePointer[ThreadPool, MutUntrackedOrigin],
     x: Pointer[Float32, MutUntrackedOrigin],
     ind_vectors: Pointer[Float32, MutUntrackedOrigin],
     dst: Pointer[Float32, MutUntrackedOrigin],
@@ -1056,11 +1063,11 @@ def isab_forward(
     """
     var hidden = alloc[Float32](num_inds * d_model + 16)
     attention_block_forward(
-        ind_vectors, x, hidden, num_inds, n, d_model, n_heads, head_dim, d_ff,
-        p1, None, False,
+        pool, ind_vectors, x, hidden, num_inds, n, d_model, n_heads, head_dim,
+        d_ff, p1, None, False,
     )
     attention_block_forward(
-        x, hidden, dst, n, num_inds, d_model, n_heads, head_dim, d_ff,
+        pool, x, hidden, dst, n, num_inds, d_model, n_heads, head_dim, d_ff,
         p2, None, False,
     )
     hidden.unsafe_free()
