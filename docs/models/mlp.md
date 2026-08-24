@@ -163,6 +163,10 @@ Two trainer backends are available, selected via the
   no BLAS requirement. Non-Adam solvers transparently fall back to
   NumPy. `SHINRIN_MLP_THREADS` overrides the worker count; the kernels
   scale threads down automatically for small minibatches.
+  With `quantization="ternary"`, the forward GEMM runs directly on
+  2-bit packed weights (four ternary levels per byte, per-row absmean
+  scales) with SIMD quantization refreshes instead of dequantizing to
+  float32 — same effective weights, ~4x smaller weight stream.
 
 See [MLP_BENCHMARK.md](https://github.com/NoRaincheck/shinrin/blob/main/scripts/benchmarks/MLP_BENCHMARK.md)
 for measured comparisons against scikit-learn across both backends.

@@ -39,6 +39,22 @@ tree.fit(X, y)
 | `fit(X, y)` | Fit the Mondrian tree to training data |
 | `predict(X)` | Predict regression values for X |
 | `apply(X)` | Return the index of the leaf for each sample |
+| `pred_contribs(X)` | TreeSHAP values with base value appended (see below) |
+
+## SHAP values via `pred_contribs()`
+
+Both Mondrian trees and forests expose `pred_contribs(X)`, which returns
+TreeSHAP contributions such that `prediction = base_value + sum(shap_values)`.
+The last column/axis holds the base value: `(n_samples, n_features + 1)` for
+regression, `(n_samples, n_features + 1, n_classes)` for classification.
+
+```python
+contribs = tree.pred_contribs(X)
+shap_values, base_value = contribs[:, :-1], contribs[:, -1]
+```
+
+For most purposes the higher-level `TreeExplainer` / `explanation()` helpers
+are more convenient; see [TreeSHAP Explanations](../features/treeshap-explanations.md).
 
 ## MondrianTreeClassifier
 

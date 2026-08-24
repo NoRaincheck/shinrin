@@ -3,19 +3,22 @@
 [![PyPI - Version](https://img.shields.io/pypi/v/shinrin.svg)](https://pypi.org/project/shinrin/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-Shinrin (森林, "forest" in Japanese) is a scikit-learn-compatible library for decision tree and forest models, with Rust bindings for performance and ONNX export support.
+Shinrin (森林, "forest" in Japanese) is a scikit-learn-compatible library for decision tree and forest models and tabular neural networks, with Rust and Mojo bindings for performance and ONNX export support.
 
-Since skope-rules and scikit-garden are no longer actively maintained, this project aims to bring them together with extensions for tree models — including certifiably optimal rule lists (CORELS) and globally optimal sparse decision trees (GOSDT), SHAP explanations, ONNX export, and benchmarking utilities. The vendored CORELS and GOSDT engines compile into the native extension with bundled mini-GMP and no TBB, so `pip install` needs no system libraries. The vendored parts also compound: routing skope-rules' mined candidates through CORELS' certified-optimal selection (ORDT) beats both methods stand-alone across our benchmarks (up to +2.6pp accuracy at 2–5-clause model sizes).
+Since skope-rules and scikit-garden are no longer actively maintained, this project aims to bring them together with extensions for tree models — including rule extraction (SkopeRules), certifiably optimal rule lists (CORELS), globally optimal sparse decision trees (GOSDT) and optimal rule-sets (ORDT) — plus torch-free tabular neural networks (MLP, TabM) and the TabICL in-context foundation model, SHAP explanations, ONNX export, and benchmarking utilities. The vendored CORELS and GOSDT engines compile into the native extension with bundled mini-GMP and no TBB, so `pip install` needs no system libraries. The vendored parts also compound: routing skope-rules' mined candidates through CORELS' certified-optimal selection (ORDT) beats both methods stand-alone across our benchmarks (up to +2.6pp accuracy at 2–5-clause model sizes).
 
 ## Features
 
 - **Mondrian Trees & Forests** — Full scikit-learn API compatibility
 - **CORELS Optimal Rule Lists** — Certifiably optimal rule lists (`CorelsClassifier`) with bundled mini-GMP, no system dependency
 - **GOSDT Optimal Sparse Trees** — Globally optimized trees with reference-ensemble guesses (`GOSDTClassifier`, `ThresholdGuessBinarizer`)
+- **Rule Extraction & ORDT** — `SkopeRules` plus the `OrdtClassifier` variant that routes mined candidates through CORELS' certified selection
+- **Tabular Neural Networks** — scikit-learn-compatible `MLPClassifier`/`MLPRegressor` and `TabMClassifier`/`TabMRegressor` with optional PLE embeddings, ternary weight quantization (BitLinear), and Mojo-accelerated training
+- **TabICL** — Tabular in-context learning foundation model (torch/NumPy/Mojo backends)
 - **TreeSHAP Explanations** — `TreeExplainer` for single trees and forests with `explanation()` visualization helper
 - **ONNX Export** — Export trained models to ONNX format for deployment
 - **Benchmarking** — Built-in utilities for training speed, prediction speed, and model size
-- **Rust Bindings** — Performance-critical code in Rust via PyO3
+- **Rust & Mojo Bindings** — Performance-critical code in Rust via PyO3 and Mojo kernels
 
 ## Quick Example
 

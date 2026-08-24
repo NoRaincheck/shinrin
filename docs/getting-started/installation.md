@@ -14,9 +14,18 @@ Shinrin offers several optional dependency groups:
 
 ```bash
 pip install shinrin[sklearn]   # scikit-learn for benchmarks and SHAP plotting
+pip install shinrin[pandas]    # pandas for SkopeRules / OrdtClassifier
 pip install shinrin[onnx]      # ONNX export support
-pip install shinrin[pandas]    # pandas integration
-pip install shinrin[full]      # All optional dependencies
+pip install shinrin[tabicl]    # TabICL torch backend + Hugging Face checkpoint download
+pip install shinrin[mojo]      # Mojo kernels (`just build-*-mojo`)
+pip install shinrin[full]      # All core optional dependencies
+```
+
+Benchmark-only extras used by `scripts/benchmarks/`:
+
+```bash
+pip install shinrin[tabm-bench]    # PyTorch reference for bench_tabm.py --with-torch
+pip install shinrin[tabicl-bench]  # upstream TabICL package for bench_tabicl.py --with-upstream
 ```
 
 ## From Source
@@ -33,6 +42,8 @@ uv sync --all-extras
 
 - Python 3.10 or higher
 - Rust toolchain (for building from source)
+- [Modular](https://www.modular.com/) / Mojo CLI (optional — only to build the
+  experimental Mojo kernels via the `just build-*-mojo` recipes)
 
 ## Optimal Trees & Rules
 

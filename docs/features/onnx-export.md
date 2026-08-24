@@ -112,3 +112,38 @@ Notes:
   one-hot index 0 (values above the largest map to the last index).
 - Numerical precision matches the NumPy reference to float32 round-off
   (verified against onnxruntime in `tests/test_tabm_onnx.py`).
+
+## Importing models with `from_model()`
+
+The reverse direction is supported too: convert a fitted scikit-learn
+tree or forest ensemble (or an ONNX model containing `TreeEnsemble`
+nodes) into a Mondrian tree or forest that reproduces its predictions.
+Mondrian-specific statistics (bounds, tau values, node sample counts)
+are rebuilt from `X`/`y`, so the converted model supports incremental
+training via `partial_fit`.
+
+```python
+from sklearn.ensemble import RandomForestRegressor
+from shinrin import MondrianForestRegressor
+from shinrin.onnx_import import from_model
+
+rf = RandomForestRegressor().fit(X_train, y_train)
+
+mondrian = from_model(rf, X_train, y_train, MondrianForestRegressor)
+mondrian.partial_fit(X_new, y_new)   # continue training online
+```
+
+Parameters:
+
+| Parameter | Type | Description |
+|---|---|---|
+| `model` | fitted sklearn estimator or ONNX `ModelProto` | Source model (needs `tree_` or `estimators_`) |
+| `X` | `ndarray` | Training data for the Mondrian statistics rebuild (≥ ~300 samples recommended) |
+| `y` | `ndarray` | Training targets |
+| `cls` | type | Target Mondrian class, e.g. `MondrianTreeRegressor` |
+
+!!! note
+    The conversion preserves the source model's predictions but not its
+    internal sampling randomness; subsequent `partial_fit` updates follow
+    Mondrian forest semantics.
+

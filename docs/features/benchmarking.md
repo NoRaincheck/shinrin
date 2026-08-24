@@ -144,8 +144,23 @@ results documents:
 | `bench_bitlinear.py` | Ternary (BitLinear) QAT vs full precision, MLP/TabM both backends + TabICL PTQ inference | `BITLINEAR_BENCHMARK.md` |
 | `bench_backends.py` | Rust vs Mojo backends | `BENCHMARK.md` |
 | `bench_tabm.py` | TabM NumPy/Mojo/PyTorch | `TABM_BENCHMARK.md` |
+| `bench_tabicl.py` | TabICL fit/predict across NumPy/torch/Mojo backends with predict throughput, plus optional PTQ ablation (`--quant-ablation`) and `batch_size x kv_cache` sweep (`--cache-sweep`) | `TABICL_BENCHMARK.md` |
 
 Run them with `just bench-gosdt`, `just bench-mlp`, `just bench-backends`, etc.
 `just bench-bitlinear` runs the ternary-quantization ablation benchmark;
 `just bench-all` runs `bench_all.py`, which measures every algorithm on every
 dataset in the suite and republishes the results page.
+
+There is no `just` recipe for the TabICL benchmark; run it directly:
+
+```bash
+uv run python scripts/benchmarks/bench_tabicl.py --backend numpy --quick
+uv run --extra tabicl-bench python scripts/benchmarks/bench_tabicl.py \
+    --backend torch --with-upstream
+uv run python scripts/benchmarks/bench_tabicl.py --backend mojo \
+    --quant-ablation --cache-sweep
+```
+
+The baseline tree-model comparison against LightGBM / scikit-learn lives in
+[`scripts/benchmarks/bench_baselines.py`](https://github.com/NoRaincheck/shinrin/blob/main/scripts/benchmarks/bench_baselines.py)
+(results in [`BENCHMARK.md`](https://github.com/NoRaincheck/shinrin/blob/main/scripts/benchmarks/BENCHMARK.md)).

@@ -121,11 +121,19 @@ See [scripts/benchmarks/BENCHMARK.md](scripts/benchmarks/BENCHMARK.md) for detai
 
 See [scripts/benchmarks/TABM_BENCHMARK.md](scripts/benchmarks/TABM_BENCHMARK.md) for TabM backend comparisons (NumPy vs Mojo vs PyTorch).
 
+See [scripts/benchmarks/MLP_BENCHMARK.md](scripts/benchmarks/MLP_BENCHMARK.md) for MLP comparisons against scikit-learn across the NumPy and Mojo backends (`just bench-mlp`).
+
+See [scripts/benchmarks/BITLINEAR_BENCHMARK.md](scripts/benchmarks/BITLINEAR_BENCHMARK.md) for ternary quantization (BitLinear) ablations — training-aware QAT for MLP/TabM on both backends plus TabICL post-training quantization (`just bench-bitlinear`).
+
+See [scripts/benchmarks/ALL_MODELS_BENCHMARK.md](scripts/benchmarks/ALL_MODELS_BENCHMARK.md) for the full all-algorithms benchmark suite, republished at [docs/features/benchmark-results.md](docs/features/benchmark-results.md) (`just bench-all`).
+
 See [scripts/benchmarks/GOSDT_BENCHMARK.md](scripts/benchmarks/GOSDT_BENCHMARK.md) for GOSDT vs scikit-learn CART comparisons (`just bench-gosdt`).
 
 See [scripts/benchmarks/ORDT_BENCHMARK.md](scripts/benchmarks/ORDT_BENCHMARK.md) for ORDT — optimal rule-sets from decision trees, combining skope-rules mining with CORELS' certified-optimal selection (ships as `OrdtClassifier`; `just bench-ordt`). Vendoring both pays off: swapping skope-rules' heuristic vote for CORELS' optimal ordering wins on **every dataset tested** (up to +2.6pp test accuracy) while shrinking models to 2–5-clause rule lists.
 
-To run benchmarks yourself: `python scripts/benchmarks/bench_baselines.py` (or `just bench-backends` for Rust vs Mojo backend comparisons, `just bench-tabm` for TabM backends).
+See [scripts/benchmarks/TABICL_BENCHMARK.md](scripts/benchmarks/TABICL_BENCHMARK.md) for TabICL inference benchmarks across the NumPy/torch/Mojo backends, including predict throughput, ternary PTQ ablation and batch-size/KV-cache sweeps (`python scripts/benchmarks/bench_tabicl.py --backend mojo --quant-ablation --cache-sweep`).
+
+To run benchmarks yourself: `python scripts/benchmarks/bench_baselines.py`, or use the `just` recipes (`just bench-backends` for Rust vs Mojo tree backends, `just bench-mlp`, `just bench-bitlinear`, `just bench-all`). TabM and TabICL backend comparisons have no recipe: `python scripts/benchmarks/bench_tabm.py` and `python scripts/benchmarks/bench_tabicl.py`.
 
 ## Installation
 
@@ -137,10 +145,16 @@ Optional dependencies:
 
 ```bash
 pip install shinrin[sklearn]   # scikit-learn for benchmarks and SHAP plotting
+pip install shinrin[pandas]    # pandas for SkopeRules / OrdtClassifier
 pip install shinrin[onnx]      # ONNX export
-pip install shinrin[mojo]      # TabM Mojo kernels (`just build-tabm-mojo`)
-pip install shinrin[full]      # All optional dependencies
+pip install shinrin[tabicl]    # TabICL torch backend + checkpoint download
+pip install shinrin[mojo]      # Mojo kernels (`just build-*-mojo`)
+pip install shinrin[full]      # All core optional dependencies
 ```
+
+Benchmark-only extras (`tabm-bench`, `tabicl-bench`) pull in PyTorch and the
+upstream reference packages for `bench_tabm.py --with-torch` /
+`bench_tabicl.py --with-upstream` comparisons.
 
 ### Native backends
 
@@ -164,23 +178,32 @@ Both backends produce identical trees for identical random states (verified by
 
 ### Models
 
-#### Tree Models
+#### Trees & Forests
 
 | Model | Description |
 |---|---|
-| `MondrianTreeRegressor` | Single Mondrian tree for regression |
-| `MondrianTreeClassifier` | Single Mondrian tree for classification |
-| `MondrianForestRegressor` | Ensemble of Mondrian trees for regression |
-| `MondrianForestClassifier` | Ensemble of Mondrian trees for classification |
-| `TabMClassifier` / `TabMRegressor` | Ensemble MLP trainers (NumPy / Mojo backends) |
+| `MondrianTreeRegressor` / `MondrianTreeClassifier` | Single Mondrian tree |
+| `MondrianForestRegressor` / `MondrianForestClassifier` | Ensemble of Mondrian trees |
+| `RandomForestQuantileRegressor` / `ExtraTreesQuantileRegressor` | Quantile regression forests |
+| `DecisionTreeQuantileRegressor` / `ExtraTreeQuantileRegressor` | Single-tree quantile regression |
+
+#### Rules & Optimal Trees
+
+| Model | Description |
+|---|---|
+| `SkopeRules` | Rule extraction from tree ensembles |
+| `OrdtClassifier` | Optimal rule-sets: skope-rules mining + CORELS certified selection |
+| `CorelsClassifier` | Certifiably optimal rule lists for binary data |
+| `GOSDTClassifier` | Globally optimal sparse decision trees |
+| `ThresholdGuessBinarizer` / `NumericBinarizer` | Feature binarizers for GOSDT |
+
+#### Tabular Neural Networks
+
+| Model | Description |
+|---|---|
+| `MLPClassifier` / `MLPRegressor` | scikit-learn-compatible drop-in MLPs (NumPy / Mojo backends) |
+| `TabMClassifier` / `TabMRegressor` | Ensemble MLP trainers, BatchEnsemble-style adapters (NumPy / Mojo backends) |
 | `TabICLClassifier` / `TabICLRegressor` | Tabular in-context learning estimators (TabICLv2) |
-
-#### TabM Neural Networks
-
-| Model | Description |
-|---|---|
-| `TabMRegressor` | TabM ensemble regressor (drop-in for `MLPRegressor`) |
-| `TabMClassifier` | TabM ensemble classifier (drop-in for `MLPClassifier`) |
 
 **TabM parameters:**
 
@@ -196,6 +219,8 @@ Both backends produce identical trees for identical random states (verified by
 | `d_embedding` | `8` | Embedding width per numeric feature |
 | `categorical_indices` | `None` | Columns to treat as categorical |
 | `categorical_cardinality_threshold` | `32` | Max unique values for auto-detecting categoricals |
+| `quantization` | `'none'` | `'ternary'` enables BitLinear ternary weight quantization (set `alpha=0`) |
+| `quantization_granularity` | `'per_row'` | Absmean scale per output row or per matrix (`'per_tensor'`) |
 
 ### Explanations (Tree Models)
 
