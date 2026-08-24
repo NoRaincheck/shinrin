@@ -137,6 +137,8 @@ fn main() {
         spotset.file(spotset_dir.join(name));
     }
 
+    spotset.file(spotset_dir.join("bridge_spotset.cpp"));
+
     spotset.compile("shinrin_spotset");
 
     // mini-gmp: GMP's portable mpz_t implementation, vendored from the
