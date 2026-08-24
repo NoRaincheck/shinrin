@@ -83,7 +83,7 @@ def _parse_v5_attrs(attrs: dict) -> dict:
 def _walk_v5_parallel(
     parsed: dict,
     roots: list[int],
-) -> tuple[list[tuple[int, float]], list[dict[int, float] | None], dict[int, tuple[int, int]]]:
+) -> tuple[list[tuple[int, float]], list[Any], dict[int, tuple[int, int]]]:
     """Walk all per-class copies of one tree simultaneously.
 
     Copies of the same tree share their split structure; at each recursion
@@ -96,7 +96,8 @@ def _walk_v5_parallel(
     ``children`` maps interior positions to ``(true_ref, false_ref)``.
     """
     topology: list[tuple[int, float]] = []
-    values: list[dict[int, float] | None] = []
+    # entries are None for interior nodes, {target: weight} for leaves
+    values: list[Any] = []
     children: dict[int, tuple[int, int]] = {}
 
     def visit(nodes: tuple[int, ...], is_leaf: bool) -> int:
@@ -108,9 +109,7 @@ def _walk_v5_parallel(
                 w = float(parsed["leaf_weights"][nid])
                 t = int(parsed["leaf_targetids"][nid])
                 if t in weights and weights[t] != w:
-                    raise ValueError(
-                        "Inconsistent leaf weights across class copies"
-                    )
+                    raise ValueError("Inconsistent leaf weights across class copies")
                 weights[t] = w
             topology.append((-2, 0.0))
             values.append(weights)
@@ -131,12 +130,8 @@ def _walk_v5_parallel(
                 )
         topology.append((feat0, thr0))
         values.append(None)
-        true_ref = visit(
-            tuple(int(parsed["true_ids"][n]) for n in nodes), tl0
-        )
-        false_ref = visit(
-            tuple(int(parsed["false_ids"][n]) for n in nodes), fl0
-        )
+        true_ref = visit(tuple(int(parsed["true_ids"][n]) for n in nodes), tl0)
+        false_ref = visit(tuple(int(parsed["false_ids"][n]) for n in nodes), fl0)
         children[idx] = (true_ref, false_ref)
         return idx
 
@@ -144,9 +139,7 @@ def _walk_v5_parallel(
     return topology, values, children
 
 
-def _extract_v5_tree(
-    parsed: dict, task: str | None
-) -> tuple[dict, str]:
+def _extract_v5_tree(parsed: dict, task: str | None) -> tuple[dict, str]:
     """Rebuild a sklearn-contract tree-info dict from parsed v5 attributes.
 
     Returns ``(tree_info, encoding)`` where encoding is ``"means"``
@@ -186,7 +179,7 @@ def _extract_v5_tree(
 
     if task == "classification-logits":
         # Boosted classifiers store per-class log-odds columns.
-        if single_target := (len(targets) <= 1):
+        if len(targets) <= 1:
             col = np.zeros((n_nodes, 1), dtype=np.float64)
             for i in leaf_rows:
                 for w in values[i].values():
@@ -997,9 +990,7 @@ def _from_model_forest(
             if node.op_type == "TreeEnsemble":
                 for attr in node.attribute:
                     if attr.name == "base_values":
-                        base_values = np.array(
-                            attr.floats, dtype=np.float64
-                        )
+                        base_values = np.array(attr.floats, dtype=np.float64)
                         break
                 if base_values is not None:
                     break

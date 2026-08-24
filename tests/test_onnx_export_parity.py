@@ -16,7 +16,6 @@ import pytest
 os.environ.setdefault("SHINRIN_MLP_BACKEND", "numpy")
 os.environ.setdefault("SHINRIN_TABM_BACKEND", "numpy")
 
-import shinrin
 from shinrin.onnx import to_onnx
 
 try:
@@ -28,6 +27,7 @@ ORT_INSTALLED = ort is not None
 
 
 def _ort_predict(model_proto, X):
+    assert ort is not None
     session = ort.InferenceSession(
         model_proto.SerializeToString(), providers=["CPUExecutionProvider"]
     )
@@ -126,7 +126,9 @@ class TestTreeForestOrtParity:
     def test_sklearn_forest_classifier_multiclass(self, data):
         sklearn = pytest.importorskip("sklearn.ensemble")
         X, _, _, y = data
-        model = sklearn.RandomForestClassifier(n_estimators=10, max_depth=10, random_state=0)
+        model = sklearn.RandomForestClassifier(
+            n_estimators=10, max_depth=10, random_state=0
+        )
         model.fit(X, y)
         proba, labels = _ort_predict(to_onnx(model, X[:5]), X)
         _assert_close(proba, model.predict_proba(X), self._tolerance(X, "sklearn"))
@@ -141,6 +143,32 @@ class TestTreeForestOrtParity:
         model.fit(X, y)
         got = _ort_predict(to_onnx(model, X[:5]), X)[0]
         _assert_close(got, model.predict(X), self._tolerance(X, "sklearn"))
+
+    def test_gradient_boosting_classifier_binary(self, data):
+        # Guards the prior-log-odds base handling: init_.predict returns a
+        # class label for classifiers, not the raw-space constant.
+        sklearn = pytest.importorskip("sklearn.ensemble")
+        X, _, y, _ = data
+        model = sklearn.GradientBoostingClassifier(
+            n_estimators=15, max_depth=3, random_state=0
+        )
+        model.fit(X, y)
+        proba, labels = _ort_predict(to_onnx(model, X[:5]), X)
+        tol = self._tolerance(X, "sklearn")
+        _assert_close(proba, model.predict_proba(X), max(tol, 1e-7))
+        assert (labels == model.predict(X)).all()
+
+    def test_gradient_boosting_classifier_multiclass(self, data):
+        sklearn = pytest.importorskip("sklearn.ensemble")
+        X, _, _, y = data
+        model = sklearn.GradientBoostingClassifier(
+            n_estimators=15, max_depth=3, random_state=0
+        )
+        model.fit(X, y)
+        proba, labels = _ort_predict(to_onnx(model, X[:5]), X)
+        tol = self._tolerance(X, "sklearn")
+        _assert_close(proba, model.predict_proba(X), max(tol, 1e-7))
+        assert (labels == model.predict(X)).all()
 
 
 @pytest.mark.skipif(not ORT_INSTALLED, reason="onnxruntime not installed")

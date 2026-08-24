@@ -78,7 +78,7 @@ def _tree_info(tree) -> dict[str, Any]:
 def _ensemble_attributes(
     entries: list[tuple[dict[str, Any], int]],
     n_targets: int,
-    dtype: np.dtype,
+    dtype: np.dtype | type[np.generic],
     scale: float = 1.0,
 ) -> dict[str, Any]:
     """Build attributes for one ``ai.onnx.ml.TreeEnsemble`` node (opset 5).
@@ -140,9 +140,13 @@ def _ensemble_attributes(
             fl = bool(leaf[r_orig])
             feats.append(int(feature[orig]))
             splits.append(float(info["threshold"][orig]))
-            true_ids.append(entry_of_leaf[l_orig] + entry_off if tl else rank[l_orig] + node_off)
+            true_ids.append(
+                entry_of_leaf[l_orig] + entry_off if tl else rank[l_orig] + node_off
+            )
             true_leafs.append(int(tl))
-            false_ids.append(entry_of_leaf[r_orig] + entry_off if fl else rank[r_orig] + node_off)
+            false_ids.append(
+                entry_of_leaf[r_orig] + entry_off if fl else rank[r_orig] + node_off
+            )
             false_leafs.append(int(fl))
 
         leaf_vals = values[leaf_idx]
@@ -282,9 +286,7 @@ def to_onnx(
     if target_opset is None:
         target_opset = 15
     if target_opset < 15:
-        raise ValueError(
-            f"Tree/forest export requires opset >= 15, got {target_opset}"
-        )
+        raise ValueError(f"Tree/forest export requires opset >= 15, got {target_opset}")
 
     # Infer input shape and dtype
     if X is not None:
@@ -322,7 +324,6 @@ def to_onnx(
             "'estimators_' attribute (forest)."
         )
 
-    n_trees = len(infos)
     learning_rate = float(getattr(estimator, "learning_rate", 1.0))
     classes = getattr(estimator, "classes_", None)
     if classes is not None and np.asarray(classes).size > 1:
@@ -360,15 +361,24 @@ def to_onnx(
             )
 
     # Constant base prediction of boosted ensembles (None for forests).
+    # ``_raw_predict_init`` returns sklearn's raw-space init: the target
+    # mean for regressors, the prior log-odds for binary classifiers and
+    # the centered log-prior vector for multi-class classifiers.
     base_values: np.ndarray | None = None
-    if is_gb and hasattr(estimator, "init_"):
+    if is_gb:
         probe_row = (
             np.zeros((1, n_features), dtype=input_dtype)
             if X is None
             else X[:1].astype(input_dtype, copy=False)
         )
-        init_pred = np.asarray(estimator.init_.predict(probe_row)).ravel()
-        base_values = init_pred.astype(input_dtype)
+        if hasattr(estimator, "_raw_predict_init"):
+            base_values = np.asarray(
+                estimator._raw_predict_init(probe_row), dtype=input_dtype
+            ).ravel()
+        elif hasattr(estimator, "init_"):
+            base_values = np.asarray(
+                estimator.init_.predict(probe_row), dtype=input_dtype
+            ).ravel()
 
     def _emit_tree_nodes(
         entry_sets: list[list[tuple[dict, int]]],
@@ -390,9 +400,7 @@ def to_onnx(
             attrs = _ensemble_attributes(entries, n_targets, input_dtype, scale)
             attrs["name"] = f"tree_{k}"
             out = f"tree_out_{k}"
-            graph_nodes.append(
-                helper.make_node("TreeEnsemble", ["X"], [out], **attrs)
-            )
+            graph_nodes.append(helper.make_node("TreeEnsemble", ["X"], [out], **attrs))
             outs.append(out)
         cur = outs[0]
         for k in range(1, len(outs)):
@@ -427,7 +435,9 @@ def to_onnx(
         initializers.append(
             numpy_helper.from_array(np.array([1], dtype=np.int64), "ax_last")
         )
-        graph_nodes.append(helper.make_node("Squeeze", [raw, "ax_last"], ["predictions"]))
+        graph_nodes.append(
+            helper.make_node("Squeeze", [raw, "ax_last"], ["predictions"])
+        )
         outputs.append(helper.make_tensor_value_info("predictions", onnx_dtype, [None]))
         task, encoding = "regression", _ENCODING_MEAN
 
@@ -443,9 +453,10 @@ def to_onnx(
                 graph_nodes.append(helper.make_node("Add", [raw, "base"], ["offset"]))
                 raw = "offset"
             graph_nodes.append(helper.make_node("Sigmoid", [raw], ["p1"]))
-            one = numpy_helper.from_array(np.ones(1, dtype=input_dtype), "one")
-            initializers.append(one)
-            graph_nodes.append(helper.make_node("Sub", [one, "p1"], ["p0"]))
+            initializers.append(
+                numpy_helper.from_array(np.ones(1, dtype=input_dtype), "one")
+            )
+            graph_nodes.append(helper.make_node("Sub", ["one", "p1"], ["p0"]))
             graph_nodes.append(
                 helper.make_node("Concat", ["p0", "p1"], ["probabilities"], axis=1)
             )
@@ -465,7 +476,9 @@ def to_onnx(
                 helper.make_node("Softmax", [raw], ["probabilities"], axis=1)
             )
         outputs.append(
-            helper.make_tensor_value_info("probabilities", onnx_dtype, [None, n_classes])
+            helper.make_tensor_value_info(
+                "probabilities", onnx_dtype, [None, n_classes]
+            )
         )
         task = "classification-logits"
         _add_labels_tail("probabilities")
@@ -482,7 +495,9 @@ def to_onnx(
         )
         graph_nodes.append(helper.make_node("Identity", [prob_out], ["probabilities"]))
         outputs.append(
-            helper.make_tensor_value_info("probabilities", onnx_dtype, [None, n_classes])
+            helper.make_tensor_value_info(
+                "probabilities", onnx_dtype, [None, n_classes]
+            )
         )
         task, encoding = "classification", _ENCODING_PROBS
         _add_labels_tail("probabilities")
