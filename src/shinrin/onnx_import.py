@@ -50,6 +50,100 @@ _MIN_SAMPLES_FOR_STATS = 300
 # ===================================================================
 
 
+# Standard ai.onnx.ml ensemble ops emitted by shinrin.onnx.to_onnx.
+_STANDARD_ENSEMBLE_OPS = ("TreeEnsembleRegressor", "TreeEnsembleClassifier")
+
+
+def _find_ensemble_nodes(onnx_model: ModelProto, op_types) -> list:
+    """Return graph nodes whose op_type is in ``op_types``."""
+    return [n for n in onnx_model.graph.node if n.op_type in op_types]
+
+
+def _attrs_by_name(node):
+    return {a.name: a for a in node.attribute}
+
+
+def _extract_standard_tree(onnx_model: ModelProto, tree_id: int) -> dict:
+    """Extract one tree from a standard ``ai.onnx.ml`` ensemble node.
+
+    Handles the merged single-node layout produced by ``shinrin.onnx``
+    (all trees inside one ``nodes_treeids``-indexed node). Leaf marker
+    conventions match the legacy parser: ``feature == -2`` marks leaves,
+    children are ``-1`` there, and ``value`` holds regression targets or
+    canonical classification scores (log-odds / log-probs).
+    """
+    candidates = [
+        n
+        for n in _find_ensemble_nodes(onnx_model, _STANDARD_ENSEMBLE_OPS)
+        if tree_id in list(_attrs_by_name(n)["nodes_treeids"].ints)
+    ]
+    if not candidates:
+        raise ValueError(
+            f"Tree with id {tree_id} not found in ONNX model "
+            f"(no standard ensemble node contains it)"
+        )
+    node = candidates[0]
+    attrs = _attrs_by_name(node)
+
+    treeids = np.array(attrs["nodes_treeids"].ints, dtype=np.int64)
+    sel = np.flatnonzero(treeids == tree_id)
+    nodeids = np.array(attrs["nodes_nodeids"].ints, dtype=np.int64)[sel]
+    order = np.argsort(nodeids)
+    sel, nodeids = sel[order], nodeids[order]
+
+    modes_all = [s.decode() for s in attrs["nodes_modes"].strings]
+    modes = [modes_all[i] for i in sel]
+    internal = np.array([m != "LEAF" for m in modes], dtype=bool)
+
+    featureids = np.array(attrs["nodes_featureids"].ints, dtype=np.int64)[sel]
+    values = np.array(attrs["nodes_values"].floats, dtype=np.float64)[sel]
+    truenodeids = np.array(attrs["nodes_truenodeids"].ints, dtype=np.int64)[sel]
+    falsenodeids = np.array(attrs["nodes_falsenodeids"].ints, dtype=np.int64)[sel]
+
+    feature = np.where(internal, featureids, -2).astype(np.int64)
+    threshold = np.where(internal, values, -2.0).astype(np.float64)
+    left_child = np.where(internal, truenodeids, -1).astype(np.int64)
+    right_child = np.where(internal, falsenodeids, -1).astype(np.int64)
+
+    n_nodes = len(nodeids)
+    if node.op_type == "TreeEnsembleRegressor":
+        value = np.zeros(n_nodes, dtype=np.float64)
+        t_tree = np.array(attrs["target_treeids"].ints, dtype=np.int64)
+        t_node = np.array(attrs["target_nodeids"].ints, dtype=np.int64)
+        t_weight = np.array(attrs["target_weights"].floats, dtype=np.float64)
+        t_sel = t_tree == tree_id
+        value[t_node[t_sel]] = t_weight[t_sel]
+        n_classes_arr = np.array([1])
+    else:
+        c_tree = np.array(attrs["class_treeids"].ints, dtype=np.int64)
+        c_node = np.array(attrs["class_nodeids"].ints, dtype=np.int64)
+        c_ids = np.array(attrs["class_ids"].ints, dtype=np.int64)
+        c_weight = np.array(attrs["class_weights"].floats, dtype=np.float64)
+        c_sel = c_tree == tree_id
+        n_classes = int(c_ids[c_sel].max()) + 1 if c_sel.any() else 1
+        probs = np.zeros((n_nodes, max(n_classes, 2)), dtype=np.float64)
+        probs[c_node[c_sel], c_ids[c_sel]] = c_weight[c_sel]
+        eps = 1e-12
+        if n_classes <= 2:
+            # Binary: store log-odds so sigmoid(logit) recovers P(class 1).
+            logit = np.log((probs[:, 1] + eps) / (probs[:, 0] + eps))
+            value = logit.reshape(-1, 1)
+            n_classes_arr = np.array([2])
+        else:
+            # Multi-class: store log-probs so softmax recovers the rows.
+            value = np.log(probs + eps)
+            n_classes_arr = np.array([n_classes])
+
+    return {
+        "feature": feature,
+        "threshold": threshold,
+        "left_child": left_child,
+        "right_child": right_child,
+        "value": value,
+        "n_classes": n_classes_arr,
+    }
+
+
 def _extract_tree_from_onnx_node(onnx_model: ModelProto, tree_id: int) -> dict:
     """Extract a single tree's structure from an ONNX model's TreeEnsemble node.
 
@@ -66,6 +160,10 @@ def _extract_tree_from_onnx_node(onnx_model: ModelProto, tree_id: int) -> dict:
         Dictionary with keys: feature, threshold, left_child, right_child,
         value, n_classes.
     """
+    # Standard-format graphs (single merged ai.onnx.ml ensemble node).
+    if not _find_ensemble_nodes(onnx_model, ("TreeEnsemble",)):
+        return _extract_standard_tree(onnx_model, tree_id)
+
     # Find the TreeEnsemble node for this tree
     # For forests, each TreeEnsemble node represents one tree
     tree_nodes = [
@@ -573,10 +671,48 @@ def _is_onnx_model(model: Any) -> bool:
     return hasattr(model, "graph") and hasattr(model, "producer_name")
 
 
+def _get_base_values(model: ModelProto) -> float | None:
+    """Return the initial-output constant (GradientBoosting), if present."""
+    # Legacy format: base_values attribute on the custom TreeEnsemble node.
+    for node in _find_ensemble_nodes(model, ("TreeEnsemble",)):
+        for attr in node.attribute:
+            if attr.name == "base_values":
+                vals = np.array(attr.floats, dtype=np.float64)
+                if len(vals):
+                    return float(vals[0])
+        break
+    # Standard format: scalar initializer added to the ensemble output.
+    from onnx import numpy_helper
+
+    initializers = {i.name: i for i in model.graph.initializer}
+    ensemble_out = None
+    for node in _find_ensemble_nodes(model, _STANDARD_ENSEMBLE_OPS):
+        ensemble_out = node.output[0]
+        break
+    if ensemble_out is None:
+        return None
+    for node in model.graph.node:
+        if node.op_type != "Add" or ensemble_out not in list(node.input):
+            continue
+        for name in node.input:
+            if name != ensemble_out and name in initializers:
+                arr = numpy_helper.to_array(initializers[name])
+                if arr.size:
+                    return float(np.ravel(arr)[0])
+    return None
+
+
 def _count_trees_in_onnx(onnx_model: ModelProto) -> int:
     """Count the number of trees in an ONNX model."""
-    # Count TreeEnsemble nodes (each node represents one tree)
-    return sum(1 for node in onnx_model.graph.node if node.op_type == "TreeEnsemble")
+    # Legacy format: one custom TreeEnsemble node per tree.
+    legacy = _find_ensemble_nodes(onnx_model, ("TreeEnsemble",))
+    if legacy:
+        return len(legacy)
+    # Standard format: all trees merged into one nodes_treeids-indexed node.
+    total = set()
+    for node in _find_ensemble_nodes(onnx_model, _STANDARD_ENSEMBLE_OPS):
+        total.update(_attrs_by_name(node)["nodes_treeids"].ints)
+    return len(total)
 
 
 def from_model(
@@ -782,20 +918,18 @@ def _from_model_forest(
         base_tree_cls = MondrianTreeRegressor
 
     # Extract tree count and IDs from ONNX model
-    tree_ids = [
-        i for i, node in enumerate(model.graph.node) if node.op_type == "TreeEnsemble"
-    ]
+    if _find_ensemble_nodes(model, ("TreeEnsemble",)):
+        # Legacy format: node index == tree id.
+        tree_ids = [
+            i
+            for i, node in enumerate(model.graph.node)
+            if node.op_type == "TreeEnsemble"
+        ]
+    else:
+        tree_ids = list(range(_count_trees_in_onnx(model)))
 
     # Extract base_values from ONNX model if available (for GradientBoosting)
-    base_values = None
-    for node in model.graph.node:
-        if node.op_type == "TreeEnsemble":
-            for attr in node.attribute:
-                if attr.name == "base_values":
-                    base_values = float(np.array(attr.floats, dtype=np.float64)[0])
-                    break
-            if base_values is not None:
-                break
+    base_values = _get_base_values(model)
 
     # Convert each tree in parallel
     def _convert_single_tree(tree_id: int) -> Any:
