@@ -649,11 +649,13 @@ def build_markdown(meta: dict, records: list[dict]) -> str:
             "",
             "*Check*: max abs err <= 1e-3 and label agreement >= 99.5%.",
             "",
-            "*Export mode*: Mondrian graphs are either `exact` (reproduces"
-            " native predict including path smoothing) or `tree-ensemble`"
-            " (hard tree structure averaged across trees; the size-guarded"
-            " fallback used when the exact graph would exceed the protobuf"
-            " limit). Everything else reports `generic`.",
+            (
+                "*Export mode*: Mondrian graphs are either `exact` (reproduces"
+                " native predict including path smoothing) or `tree-ensemble`"
+                " (hard tree structure averaged across trees; the size-guarded"
+                " fallback used when the exact graph would exceed the protobuf"
+                " limit). Everything else reports `generic`."
+            ),
             "",
         ]
 
@@ -692,11 +694,7 @@ def build_markdown(meta: dict, records: list[dict]) -> str:
     L += ["## Takeaways", ""]
     if records:
         L.append(f"- {len(ok_recs)}/{len(records)} cells meet the tolerance check.")
-        approx_fail = [
-            r
-            for r in failed
-            if r.get("export_mode") == "tree-ensemble"
-        ]
+        approx_fail = [r for r in failed if r.get("export_mode") == "tree-ensemble"]
         other_fail = [r for r in failed if r not in approx_fail]
         if approx_fail:
             L.append(
