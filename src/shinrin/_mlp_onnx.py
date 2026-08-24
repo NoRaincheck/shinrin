@@ -387,10 +387,11 @@ def mlp_to_onnx(
         one = gb.konst("one", np.array(1.0, dtype=np.float32))
         one_minus_p = gb.op("Sub", [one, p])
         proba = gb.op("Concat", [one_minus_p, p], output="probabilities", axis=1)
-        greater = gb.op(
-            "Greater", [p, gb.konst("half", np.array(0.5, dtype=np.float32))]
-        )
-        gb.op("Cast", [greater], output="labels", to=TensorProto.INT64)
+        # Derive labels from the probabilities themselves (sklearn's
+        # predict is argmax(predict_proba)); a threshold on the raw
+        # sigmoid column would emit (n, 1) labels that can disagree with
+        # the reported probabilities.
+        gb.op("ArgMax", [proba], output="labels", axis=1, keepdims=0)
         outputs = [
             helper.make_tensor_value_info("labels", TensorProto.INT64, [None]),
             helper.make_tensor_value_info(

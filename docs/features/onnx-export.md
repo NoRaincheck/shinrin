@@ -59,16 +59,35 @@ input_name = session.get_inputs()[0].name
 predictions = session.run(None, {input_name: X_test})[0]
 ```
 
+!!! note
+    Tree and forest exports use the classic ``ai.onnx.ml``
+    ``TreeEnsembleRegressor`` / ``TreeEnsembleClassifier`` operators
+    (``ai.onnx.ml`` opset 3), supported by every ONNX runtime. All graphs
+    accept float32 tensors with a dynamic batch dimension regardless of
+    the dtype used for training. Regression graphs expose a
+    ``predictions`` vector; classification graphs expose ``probabilities``
+    plus ``labels`` (integer class values, or strings when ``class_names``
+    is given).
+
+!!! note
+    The Mondrian export is a self-contained standard-domain graph that
+    reproduces native ``predict``/``predict_proba`` exactly — including
+    the Mondrian-process smoothing along decision paths — to float32
+    round-off. Generic sklearn-style forests round thresholds and leaf
+    values to float32, keeping agreement near 1e-6.
+
 ## Supported Models
 
 | Model | Status |
 |---|---|
-| `MondrianTreeRegressor` | ✅ Supported |
-| `MondrianTreeClassifier` | ✅ Supported |
-| `MondrianForestRegressor` | ✅ Supported |
-| `MondrianForestClassifier` | ✅ Supported |
-| `TabMRegressor` | ✅ Supported |
-| `TabMClassifier` | ✅ Supported |
+| `MondrianTreeRegressor` / `MondrianTreeClassifier` | ✅ Exact (standard-domain graph) |
+| `MondrianForestRegressor` / `MondrianForestClassifier` | ✅ Exact (standard-domain graph) |
+| `RandomForestRegressor` / `ExtraTreesRegressor` | ✅ Supported (`ai.onnx.ml`) |
+| `*QuantileRegressor` trees & forests | ✅ Supported (quantile baked in at export) |
+| `MLPRegressor` / `MLPClassifier` | ✅ Supported (preprocessing baked in) |
+| `CorelsClassifier`, `GOSDTClassifier`, `OrdtClassifier`, `SkopeRules` | ✅ Supported |
+| `TabMRegressor` / `TabMClassifier` | ✅ Supported |
+| TabICL | ❌ Not supported |
 
 ## TabM Export
 

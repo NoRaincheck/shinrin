@@ -160,7 +160,10 @@ def _generic_to_onnx(
     is_gb = type(estimator).__name__.startswith("GradientBoosting")
     if is_gb:
         learning_rate = float(getattr(estimator, "learning_rate", 1.0))
-        if is_classification:
+        # GB trees are regressors, so ``is_classification`` (derived from
+        # per-tree n_classes) cannot detect a boosting classifier; use the
+        # estimator's own classes_ instead.
+        if is_classification or getattr(estimator, "classes_", None) is not None:
             raise NotImplementedError(
                 "ONNX export for GradientBoosting classifiers is not supported; "
                 "use GradientBoostingRegressor or a shinrin forest model."
