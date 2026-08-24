@@ -160,7 +160,7 @@ A parsed optimal tree. Left branches are the *true* side of the split.
 ## Status
 
 `IntEnum` mirroring the engine's result status; importable as
-`from shinrin._gosdt import Status`.
+`from shinrin._spot import Status`.
 
 ## Notes
 

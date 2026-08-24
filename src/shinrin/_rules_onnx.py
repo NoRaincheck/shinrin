@@ -434,7 +434,7 @@ def gosdt_to_onnx(
     nodes.append(helper.make_node("Cast", ["X"], ["b"], to=TensorProto.BOOL))
 
     def emit(node, prefix: str) -> str:
-        from shinrin._gosdt.tree import Leaf, Node
+        from shinrin._spot.tree import Leaf, Node
 
         if isinstance(node, Leaf):
             _add_init(inits, f"{prefix}v", np.array(node.prediction), TensorProto.INT64)

@@ -91,7 +91,7 @@ class GOSDTClassifier(ClassifierMixin, BaseEstimator):
     --------
     A minimal example with the well known Iris dataset.
 
-    >>> from shinrin._gosdt import ThresholdGuessBinarizer, GOSDTClassifier
+    >>> from shinrin._spot import ThresholdGuessBinarizer, GOSDTClassifier
     >>> from sklearn.datasets import load_iris
     >>> X, y = load_iris(return_X_y=True, as_frame=True)
     >>> X_bin = ThresholdGuessBinarizer().fit_transform(X, y)

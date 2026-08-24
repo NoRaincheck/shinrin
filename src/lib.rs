@@ -2811,7 +2811,7 @@ fn corels_predict_wrap<'py>(
 // =============================================================================
 // GOSDT (vendored gosdt-guesses) bindings
 //
-// The vendored C++ engine lives in `src/shinrin/_gosdt/cpp` and is compiled
+// The vendored C++ engine lives in `src/shinrin/_spot/cpp` and is compiled
 // into this extension by `build.rs` together with a lock-based TBB shim and
 // the bundled mini-gmp. This replaces upstream's pybind11 module (_libgosdt).
 // =============================================================================

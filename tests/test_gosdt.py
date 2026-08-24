@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 
 from shinrin import GOSDTClassifier, ThresholdGuessBinarizer
-from shinrin._gosdt import Status
+from shinrin._spot import Status
 
 try:
     from sklearn.datasets import load_iris, make_classification

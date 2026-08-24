@@ -51,8 +51,8 @@ See [CORELS Rule Lists](models/corels.md)
   reference-ensemble guesses
 - `ThresholdGuessBinarizer` — Gradient-boosting threshold binarization
 - `NumericBinarizer` — Lossless midpoint binarization
-- `Tree` — Parsed optimal tree (via `shinrin._gosdt`)
-- `Status` — Result status enum (via `shinrin._gosdt`)
+- `Tree` — Parsed optimal tree (via `shinrin._spot`)
+- `Status` — Result status enum (via `shinrin._spot`)
 
 See [GOSDT Optimal Trees](models/gosdt.md)
 

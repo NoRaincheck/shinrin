@@ -7,7 +7,7 @@ fn main() {
     // load-bearing — without them, stale C++ objects silently link against
     // fresh Rust bindings.
     println!("cargo:rerun-if-changed=src/shinrin/_corels/cpp");
-    println!("cargo:rerun-if-changed=src/shinrin/_gosdt/cpp");
+    println!("cargo:rerun-if-changed=src/shinrin/_spot/cpp");
     println!("cargo:rerun-if-env-changed=SHINRIN_CORELS_NO_GMP");
     // Setting SHINRIN_CORELS_NO_GMP=1 builds CORELS without -DGMP, using
     // its word-array bit-vector fallback (useful for benchmarking the
@@ -56,7 +56,7 @@ fn main() {
     // unconditionally includes <gmp.h>, so the mini-gmp shim is always in
     // scope here (the mpn_logical.c additions live in the plain-C build).
     let corels_cpp_dir = PathBuf::from("src/shinrin/_corels/cpp");
-    let gosdt_dir = PathBuf::from("src/shinrin/_gosdt/cpp");
+    let gosdt_dir = PathBuf::from("src/shinrin/_spot/cpp");
     let libgosdt_include = gosdt_dir.join("libgosdt/include");
     let mut gosdt = cc::Build::new();
     gosdt.cpp(true)

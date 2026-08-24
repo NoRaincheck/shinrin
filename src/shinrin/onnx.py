@@ -540,7 +540,7 @@ def to_onnx(
         pass
 
     try:
-        from shinrin._gosdt.classifier import GOSDTClassifier
+        from shinrin._spot.classifier import GOSDTClassifier
 
         if isinstance(estimator, GOSDTClassifier):
             from shinrin._rules_onnx import gosdt_to_onnx

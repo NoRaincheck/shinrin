@@ -63,8 +63,8 @@ __all__ = [
 # Mapping of public name → (module_path, attr_name)
 _IMPORT_MAP: dict[str, tuple[str, str]] = {
     "CorelsClassifier": ("shinrin._corels.corels", "CorelsClassifier"),
-    "GOSDTClassifier": ("shinrin._gosdt.classifier", "GOSDTClassifier"),
-    "NumericBinarizer": ("shinrin._gosdt.binarizer", "NumericBinarizer"),
+    "GOSDTClassifier": ("shinrin._spot.classifier", "GOSDTClassifier"),
+    "NumericBinarizer": ("shinrin._spot.binarizer", "NumericBinarizer"),
     "OrdtClassifier": ("shinrin._ordt", "OrdtClassifier"),
     "ExtraTreesRegressor": ("shinrin._skgarden.forest", "ExtraTreesRegressor"),
     "MLPClassifier": ("shinrin.mlp", "MLPClassifier"),
@@ -110,7 +110,7 @@ _IMPORT_MAP: dict[str, tuple[str, str]] = {
     "TabMClassifier": ("shinrin.tabm", "TabMClassifier"),
     "TabMRegressor": ("shinrin.tabm", "TabMRegressor"),
     "ThresholdGuessBinarizer": (
-        "shinrin._gosdt.threshold_guessing",
+        "shinrin._spot.threshold_guessing",
         "ThresholdGuessBinarizer",
     ),
     "TreeExplainer": ("shinrin.shap", "TreeExplainer"),
