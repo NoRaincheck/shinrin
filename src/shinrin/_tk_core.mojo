@@ -214,9 +214,47 @@ def gemm_nn_rows(m: Int, n: Int, kk: Int, a: Pointer[Float32, MutUntrackedOrigin
     # rows [lo, hi) of C (m,n) = A (m,kk) @ B (kk,n) -- overwrites those rows.
     var it = lo
     while it < hi:
-        var j = 0
-        while j + SIMDW <= n:
-            if it + 4 <= m:
+        if it + 4 <= hi:
+            var j = 0
+            while j + 2 * SIMDW <= n:
+                # Two independent column blocks: eight FMA chains instead of
+                # four; each element's accumulation order is unchanged.
+                var acc0 = SIMD[DType.float32, SIMDW](0.0)
+                var acc1 = SIMD[DType.float32, SIMDW](0.0)
+                var acc2 = SIMD[DType.float32, SIMDW](0.0)
+                var acc3 = SIMD[DType.float32, SIMDW](0.0)
+                var acb0 = SIMD[DType.float32, SIMDW](0.0)
+                var acb1 = SIMD[DType.float32, SIMDW](0.0)
+                var acb2 = SIMD[DType.float32, SIMDW](0.0)
+                var acb3 = SIMD[DType.float32, SIMDW](0.0)
+                var t = 0
+                while t < kk:
+                    var a0 = SIMD[DType.float32, SIMDW](a[it * kk + t])
+                    var bva = b.unsafe_load[width=SIMDW](t * n + j)
+                    var bvb = b.unsafe_load[width=SIMDW](t * n + j + SIMDW)
+                    acc0 += a0 * bva
+                    acb0 += a0 * bvb
+                    var a1 = SIMD[DType.float32, SIMDW](a[(it + 1) * kk + t])
+                    acc1 += a1 * bva
+                    acb1 += a1 * bvb
+                    var a2 = SIMD[DType.float32, SIMDW](a[(it + 2) * kk + t])
+                    acc2 += a2 * bva
+                    acb2 += a2 * bvb
+                    var a3 = SIMD[DType.float32, SIMDW](a[(it + 3) * kk + t])
+                    acc3 += a3 * bva
+                    acb3 += a3 * bvb
+                    t += 1
+                var base = it * n + j
+                c.unsafe_store[width=SIMDW](base, acc0)
+                c.unsafe_store[width=SIMDW](base + n, acc1)
+                c.unsafe_store[width=SIMDW](base + 2 * n, acc2)
+                c.unsafe_store[width=SIMDW](base + 3 * n, acc3)
+                c.unsafe_store[width=SIMDW](base + SIMDW, acb0)
+                c.unsafe_store[width=SIMDW](base + n + SIMDW, acb1)
+                c.unsafe_store[width=SIMDW](base + 2 * n + SIMDW, acb2)
+                c.unsafe_store[width=SIMDW](base + 3 * n + SIMDW, acb3)
+                j += 2 * SIMDW
+            while j + SIMDW <= n:
                 var acc0 = SIMD[DType.float32, SIMDW](0.0)
                 var acc1 = SIMD[DType.float32, SIMDW](0.0)
                 var acc2 = SIMD[DType.float32, SIMDW](0.0)
@@ -234,28 +272,42 @@ def gemm_nn_rows(m: Int, n: Int, kk: Int, a: Pointer[Float32, MutUntrackedOrigin
                 c.unsafe_store[width=SIMDW](base + n, acc1)
                 c.unsafe_store[width=SIMDW](base + 2 * n, acc2)
                 c.unsafe_store[width=SIMDW](base + 3 * n, acc3)
-            else:
-                var r = it
-                while r < m:
+                j += SIMDW
+            while j < n:
+                var r = 0
+                while r < 4:
+                    var acc: Float32 = 0.0
+                    var t = 0
+                    while t < kk:
+                        acc += a[(it + r) * kk + t] * b[t * n + j]
+                        t += 1
+                    c[(it + r) * n + j] = acc
+                    r += 1
+                j += 1
+        else:
+            var r = it
+            while r < hi:
+                var j = 0
+                while j + SIMDW <= n:
                     var accr = SIMD[DType.float32, SIMDW](0.0)
                     var t = 0
                     while t < kk:
-                        accr += SIMD[DType.float32, SIMDW](a[r * kk + t]) * b.unsafe_load[width=SIMDW](t * n + j)
+                        accr += (
+                            SIMD[DType.float32, SIMDW](a[r * kk + t])
+                            * b.unsafe_load[width=SIMDW](t * n + j)
+                        )
                         t += 1
                     c.unsafe_store[width=SIMDW](r * n + j, accr)
-                    r += 1
-            j += SIMDW
-        while j < n:
-            var r = 0
-            while r < 4 and it + r < hi:
-                var acc: Float32 = 0.0
-                var t = 0
-                while t < kk:
-                    acc += a[(it + r) * kk + t] * b[t * n + j]
-                    t += 1
-                c[(it + r) * n + j] = acc
+                    j += SIMDW
+                while j < n:
+                    var acc: Float32 = 0.0
+                    var t = 0
+                    while t < kk:
+                        acc += a[r * kk + t] * b[t * n + j]
+                        t += 1
+                    c[r * n + j] = acc
+                    j += 1
                 r += 1
-            j += 1
         it += 4
 
 
