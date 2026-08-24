@@ -15,7 +15,6 @@ import pytest
 # ``os.environ.setdefault`` would run at collection time and silently
 # change the backend other test modules (e.g. the MLP/bitlinear suites)
 # train with.
-
 from shinrin.onnx import to_onnx
 
 try:

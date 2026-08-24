@@ -311,9 +311,7 @@ def _leaf_traversal(model, X: np.ndarray) -> np.ndarray:
     path-smoothed native predict.
     """
     trees = (
-        [model]
-        if hasattr(model, "tree_")
-        else list(getattr(model, "estimators_", []))
+        [model] if hasattr(model, "tree_") else list(getattr(model, "estimators_", []))
     )
     if not trees:
         raise ValueError("model exposes neither tree_ nor estimators_")
@@ -335,9 +333,10 @@ def _leaf_traversal(model, X: np.ndarray) -> np.ndarray:
             is_leaf = feats == -2
             if is_leaf.all():
                 break
-            going_left = X[active[~is_leaf], feats[~is_leaf]] <= threshold[
-                node[active[~is_leaf]]
-            ]
+            going_left = (
+                X[active[~is_leaf], feats[~is_leaf]]
+                <= threshold[node[active[~is_leaf]]]
+            )
             nxt = np.where(
                 going_left,
                 left[node[active[~is_leaf]]],
@@ -408,7 +407,9 @@ def bench_cell(algo: AlgoSpec, ds_name: str, data: dict, dtype: np.dtype) -> dic
             nat = model.predict(X_native)
             got = ort_outs[0]
 
-        err = np.abs(np.asarray(got, dtype=np.float64) - np.asarray(nat, dtype=np.float64))
+        err = np.abs(
+            np.asarray(got, dtype=np.float64) - np.asarray(nat, dtype=np.float64)
+        )
         res.max_abs_err = float(err.max())
         res.mean_abs_err = float(err.mean())
         tol = TOL_PROBA if has_proba else TOL_REGRESSION
@@ -472,8 +473,7 @@ def run_suite(datasets: dict) -> list[dict]:
     dtypes = [np.dtype(t) for t in (np.float32, np.float64)]
     for ds_name, data in datasets.items():
         print(
-            f"\n=== {ds_name} ({data['task']}, "
-            f"n_train={len(data['y_train']):,}) ===",
+            f"\n=== {ds_name} ({data['task']}, n_train={len(data['y_train']):,}) ===",
             flush=True,
         )
         for algo in ALGOS:
@@ -515,7 +515,11 @@ def annotate_cross_dtype(records: list[dict], datasets: dict) -> None:
         for dtype in (np.dtype(np.float32), np.dtype(np.float64)):
             model, _ = _fit(algo, data, dtype)
             X = data["X_test"].astype(dtype)
-            out = model.predict_proba(X) if hasattr(model, "predict_proba") else model.predict(X)
+            out = (
+                model.predict_proba(X)
+                if hasattr(model, "predict_proba")
+                else model.predict(X)
+            )
             outs.append(np.asarray(out, dtype=np.float64))
         err = float(np.abs(outs[0] - outs[1]).max())
         for rec in group.values():
@@ -592,7 +596,10 @@ def build_markdown(meta: dict, records: list[dict]) -> str:
     ]
 
     order = [a.name for a in ALGOS]
-    for task, title in (("regression", "Regression"), ("classification", "Classification")):
+    for task, title in (
+        ("regression", "Regression"),
+        ("classification", "Classification"),
+    ):
         recs = [r for r in records if r["task"] == task]
         if not recs:
             continue
@@ -605,7 +612,9 @@ def build_markdown(meta: dict, records: list[dict]) -> str:
             "| Dataset | Model | Dtype | Max abs err | Struct err | Mean abs err | Label agree | Check |",
             "|---|---|---|---|---|---|---|---|",
         ]
-        for r in sorted(recs, key=lambda r: (r["dataset"], order.index(r["algorithm"]), r["dtype"])):
+        for r in sorted(
+            recs, key=lambda r: (r["dataset"], order.index(r["algorithm"]), r["dtype"])
+        ):
             L.append(
                 f"| {r['dataset']} | {r['algorithm']} | {r['dtype']} "
                 f"| {_fmt(r.get('max_abs_err'), '.2e')} "
@@ -622,7 +631,9 @@ def build_markdown(meta: dict, records: list[dict]) -> str:
             "| Dataset | Model | Dtype | Native ms | ORT ms | Speedup |",
             "|---|---|---|---|---|---|",
         ]
-        for r in sorted(recs, key=lambda r: (r["dataset"], order.index(r["algorithm"]), r["dtype"])):
+        for r in sorted(
+            recs, key=lambda r: (r["dataset"], order.index(r["algorithm"]), r["dtype"])
+        ):
             L.append(
                 f"| {r['dataset']} | {r['algorithm']} | {r['dtype']} "
                 f"| {_fmt(r.get('native_ms'), '.3g')} "
@@ -638,14 +649,16 @@ def build_markdown(meta: dict, records: list[dict]) -> str:
     # takeaways
     ok_recs = [r for r in records if r.get("tol_pass")]
     failed = [r for r in records if r.get("tol_pass") is False]
-    faster = [r for r in records if r.get("speedup") is not None and r["speedup"] > 1.05]
-    slower = [r for r in records if r.get("speedup") is not None and r["speedup"] < 0.95]
+    faster = [
+        r for r in records if r.get("speedup") is not None and r["speedup"] > 1.05
+    ]
+    slower = [
+        r for r in records if r.get("speedup") is not None and r["speedup"] < 0.95
+    ]
     errors = [r for r in records if r["status"] != "ok"]
     L += ["## Takeaways", ""]
     if records:
-        L.append(
-            f"- {len(ok_recs)}/{len(records)} cells meet the tolerance check."
-        )
+        L.append(f"- {len(ok_recs)}/{len(records)} cells meet the tolerance check.")
         mondrian_fail = [r for r in failed if r["algorithm"].startswith("Mondrian")]
         other_fail = [r for r in failed if not r["algorithm"].startswith("Mondrian")]
         if mondrian_fail:
@@ -690,7 +703,9 @@ def build_markdown(meta: dict, records: list[dict]) -> str:
     if errors:
         L.append(f"- {len(errors)} cells errored:")
         for r in errors:
-            L.append(f"  - `{r['dataset']}` x `{r['algorithm']}` [{r['dtype']}]: {r.get('note')}")
+            L.append(
+                f"  - `{r['dataset']}` x `{r['algorithm']}` [{r['dtype']}]: {r.get('note')}"
+            )
     L.append("")
     return "\n".join(L) + "\n"
 
@@ -741,13 +756,18 @@ def collect_meta(extra: dict[str, str]) -> dict:
         **versions,
     }
     env.update(extra)
-    return {"generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "environment": env}
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "environment": env,
+    }
 
 
 def main() -> None:
     global SMOKE
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--smoke", action="store_true", help="tiny fast verification run")
+    parser.add_argument(
+        "--smoke", action="store_true", help="tiny fast verification run"
+    )
     args = parser.parse_args()
     SMOKE = args.smoke
 
