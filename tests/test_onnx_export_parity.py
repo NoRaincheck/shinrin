@@ -8,13 +8,13 @@ and pin native-vs-ORT agreement, complementing the structural checks in
 
 from __future__ import annotations
 
-import os
-
 import numpy as np
 import pytest
 
-os.environ.setdefault("SHINRIN_MLP_BACKEND", "numpy")
-os.environ.setdefault("SHINRIN_TABM_BACKEND", "numpy")
+# NOTE: no global backend env overrides here - module-level
+# ``os.environ.setdefault`` would run at collection time and silently
+# change the backend other test modules (e.g. the MLP/bitlinear suites)
+# train with.
 
 from shinrin.onnx import to_onnx
 
