@@ -30,8 +30,8 @@ class Node:
 class Tree:
     # Left is TRUE, Right is FALSE
 
-    def __init__(self, gosdt_result, features: List[str], n_classes: int, classes: np.ndarray):
-        json_result = gosdt_result
+    def __init__(self, spot_result, features: List[str], n_classes: int, classes: np.ndarray):
+        json_result = spot_result
 
         # Recursive tree creation.
         def create_tree(json_object):

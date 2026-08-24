@@ -2809,19 +2809,19 @@ fn corels_predict_wrap<'py>(
 }
 
 // =============================================================================
-// GOSDT (vendored gosdt-guesses) bindings
+// SPOT (SParse OpTimal, vendored gosdt-guesses) bindings
 //
 // The vendored C++ engine lives in `src/shinrin/_spot/cpp` and is compiled
 // into this extension by `build.rs` together with a lock-based TBB shim and
 // the bundled mini-gmp. This replaces upstream's pybind11 module (_libgosdt).
 // =============================================================================
 
-mod gosdt_bridge {
+mod spot_bridge {
     use std::ffi::c_void;
     use std::os::raw::{c_char, c_int, c_uchar};
 
     #[repr(C)]
-    pub struct GosdtResult {
+    pub struct SpotResult {
         pub model: *mut c_char,
         pub graph_size: usize,
         pub n_iterations: usize,
@@ -2833,7 +2833,7 @@ mod gosdt_bridge {
     }
 
     extern "C" {
-        pub fn shinrin_gosdt_fit(
+        pub fn shinrin_spot_fit(
             regularization: f32,
             upperbound_guess: f32,
             time_limit: u32,
@@ -2862,16 +2862,16 @@ mod gosdt_bridge {
             map_indices: *const usize,
             reference: *const u8,
             reference_cols: usize,
-            out: *mut GosdtResult,
+            out: *mut SpotResult,
             error_message: *mut *mut c_char,
         ) -> c_int;
 
-        pub fn shinrin_gosdt_free(p: *mut c_void);
+        pub fn shinrin_spot_free(p: *mut c_void);
     }
 }
 
-/// Fit an optimal sparse decision tree using the vendored GOSDT engine.
-/// Returns a dict mirroring upstream's `GOSDTResult` attributes.
+/// Fit an optimal sparse decision tree using the vendored SPOT engine.
+/// Returns a dict mirroring upstream's `SpotResult` attributes.
 #[pyfunction]
 #[pyo3(signature = (regularization, upperbound_guess, time_limit, model_limit,
                     worker_limit, verbose, diagnostics, depth_budget, reference_lb,
@@ -2880,7 +2880,7 @@ mod gosdt_bridge {
                     costs, feature_map, reference))]
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::type_complexity)]
-fn gosdt_fit<'py>(
+fn spot_fit<'py>(
     py: Python<'py>,
     regularization: f32,
     upperbound_guess: f32,
@@ -2965,7 +2965,7 @@ fn gosdt_fit<'py>(
         reference_ptr = std::ptr::null();
     }
 
-    let mut result = gosdt_bridge::GosdtResult {
+    let mut result = spot_bridge::SpotResult {
         model: std::ptr::null_mut(),
         graph_size: 0,
         n_iterations: 0,
@@ -2978,7 +2978,7 @@ fn gosdt_fit<'py>(
     let mut error_message: *mut std::os::raw::c_char = std::ptr::null_mut();
 
     let rc = unsafe {
-        gosdt_bridge::shinrin_gosdt_fit(
+        spot_bridge::shinrin_spot_fit(
             regularization,
             upperbound_guess,
             time_limit,
@@ -3016,7 +3016,7 @@ fn gosdt_fit<'py>(
     struct ModelGuard(*mut std::os::raw::c_char);
     impl Drop for ModelGuard {
         fn drop(&mut self) {
-            unsafe { gosdt_bridge::shinrin_gosdt_free(self.0.cast()) };
+            unsafe { spot_bridge::shinrin_spot_free(self.0.cast()) };
         }
     }
     let error_guard = ModelGuard(error_message);
@@ -3026,7 +3026,7 @@ fn gosdt_fit<'py>(
         0 => {}
         1 => {
             let message = if error_message.is_null() {
-                "GOSDT optimization failed".to_string()
+                "SPOT optimization failed".to_string()
             } else {
                 unsafe { std::ffi::CStr::from_ptr(error_message) }
                     .to_string_lossy()
@@ -3034,7 +3034,7 @@ fn gosdt_fit<'py>(
             };
             return Err(PyRuntimeError::new_err(message));
         }
-        _ => return Err(PyMemoryError::new_err("gosdt: out of memory")),
+        _ => return Err(PyMemoryError::new_err("spot: out of memory")),
     }
 
     let model_guard = ModelGuard(result.model);
@@ -3077,7 +3077,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(corels_gmp_enabled, m)?)?;
     m.add_function(wrap_pyfunction!(corels_fit_wrap_end, m)?)?;
     m.add_function(wrap_pyfunction!(corels_predict_wrap, m)?)?;
-    m.add_function(wrap_pyfunction!(gosdt_fit, m)?)?;
+    m.add_function(wrap_pyfunction!(spot_fit, m)?)?;
     m.add("DTYPE", numpy::dtype::<f32>(m.py()))?;
     m.add("DOUBLE", numpy::dtype::<f64>(m.py()))?;
     Ok(())

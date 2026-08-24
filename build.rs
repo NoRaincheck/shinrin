@@ -57,7 +57,7 @@ fn main() {
     // scope here (the mpn_logical.c additions live in the plain-C build).
     let corels_cpp_dir = PathBuf::from("src/shinrin/_corels/cpp");
     let gosdt_dir = PathBuf::from("src/shinrin/_spot/cpp");
-    let libgosdt_include = gosdt_dir.join("libgosdt/include");
+    let libspot_include = gosdt_dir.join("libspot/include");
     let mut gosdt = cc::Build::new();
     gosdt.cpp(true)
         .std("c++20")
@@ -65,34 +65,34 @@ fn main() {
         .include(corels_cpp_dir.join("gmpshim"))
         .include(gosdt_dir.join("tbbshim"))
         .include(&gosdt_dir)
-        .include(&libgosdt_include)
+        .include(&libspot_include)
         .flag_if_supported("-O3")
         .warnings(false);
 
     for name in [
-        "libgosdt/src/bitmask.cpp",
-        "libgosdt/src/bitset.cpp",
-        "libgosdt/src/configuration.cpp",
-        "libgosdt/src/dataset.cpp",
-        "libgosdt/src/diagnosis/false_convergence.cpp",
-        "libgosdt/src/diagnosis/non_convergence.cpp",
-        "libgosdt/src/diagnosis/trace.cpp",
-        "libgosdt/src/dispatch/dispatch.cpp",
-        "libgosdt/src/extraction/models.cpp",
-        "libgosdt/src/gosdt.cpp",
-        "libgosdt/src/graph.cpp",
-        "libgosdt/src/local_state.cpp",
-        "libgosdt/src/message.cpp",
-        "libgosdt/src/model.cpp",
-        "libgosdt/src/optimizer.cpp",
-        "libgosdt/src/queue.cpp",
-        "libgosdt/src/task.cpp",
-        "bridge_gosdt.cpp",
+        "libspot/src/bitmask.cpp",
+        "libspot/src/bitset.cpp",
+        "libspot/src/configuration.cpp",
+        "libspot/src/dataset.cpp",
+        "libspot/src/diagnosis/false_convergence.cpp",
+        "libspot/src/diagnosis/non_convergence.cpp",
+        "libspot/src/diagnosis/trace.cpp",
+        "libspot/src/dispatch/dispatch.cpp",
+        "libspot/src/extraction/models.cpp",
+        "libspot/src/gosdt.cpp",
+        "libspot/src/graph.cpp",
+        "libspot/src/local_state.cpp",
+        "libspot/src/message.cpp",
+        "libspot/src/model.cpp",
+        "libspot/src/optimizer.cpp",
+        "libspot/src/queue.cpp",
+        "libspot/src/task.cpp",
+        "bridge_spot.cpp",
     ] {
         gosdt.file(gosdt_dir.join(name));
     }
 
-    gosdt.compile("shinrin_gosdt");
+    gosdt.compile("shinrin_spot");
 
     // mini-gmp: GMP's portable mpz_t implementation, vendored from the
     // official 6.3.0 tarball (see minigmp/README.md). Provides the GMP

@@ -1,4 +1,4 @@
-"""Status codes mirroring the vendored GOSDT engine's gosdt::Status enum."""
+"""Status codes mirroring the vendored SPOT engine's spot::Status enum."""
 
 from enum import IntEnum
 

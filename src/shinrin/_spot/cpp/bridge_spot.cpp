@@ -1,7 +1,8 @@
 /*
  * C ABI bridge between shinrin's native extension (PyO3/Rust) and the
- * vendored GOSDT engine ("Fast Sparse Decision Tree Optimization via
- * Reference Ensembles", ubc-systopia/gosdt-guesses, BSD-3-Clause).
+ * vendored SPOT engine — gosdt-guesses ("Fast Sparse Decision Tree
+ * Optimization via Reference Ensembles", ubc-systopia/gosdt-guesses,
+ * BSD-3-Clause), renamed SPOT (SParse OpTimal) in this project.
  *
  * Replaces upstream's pybind11 module (_libgosdt):
  *   - matrices are passed as row-major buffers (uint8 for bool, float),
@@ -9,7 +10,7 @@
  *     multi-threaded execution (worker_limit >= 1; 0 = one worker per core),
  *   - results are returned through a plain struct with malloc'd strings.
  *
- * Note: unlike CORELS, GOSDT unconditionally includes <gmp.h>, so this
+ * Note: unlike CORELS, the engine unconditionally includes <gmp.h>, so this
  * engine always links against the bundled mini-gmp + mpn shim regardless of
  * SHINRIN_CORELS_NO_GMP (that toggle only affects CORELS' bit-vector type).
  */
@@ -22,14 +23,14 @@
 #include <thread>
 #include <vector>
 
-#include "libgosdt/include/configuration.hpp"
-#include "libgosdt/include/dataset.hpp"
-#include "libgosdt/include/gosdt.hpp"
-#include "libgosdt/include/matrix.hpp"
+#include "libspot/include/configuration.hpp"
+#include "libspot/include/dataset.hpp"
+#include "libspot/include/gosdt.hpp"
+#include "libspot/include/matrix.hpp"
 
 extern "C" {
 
-struct ShinrinGosdtResult {
+struct ShinrinSpotResult {
     char *model;
     size_t graph_size;
     size_t n_iterations;
@@ -67,7 +68,7 @@ static char *dup_c_string(char const *s) {
  * Returns 0 on success (*out populated), 1 on a caught C++ exception
  * (*error_message populated, caller must free), -1 on allocation failure.
  */
-int shinrin_gosdt_fit(
+int shinrin_spot_fit(
     float regularization, float upperbound_guess, unsigned int time_limit,
     unsigned int model_limit, unsigned int worker_limit, int verbose, int diagnostics, unsigned char depth_budget,
     int reference_lb, int look_ahead, int similar_support, int cancellation,
@@ -77,7 +78,7 @@ int shinrin_gosdt_fit(
     const float *costs, size_t n_classes,
     size_t n_original_features, const size_t *map_sizes, const size_t *map_indices,
     const unsigned char *reference, size_t reference_cols,
-    ShinrinGosdtResult *out, char **error_message) {
+    ShinrinSpotResult *out, char **error_message) {
     try {
         Configuration config;
         config.regularization = regularization;
@@ -166,11 +167,11 @@ int shinrin_gosdt_fit(
         *error_message = dup_c_string(e.what());
         return *error_message != NULL ? 1 : -1;
     } catch (...) {
-        *error_message = dup_c_string("unknown GOSDT exception");
+        *error_message = dup_c_string("unknown SPOT exception");
         return *error_message != NULL ? 1 : -1;
     }
 }
 
-void shinrin_gosdt_free(void *p) { free(p); }
+void shinrin_spot_free(void *p) { free(p); }
 
 }  // extern "C"

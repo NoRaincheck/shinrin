@@ -18,7 +18,7 @@ from sklearn.preprocessing import LabelBinarizer
 from sklearn.utils.multiclass import unique_labels
 from sklearn.utils.validation import check_array, check_is_fitted, check_X_y
 
-from shinrin._native import gosdt_fit
+from shinrin._native import spot_fit
 
 from .status import Status
 from .tree import Tree
@@ -340,7 +340,7 @@ class SPOTClassifier(ClassifierMixin, BaseEstimator):
             self.__save_debug_state(X, y, y_ref)
 
         # Call the vendored SPOT engine
-        result = gosdt_fit(
+        result = spot_fit(
             regularization=regularization,
             upperbound_guess=float(self.upperbound_guess) if self.upperbound_guess is not None else 0.0,
             time_limit=int(self.time_limit) if self.time_limit is not None else 0,
@@ -371,7 +371,7 @@ class SPOTClassifier(ClassifierMixin, BaseEstimator):
         self.result_ = SimpleNamespace(**result)
         self.result_.status = Status(result["status"])
 
-        # Check the gosdt result status and report errors as needed.
+        # Check the spot result status and report errors as needed.
         if self.result_.status == Status.UNINITIALIZED:
             raise RuntimeError("[ERROR] Optimization never started.")
         elif self.result_.status == Status.FALSE_CONVERGENCE:
