@@ -16,10 +16,11 @@ For every model that supports ``shinrin.onnx.to_onnx`` this script
 
 and writes JSON plus Markdown reports next to this script.
 
-Exportable models: MondrianTree, MondrianForest, RandomForest,
-ExtraTrees and TabM (regression + classification where applicable).
-MLP, quantile forests, GOSDT, CORELS, SkopeRules, Ordt and TabICL have no
-ONNX exporter in shinrin and are therefore out of scope.
+Exportable models covered here (regression + classification where
+applicable): MondrianTree, MondrianForest, RandomForest, ExtraTrees,
+RF-Quantile (median baked into the graph), MLP, TabM, Corels and GOSDT
+(the latter two on binarized features). SkopeRules / Ordt / TabICL are
+omitted to keep runtime bounded; all exported graphs are float32.
 
 Outputs:
 - scripts/benchmarks/onnx_results.json      raw numbers
@@ -35,7 +36,7 @@ import platform
 import sys
 import time
 import warnings
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -69,6 +70,8 @@ TOL_REGRESSION = 1e-3
 TOL_PROBA = 1e-3
 TOL_LABELS = 0.995  # >= 99.5% label agreement
 
+GOSDT_TIME_LIMIT_S = 60
+
 
 @dataclass
 class CellResult:
@@ -77,16 +80,15 @@ class CellResult:
     fit_s: float | None = None
     export_s: float | None = None
     onnx_bytes: int | None = None
-    ort_input_dtype: str | None = None
+    # Mondrian models record which encoding was produced: "exact" (native
+    # parity) or "tree-ensemble" (size-guarded approximation); other model
+    # families report "generic".
+    export_mode: str | None = None
     # tolerance (native vs onnxruntime)
     max_abs_err: float | None = None
     mean_abs_err: float | None = None
     label_agreement: float | None = None
     tol_pass: bool | None = None
-    # export fidelity: pure decision-tree traversal vs onnxruntime. For
-    # Mondrian models the native predict smooths along the decision path,
-    # so this isolates exporter correctness from algorithm semantics.
-    structure_max_err: float | None = None
     # speed
     native_ms: float | None = None
     native_per_1k_ms: float | None = None
@@ -108,14 +110,16 @@ class AlgoSpec:
     name: str
     tasks: tuple[str, ...]
     factory: Any  # task -> unfitted estimator
-    family: str = "tree"  # tree | tabm (affects export/input dtype handling)
+    pre: Any | None = None  # X_train, y_train, X_test -> (Xb, y, Xs, {})
+    predict_kwargs: dict = field(default_factory=dict)  # e.g. quantile=50
+    export_kwargs: dict = field(default_factory=dict)  # e.g. quantile=50
+    binary_only: bool = False
 
 
 @dataclass
 class DatasetSpec:
     name: str
     task: str
-    n_samples: int
     loader: Any
 
 
@@ -179,9 +183,9 @@ def _make_classification_ds(n_classes: int):
 
 
 DATASETS = [
-    DatasetSpec("synthetic-reg", "regression", 4_000, _make_regression_ds()),
-    DatasetSpec("synthetic-bin", "classification", 4_000, _make_classification_ds(2)),
-    DatasetSpec("synthetic-multi", "classification", 4_000, _make_classification_ds(5)),
+    DatasetSpec("synthetic-reg", "regression", _make_regression_ds()),
+    DatasetSpec("synthetic-bin", "classification", _make_classification_ds(2)),
+    DatasetSpec("synthetic-multi", "classification", _make_classification_ds(5)),
 ]
 
 
@@ -204,6 +208,22 @@ def load_datasets():
 # ---------------------------------------------------------------------------
 
 
+def _corels():
+    from shinrin import CorelsClassifier
+
+    return CorelsClassifier(c=0.01, max_card=1, min_support=0.05, verbosity=[])
+
+
+def _gosdt():
+    from shinrin import GOSDTClassifier
+
+    return GOSDTClassifier(
+        regularization=0.05,
+        depth_budget=4,
+        time_limit=GOSDT_TIME_LIMIT_S,
+    )
+
+
 def _mondrian_tree(task):
     from shinrin import MondrianTreeClassifier, MondrianTreeRegressor
 
@@ -223,8 +243,6 @@ def _mondrian_forest(task):
 def _rf():
     from shinrin import RandomForestRegressor
 
-    # Overrides mirror bench_all.py: the vendored forest predates modern
-    # scikit-learn parameter names.
     return RandomForestRegressor(
         n_estimators=100,
         criterion="squared_error",
@@ -244,6 +262,21 @@ def _et():
     )
 
 
+def _rf_quantile():
+    from shinrin import RandomForestQuantileRegressor
+
+    # Median is baked into the exported graph at export time.
+    return RandomForestQuantileRegressor(n_estimators=50, random_state=0, n_jobs=1)
+
+
+def _mlp(task):
+    from shinrin import MLPClassifier, MLPRegressor
+
+    if task == "regression":
+        return MLPRegressor(hidden_layer_sizes=(128, 64), max_iter=100, random_state=0)
+    return MLPClassifier(hidden_layer_sizes=(128, 64), max_iter=100, random_state=0)
+
+
 def _tabm(task):
     from shinrin import TabMClassifier, TabMRegressor
 
@@ -252,12 +285,52 @@ def _tabm(task):
     return TabMClassifier(hidden_layer_sizes=(128, 128), max_iter=50, random_state=0)
 
 
+def _pre_corels(X_train, y_train, X_test):
+    from sklearn.preprocessing import KBinsDiscretizer
+
+    enc = KBinsDiscretizer(n_bins=4, encode="onehot-dense", strategy="quantile")
+    Xb = (enc.fit_transform(X_train) > 0).astype(np.float64)
+    Xs = (enc.transform(X_test) > 0).astype(np.float64)
+    return Xb, y_train, Xs, {}
+
+
+def _pre_gosdt(X_train, y_train, X_test):
+    from shinrin import ThresholdGuessBinarizer
+
+    enc = ThresholdGuessBinarizer(n_estimators=20, max_depth=2, random_state=0)
+    Xb = (enc.fit_transform(X_train, y_train) > 0.5).astype(np.float64)
+    Xs = (enc.transform(X_test) > 0.5).astype(np.float64)
+    return Xb, y_train, Xs, {}
+
+
 ALGOS = [
     AlgoSpec("MondrianTree", ("regression", "classification"), _mondrian_tree),
     AlgoSpec("MondrianForest", ("regression", "classification"), _mondrian_forest),
     AlgoSpec("RandomForest", ("regression",), lambda task: _rf()),
     AlgoSpec("ExtraTrees", ("regression",), lambda task: _et()),
-    AlgoSpec("TabM", ("regression", "classification"), _tabm, family="tabm"),
+    AlgoSpec(
+        "RF-Quantile",
+        ("regression",),
+        lambda task: _rf_quantile(),
+        predict_kwargs={"quantile": 50},
+        export_kwargs={"quantile": 50},
+    ),
+    AlgoSpec("MLP", ("regression", "classification"), _mlp),
+    AlgoSpec("TabM", ("regression", "classification"), _tabm),
+    AlgoSpec(
+        "Corels",
+        ("classification",),
+        lambda task: _corels(),
+        pre=_pre_corels,
+        binary_only=True,
+    ),
+    AlgoSpec(
+        "GOSDT",
+        ("classification",),
+        lambda task: _gosdt(),
+        pre=_pre_gosdt,
+        binary_only=True,
+    ),
 ]
 
 
@@ -283,77 +356,24 @@ def _time_calls(fn, n_repeats: int) -> tuple[float, float]:
 
 
 def _fit(algo: AlgoSpec, data: dict, dtype: np.dtype):
-    """Fit a fresh estimator on dtype-cast data; returns (model, fit_s)."""
-    model = algo.factory(data["task"])
-    X = data["X_train"].astype(dtype)
-    if data["task"] == "regression":
-        y = data["y_train"].astype(dtype)
-    else:
-        y = data["y_train"]
-    t0 = time.perf_counter()
-    model.fit(X, y)
-    return model, time.perf_counter() - t0
+    """Fit a fresh estimator on (optionally preprocessed) dtype-cast data.
 
-
-def _native_outputs(model, data: dict, dtype: np.dtype):
-    X = data["X_test"].astype(dtype)
-    if hasattr(model, "predict_proba"):
-        return model.predict_proba(X), None
-    return model.predict(X), None
-
-
-def _leaf_traversal(model, X: np.ndarray) -> np.ndarray:
-    """Pure decision-tree inference using only the stored tree arrays.
-
-    This is the semantic the ONNX export encodes: hard leaf lookup with
-    per-leaf values (class-probability rows for classifiers), averaged
-    over trees for forests. Mondrian models differ from this by their
-    path-smoothed native predict.
+    Returns ``(model, X_train, X_test, y_train, fit_s)`` so callers compare
+    native and ORT outputs on the same feature space the model saw.
     """
-    trees = (
-        [model] if hasattr(model, "tree_") else list(getattr(model, "estimators_", []))
-    )
-    if not trees:
-        raise ValueError("model exposes neither tree_ nor estimators_")
-
-    outputs = []
-    for tree in trees:
-        t = tree.tree_
-        feature = t.feature
-        threshold = t.threshold
-        left = t.children_left
-        right = t.children_right
-        value = t.value[:, 0, :]
-        n_classes = value.shape[1]
-
-        node = np.zeros(len(X), dtype=np.int64)
-        active = np.arange(len(X))
-        while len(active):
-            feats = feature[node[active]]
-            is_leaf = feats == -2
-            if is_leaf.all():
-                break
-            going_left = (
-                X[active[~is_leaf], feats[~is_leaf]]
-                <= threshold[node[active[~is_leaf]]]
-            )
-            nxt = np.where(
-                going_left,
-                left[node[active[~is_leaf]]],
-                right[node[active[~is_leaf]]],
-            )
-            active = active[~is_leaf]
-            node[active] = nxt
-        vals = value[node]
-        if n_classes > 1:
-            # classifiers store class counts; ONNX carries probabilities
-            sums = vals.sum(axis=1, keepdims=True)
-            sums[sums == 0] = 1.0
-            vals = vals / sums
-        outputs.append(vals)
-
-    stacked = np.stack(outputs)  # (n_trees, n_samples, n_classes)
-    return stacked.mean(axis=0)
+    model = algo.factory(data["task"])
+    X_train, X_test = data["X_train"], data["X_test"]
+    y_train = data["y_train"]
+    fit_kwargs: dict = {}
+    if algo.pre is not None:
+        X_train, y_train, X_test, fit_kwargs = algo.pre(X_train, y_train, X_test)
+    X_train = X_train.astype(dtype)
+    X_test = X_test.astype(dtype)
+    if data["task"] == "regression":
+        y_train = y_train.astype(dtype)
+    t0 = time.perf_counter()
+    model.fit(X_train, y_train, **fit_kwargs)
+    return model, X_train, X_test, time.perf_counter() - t0
 
 
 def bench_cell(algo: AlgoSpec, ds_name: str, data: dict, dtype: np.dtype) -> dict:
@@ -364,12 +384,25 @@ def bench_cell(algo: AlgoSpec, ds_name: str, data: dict, dtype: np.dtype) -> dic
     res = CellResult()
     tag = "f32" if dtype == np.float32 else "f64"
     try:
-        model, res.fit_s = _fit(algo, data, dtype)
+        n_classes = int(np.unique(data["y_train"]).size)
+        if algo.binary_only and n_classes != 2:
+            return {
+                "dataset": ds_name,
+                "algorithm": algo.name,
+                "task": data["task"],
+                "dtype": tag,
+                "status": "skipped",
+                "note": "binary targets only",
+            }
+
+        model, X_train, X_test, res.fit_s = _fit(algo, data, dtype)
 
         t0 = time.perf_counter()
-        proto = to_onnx(model, data["X_train"][:8])
+        proto = to_onnx(model, X_train[:8], **algo.export_kwargs)
         res.export_s = time.perf_counter() - t0
         res.onnx_bytes = len(proto.SerializeToString())
+        props = {p.key: p.value for p in proto.metadata_props}
+        res.export_mode = props.get("shinrin_mondrian_export", "generic")
 
         sess_opts = ort.SessionOptions()
         sess_opts.intra_op_num_threads = 1
@@ -380,23 +413,20 @@ def bench_cell(algo: AlgoSpec, ds_name: str, data: dict, dtype: np.dtype) -> dic
             providers=["CPUExecutionProvider"],
         )
         inp = session.get_inputs()[0]
-        res.ort_input_dtype = inp.type
 
-        # The TabM graph is always float32; feed whatever the graph declares
-        # so f64-trained TabM runs through the same f32 deployment path.
-        ort_dtype = np.float64 if "double" in inp.type else np.float32
-        X_ort = data["X_test"].astype(ort_dtype)
+        # Every exported graph is float32 with a dynamic batch dimension;
+        # f64-trained models ride the same f32 deployment path.
+        X_ort = X_test.astype(np.float32)
 
         output_names = [o.name for o in session.get_outputs()]
         ort_outs = session.run(output_names, {inp.name: X_ort})
 
         # ---- tolerance ----
-        X_native = data["X_test"].astype(dtype)
         has_proba = hasattr(model, "predict_proba")
         if has_proba:
-            nat = model.predict_proba(X_native)
+            nat = model.predict_proba(X_test)
             got = ort_outs[output_names.index("probabilities")]
-            labels_nat = model.predict(X_native)
+            labels_nat = model.predict(X_test)
             labels_got = (
                 ort_outs[output_names.index("labels")]
                 if "labels" in output_names
@@ -404,12 +434,16 @@ def bench_cell(algo: AlgoSpec, ds_name: str, data: dict, dtype: np.dtype) -> dic
             )
             res.label_agreement = float((labels_nat == labels_got).mean())
         else:
-            nat = model.predict(X_native)
+            nat = model.predict(X_test, **algo.predict_kwargs)
             got = ort_outs[0]
 
-        err = np.abs(
-            np.asarray(got, dtype=np.float64) - np.asarray(nat, dtype=np.float64)
-        )
+        nat_arr = np.asarray(nat, dtype=np.float64)
+        got_arr = np.asarray(got, dtype=np.float64)
+        if nat_arr.ndim == 1:
+            nat_arr = nat_arr.reshape(-1, 1)
+        if got_arr.ndim == 1:
+            got_arr = got_arr.reshape(-1, 1)
+        err = np.abs(got_arr - nat_arr)
         res.max_abs_err = float(err.max())
         res.mean_abs_err = float(err.mean())
         tol = TOL_PROBA if has_proba else TOL_REGRESSION
@@ -418,30 +452,15 @@ def bench_cell(algo: AlgoSpec, ds_name: str, data: dict, dtype: np.dtype) -> dic
             and (res.label_agreement is None or res.label_agreement >= TOL_LABELS)
         )
 
-        # Export fidelity: pure decision-tree semantics vs onnxruntime.
-        # Both vectors are raveled explicitly: regression traversal keeps a
-        # trailing singleton dim while ORT emits shape (n,), and a naive
-        # (n, 1) - (n,) would broadcast into an (n, n) matrix.
-        if algo.family == "tree":
-            struct = _leaf_traversal(model, X_ort.astype(ort_dtype))
-            if has_proba:
-                struct_out = ort_outs[output_names.index("probabilities")]
-            else:
-                struct_out = ort_outs[0]
-            res.structure_max_err = float(
-                np.abs(
-                    np.asarray(struct, dtype=np.float64).ravel()
-                    - np.asarray(struct_out, dtype=np.float64).ravel()
-                ).max()
-            )
-
         # ---- speed ----
         n_repeats = 3 if SMOKE else MAX_TIMING_REPEATS
-        native_mean, _ = _time_calls(lambda: model.predict(X_native), n_repeats)
+        native_mean, _ = _time_calls(
+            lambda: model.predict(X_test, **algo.predict_kwargs), n_repeats
+        )
         ort_mean, _ = _time_calls(
             lambda: session.run(output_names, {inp.name: X_ort}), n_repeats
         )
-        n_test = len(X_native)
+        n_test = len(X_test)
         res.native_ms = native_mean
         res.native_per_1k_ms = native_mean / n_test * 1_000
         res.ort_ms = ort_mean
@@ -492,7 +511,10 @@ def run_suite(datasets: dict) -> list[dict]:
                         flush=True,
                     )
                 else:
-                    print(f"  {algo.name:<15} ERROR: {rec.get('note')}", flush=True)
+                    print(
+                        f"  {algo.name:<15} {rec['status'].upper()}: {rec.get('note')}",
+                        flush=True,
+                    )
     return records
 
 
@@ -513,14 +535,13 @@ def annotate_cross_dtype(records: list[dict], datasets: dict) -> None:
         data = datasets[ds]
         outs = []
         for dtype in (np.dtype(np.float32), np.dtype(np.float64)):
-            model, _ = _fit(algo, data, dtype)
-            X = data["X_test"].astype(dtype)
+            model, _, X_test, _ = _fit(algo, data, dtype)
             out = (
-                model.predict_proba(X)
+                model.predict_proba(X_test)
                 if hasattr(model, "predict_proba")
-                else model.predict(X)
+                else model.predict(X_test, **algo.predict_kwargs)
             )
-            outs.append(np.asarray(out, dtype=np.float64))
+            outs.append(np.asarray(out, dtype=np.float64).ravel())
         err = float(np.abs(outs[0] - outs[1]).max())
         for rec in group.values():
             rec["cross_dtype_max_err"] = err
@@ -568,30 +589,31 @@ def build_markdown(meta: dict, records: list[dict]) -> str:
         "",
         "- Models: MondrianTree (depth 16), MondrianForest (20 trees, depth 16),",
         "  RandomForest / ExtraTrees (100 trees, vendored sklearn engine),",
-        "  TabM ((128, 128) hidden units, 50 Adam epochs, NumPy reference backend).",
+        "  RF-Quantile (50 trees, median baked into the graph),",
+        "  MLP ((128, 64) hidden units, 100 Adam epochs),",
+        "  TabM ((128, 128) hidden units, 50 Adam epochs; NumPy reference backend),",
+        "  Corels and GOSDT (binary-only, on binarized features).",
         "- Datasets: synthetic regression (`make_regression`, 4k x 20), binary and",
         "  5-class classification (`make_classification`, 4k x 20); 80/20 split.",
         "- Each cell trains a fresh estimator on float32- and float64-cast data,",
         "  exports via `shinrin.onnx.to_onnx`, and loads the proto into",
-        "  onnxruntime (CPU execution provider, intra_op=1 thread).",
+        "  onnxruntime (CPU execution provider, intra_op=1 thread). All exported",
+        "  graphs are float32, so f64-trained models ride the f32 deployment path.",
         "- Tolerance compares the full test-set outputs: max/mean absolute error,",
         "  classification label agreement, pass/fail against max-abs-error <= 1e-3",
         "  (probabilities and unit-scale predictions) with >= 99.5% label agreement.",
-        "- `Struct err` compares onnxruntime against a pure decision-tree traversal",
-        "  of the stored tree arrays (the exact semantics the export encodes), i.e.",
-        "  exporter fidelity. Mondrian models smooth predictions along the decision",
-        "  path as part of the Mondrian-process algorithm, so their native-vs-ORT",
-        "  error quantifies that algorithmic gap rather than an export bug.",
-        "- TabM graphs are float32-only by design, so f64-trained TabM is served",
-        "  through the same f32 graph as f32-trained TabM.",
+        "- The exact Mondrian export reproduces native predict/predict_proba",
+        "  (including Mondrian-process path smoothing) to float32 round-off;",
+        "  generic sklearn-style ensembles round thresholds/values to float32.",
+        "- At this dataset scale the exact MondrianForest graph would exceed",
+        "  ONNX's 2 GB protobuf limit (selection matrices grow with nodes^2),",
+        "  so forests automatically fall back to a plain tree-ensemble export;",
+        "  their tolerance rows measure that documented approximation, while",
+        "  MondrianTree stays exact.",
         "- Speed reports the mean wall-clock per full test-set call after 3 warmup",
         "  calls (timed until >= 0.4 s total or 100 calls). NumPy/BLAS and",
         "  onnxruntime are pinned to one thread on both sides.",
-        "- Not every shinrin model has an ONNX exporter: MLP, quantile forests,",
-        "  GOSDT, CORELS, SkopeRules, Ordt and TabICL are out of scope here.",
-        "- Known numeric floors: Mondrian backends compute at float32 internally",
-        "  even for float64 input, capping their achievable agreement near 1e-6;",
-        "  sklearn forests average 100 trees in float32 when fed f32 data.",
+        "- SkopeRules / Ordt / TabICL are omitted to keep runtime bounded.",
         "",
     ]
 
@@ -609,7 +631,7 @@ def build_markdown(meta: dict, records: list[dict]) -> str:
         # tolerance table
         L += ["### Tolerance (native vs onnxruntime)", ""]
         L += [
-            "| Dataset | Model | Dtype | Max abs err | Struct err | Mean abs err | Label agree | Check |",
+            "| Dataset | Model | Dtype | Export mode | Max abs err | Mean abs err | Label agree | Check |",
             "|---|---|---|---|---|---|---|---|",
         ]
         for r in sorted(
@@ -617,13 +639,23 @@ def build_markdown(meta: dict, records: list[dict]) -> str:
         ):
             L.append(
                 f"| {r['dataset']} | {r['algorithm']} | {r['dtype']} "
+                f"| {r.get('export_mode', '-')} "
                 f"| {_fmt(r.get('max_abs_err'), '.2e')} "
-                f"| {_fmt(r.get('structure_max_err'), '.2e')} "
                 f"| {_fmt(r.get('mean_abs_err'), '.2e')} "
                 f"| {_fmt(r.get('label_agreement'), '.4f')} "
                 f"| {_fmt(r.get('tol_pass'))} |"
             )
-        L += ["", "*Check*: max abs err <= 1e-3 and label agreement >= 99.5%.", ""]
+        L += [
+            "",
+            "*Check*: max abs err <= 1e-3 and label agreement >= 99.5%.",
+            "",
+            "*Export mode*: Mondrian graphs are either `exact` (reproduces"
+            " native predict including path smoothing) or `tree-ensemble`"
+            " (hard tree structure averaged across trees; the size-guarded"
+            " fallback used when the exact graph would exceed the protobuf"
+            " limit). Everything else reports `generic`.",
+            "",
+        ]
 
         # speed table
         L += ["### Inference speed", ""]
@@ -655,28 +687,38 @@ def build_markdown(meta: dict, records: list[dict]) -> str:
     slower = [
         r for r in records if r.get("speedup") is not None and r["speedup"] < 0.95
     ]
-    errors = [r for r in records if r["status"] != "ok"]
+    errors = [r for r in records if r["status"] == "error"]
+    skipped = [r for r in records if r["status"] == "skipped"]
     L += ["## Takeaways", ""]
     if records:
         L.append(f"- {len(ok_recs)}/{len(records)} cells meet the tolerance check.")
-        mondrian_fail = [r for r in failed if r["algorithm"].startswith("Mondrian")]
-        other_fail = [r for r in failed if not r["algorithm"].startswith("Mondrian")]
-        if mondrian_fail:
+        approx_fail = [
+            r
+            for r in failed
+            if r.get("export_mode") == "tree-ensemble"
+        ]
+        other_fail = [r for r in failed if r not in approx_fail]
+        if approx_fail:
             L.append(
-                f"- All {len(mondrian_fail)} failing cells are Mondrian models"
-                " whose `Struct err` is exactly 0: the ONNX graphs reproduce the"
+                f"- All {len(approx_fail)} failing cells are MondrianForest"
+                " exports in `tree-ensemble` mode: above a size guard the"
+                " exact graph (which reproduces native path smoothing but"
+                " grows with nodes squared) would exceed ONNX's 2 GB proto"
+                " limit, so the export falls back to the hard tree structure"
+                " without smoothing. MondrianTree stays exact and passes."
             )
-            L.append(
-                "  stored tree semantics bit-for-bit. The gap comes from native"
-                " Mondrian inference smoothing predictions along the decision"
-                " path - an algorithmic property, not an export defect."
-            )
-        if other_fail or errors:
-            for r in other_fail + errors:
+        if other_fail:
+            L.append("- Other failing cells:")
+            for r in other_fail:
                 L.append(
-                    f"- Unexpected failure: `{r['dataset']}` x"
-                    f" `{r['algorithm']}` [{r['dtype']}]: {r.get('note') or 'tolerance'}"
+                    f"  - `{r['dataset']}` x `{r['algorithm']}` [{r['dtype']}]:"
+                    f" max abs err {_fmt(r.get('max_abs_err'), '.2e')}"
                 )
+        if skipped:
+            L.append(
+                f"- {len(skipped)} cells skipped (binary-only models on"
+                " multi-class data)."
+            )
         cross_by_algo: dict[str, float] = {}
         for r in records:
             v = r.get("cross_dtype_max_err")
@@ -697,8 +739,8 @@ def build_markdown(meta: dict, records: list[dict]) -> str:
         L.append(
             f"- ONNX Runtime is >5% faster in {len(faster)} cells and >5% slower"
             f" in {len(slower)} cells (single-threaded CPU); it wins most on deep"
-            " tree traversal and loses on TabM regression/binary where the NumPy"
-            " reference batches BLAS-friendly matrix products."
+            " tree traversal and loses where the native path batches"
+            " BLAS-friendly matrix products."
         )
     if errors:
         L.append(f"- {len(errors)} cells errored:")

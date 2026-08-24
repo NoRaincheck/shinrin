@@ -42,6 +42,7 @@ followed by division by the tree count yields averaged predictions.
 
 from __future__ import annotations
 
+import warnings
 from typing import Any
 
 import numpy as np
@@ -173,25 +174,136 @@ def _collect_trees(estimator) -> list[_FlatTree]:
 # ---------------------------------------------------------------------------
 
 
+# Exact Mondrian graphs carry per-tree ``(internal_nodes x total_nodes)``
+# 0/1 selection matrices; their combined float32 size grows roughly with
+# tree count x nodes squared. Past this many estimated initializer bytes
+# the proto risks the 2 GB protobuf hard limit and slow runtimes, so
+# ``mondrian_to_onnx`` falls back to a plain ``ai.onnx.ml`` tree-ensemble
+# export of the hard tree structure (see the ``approximate`` parameter).
+MONDRIAN_EXACT_MAX_BYTES = 256 * 1024 * 1024
+
+PROP_EXPORT_MODE = "shinrin_mondrian_export"
+MODE_EXACT = "exact"
+MODE_TREE_ENSEMBLE = "tree-ensemble"
+
+
+def _estimated_exact_bytes(trees) -> int:
+    """Estimate initializer bytes of the exact graph for these trees.
+
+    The builder concatenates every tree into shared tables, so the four
+    ``(internal_nodes x total_nodes)`` selection matrices scale with the
+    *product* of the totals, not the sum of per-tree products.
+    """
+    k_total = sum(int(t.delta_neg.size) for t in trees)  # internal nodes
+    n_total = sum(int(t.n_total) for t in trees)
+    n_classes = max(1, max(t.values.shape[1] for t in trees))
+    n_features = trees[0].n_features
+    # gt_q/gl/gr/gp selection matrices dominate.
+    return int(
+        4 * (4 * k_total * n_total + n_total * n_classes + k_total * (n_features + 4))
+    )
+
+
 def mondrian_to_onnx(
     estimator,
     feature_names=None,
     class_names=None,
     name="ShinrinMondrianModel",
     target_opset=15,
+    approximate: bool | None = None,
 ):
-    """Export a fitted Mondrian tree/forest to an exact standard-domain graph.
+    """Export a fitted Mondrian tree/forest to ONNX.
 
-    Returns an ``onnx.ModelProto`` consuming float32 ``X`` of shape
-    ``(batch, n_features)``. Outputs match the generic exporter: regression
-    produces ``predictions`` of shape ``(batch,)``; classification produces
-    ``labels`` (int64 class values) and ``probabilities`` ``(batch, n_classes)``.
+    By default an exact standard-domain graph is produced: it reproduces
+    native ``predict``/``predict_proba`` — including the Mondrian-process
+    smoothing along decision paths — to float32 round-off. Because exact
+    graphs embed per-node selection matrices whose size grows with node
+    count squared, very large ensembles automatically fall back to a plain
+    ``ai.onnx.ml`` tree-ensemble export of the *hard tree structure*
+    (leaf means / class distributions, averaged across trees). That
+    fallback is fast and small but omits the path smoothing, so its
+    predictions deviate from native ``predict``; the deviation grows with
+    tree depth and leaf sparsity.
+
+    Parameters
+    ----------
+    estimator : fitted MondrianTree* / MondrianForest*
+        The model to export.
+    feature_names : list of str, optional
+        Stored as model metadata.
+    class_names : list of str, optional
+        When provided (classification), the ``labels`` output yields these
+        names instead of integer class values. Only honored by the exact
+        export.
+    name : str
+        Model/producer name.
+    target_opset : int
+        Default-domain opset version (default 15).
+    approximate : bool, optional
+        Force the plain tree-ensemble approximation (``True``) or the
+        exact graph (``False``). By default (``None``) the exact graph is
+        used unless its estimated initializer size exceeds
+        ``MONDRIAN_EXACT_MAX_BYTES``, in which case the approximation is
+        used and a :class:`UserWarning` is emitted.
+
+    Returns
+    -------
+    onnx.ModelProto consuming float32 ``X`` of shape ``(batch,
+    n_features)``. Outputs match the generic exporter: regression produces
+    ``predictions`` of shape ``(batch,)``; classification produces
+    ``labels`` (int64 class values) and ``probabilities`` ``(batch,
+    n_classes)``. The metadata property ``shinrin_mondrian_export`` records
+    which encoding was produced (``"exact"`` or ``"tree-ensemble"``).
     """
     if helper is None or TensorProto is None:
         raise ImportError(
             "onnx is required for ONNX export. Install it with: pip install onnx"
         )
     trees = _collect_trees(estimator)
+
+    use_approx = approximate
+    if use_approx is None:
+        use_approx = _estimated_exact_bytes(trees) > MONDRIAN_EXACT_MAX_BYTES
+    if use_approx:
+        if not approximate:
+            warnings.warn(
+                "Exact Mondrian graph estimated at "
+                f"{_estimated_exact_bytes(trees):,} initializer bytes "
+                f"(limit {MONDRIAN_EXACT_MAX_BYTES:,}); falling back to a "
+                "plain ai.onnx.ml tree-ensemble export of the hard tree "
+                "structure. Its predictions omit Mondrian path smoothing "
+                "and will deviate from native predict(). Pass "
+                "approximate=False to build the exact graph anyway.",
+                UserWarning,
+                stacklevel=2,
+            )
+        from shinrin.onnx import _generic_to_onnx
+
+        model = _generic_to_onnx(estimator, feature_names, name, target_opset)
+        helper.set_model_props(model, {PROP_EXPORT_MODE: MODE_TREE_ENSEMBLE})
+        return model
+
+    model = _build_exact_model(
+        estimator,
+        trees,
+        feature_names=feature_names,
+        class_names=class_names,
+        name=name,
+        target_opset=target_opset,
+    )
+    helper.set_model_props(model, {PROP_EXPORT_MODE: MODE_EXACT})
+    return model
+
+
+def _build_exact_model(
+    estimator,
+    trees,
+    feature_names=None,
+    class_names=None,
+    name="ShinrinMondrianModel",
+    target_opset=15,
+):
+    """Build the exact standard-domain graph for already-collected trees."""
     is_classification = trees[0].values.shape[1] > 1
     n_features = trees[0].n_features
     n_trees = len(trees)

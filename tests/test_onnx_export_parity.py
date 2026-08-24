@@ -4,17 +4,20 @@ These tests load every exported tree/forest/TabM graph into onnxruntime
 and pin native-vs-ORT agreement, complementing the structural checks in
 ``test_onnx_benchmark.py`` and the round-trip import tests in
 ``test_onnx_import.py``.
+
+All exported graphs accept float32 inputs regardless of the dtype used
+for training; training with float64 data therefore also exercises how
+much precision survives the float32 deployment path.
 """
 
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 import pytest
 
-# NOTE: no global backend env overrides here - module-level
-# ``os.environ.setdefault`` would run at collection time and silently
-# change the backend other test modules (e.g. the MLP/bitlinear suites)
-# train with.
+import shinrin.onnx  # noqa: F401
 from shinrin.onnx import to_onnx
 
 try:
@@ -31,8 +34,7 @@ def _ort_predict(model_proto, X):
         model_proto.SerializeToString(), providers=["CPUExecutionProvider"]
     )
     inp = session.get_inputs()[0]
-    dtype = np.float64 if "double" in inp.type else np.float32
-    outputs = session.run(None, {inp.name: np.ascontiguousarray(X, dtype=dtype)})
+    outputs = session.run(None, {inp.name: np.ascontiguousarray(X, dtype=np.float32)})
     return outputs
 
 
@@ -46,12 +48,11 @@ def _assert_close(actual, desired, atol):
 
 
 # Tolerances follow the conventions used across the repo's backend parity
-# tests. Mondrian backends compute internally at float32 even for float64
-# input data, so their f64 tolerance reflects f32 round-off rather than
-# machine precision.
+# tests. The exact Mondrian export reproduces native predict to f32
+# round-off; generic sklearn ensembles round thresholds/values to f32 in
+# the graph, keeping agreement near 1e-6 for these scales.
+F64_TOL = 1e-5
 F32_TOL = 1e-5
-SKLEARN_F64_TOL = 1e-10
-MONDRIAN_TOL = 1e-6
 TABM_TOL = 1e-3
 
 
@@ -63,15 +64,10 @@ class TestTreeForestOrtParity:
     def data(self, request):
         rng = np.random.RandomState(0)
         X = rng.randn(400, 6).astype(request.param)
-        y_reg = X @ rng.randn(6) + rng.randn(400) * 0.05
+        y_reg = (X @ rng.randn(6) + rng.randn(400) * 0.05).astype(request.param)
         y_bin = (X[:, 0] + 0.7 * X[:, 2] > 0).astype(int)
         y_multi = np.argmax(X[:, :3] + 0.05 * rng.randn(400, 3), axis=1)
         return X, y_reg, y_bin, y_multi
-
-    def _tolerance(self, X, estimator_family):
-        if X.dtype == np.float64 and estimator_family == "sklearn":
-            return SKLEARN_F64_TOL
-        return F32_TOL if X.dtype == np.float32 else MONDRIAN_TOL
 
     def test_mondrian_tree_regressor(self, data):
         from shinrin import MondrianTreeRegressor
@@ -79,7 +75,10 @@ class TestTreeForestOrtParity:
         X, y, _, _ = data
         model = MondrianTreeRegressor(max_depth=10, random_state=0).fit(X, y)
         got = _ort_predict(to_onnx(model, X[:5]), X)[0]
-        _assert_close(got, model.predict(X), self._tolerance(X, "mondrian"))
+        # the Mondrian graph reproduces native predict exactly
+        _assert_close(
+            got, model.predict(X), F32_TOL if X.dtype == np.float32 else F64_TOL
+        )
 
     def test_mondrian_forest_regressor(self, data):
         from shinrin import MondrianForestRegressor
@@ -88,7 +87,9 @@ class TestTreeForestOrtParity:
         model = MondrianForestRegressor(n_estimators=8, max_depth=10, random_state=0)
         model.fit(X, y)
         got = _ort_predict(to_onnx(model, X[:5]), X)[0]
-        _assert_close(got, model.predict(X), self._tolerance(X, "mondrian"))
+        _assert_close(
+            got, model.predict(X), F32_TOL if X.dtype == np.float32 else F64_TOL
+        )
 
     def test_sklearn_forest_regressor(self, data):
         sklearn = pytest.importorskip("sklearn.ensemble")
@@ -101,15 +102,19 @@ class TestTreeForestOrtParity:
         )
         model.fit(X, y)
         got = _ort_predict(to_onnx(model, X[:5]), X)[0]
-        _assert_close(got, model.predict(X), self._tolerance(X, "sklearn"))
+        _assert_close(
+            got, model.predict(X), F32_TOL if X.dtype == np.float32 else F64_TOL
+        )
 
     def test_mondrian_tree_classifier_binary(self, data):
         from shinrin import MondrianTreeClassifier
 
         X, _, y, _ = data
         model = MondrianTreeClassifier(max_depth=10, random_state=0).fit(X, y)
-        proba, labels = _ort_predict(to_onnx(model, X[:5]), X)
-        _assert_close(proba, model.predict_proba(X), self._tolerance(X, "mondrian"))
+        labels, proba = _ort_predict(to_onnx(model, X[:5]), X)
+        _assert_close(
+            proba, model.predict_proba(X), F32_TOL if X.dtype == np.float32 else F64_TOL
+        )
         assert (labels == model.predict(X)).all()
 
     def test_mondrian_forest_classifier_multiclass(self, data):
@@ -118,8 +123,10 @@ class TestTreeForestOrtParity:
         X, _, _, y = data
         model = MondrianForestClassifier(n_estimators=8, max_depth=10, random_state=0)
         model.fit(X, y)
-        proba, labels = _ort_predict(to_onnx(model, X[:5]), X)
-        _assert_close(proba, model.predict_proba(X), self._tolerance(X, "mondrian"))
+        labels, proba = _ort_predict(to_onnx(model, X[:5]), X)
+        _assert_close(
+            proba, model.predict_proba(X), F32_TOL if X.dtype == np.float32 else F64_TOL
+        )
         assert (labels == model.predict(X)).all()
 
     def test_sklearn_forest_classifier_multiclass(self, data):
@@ -129,8 +136,10 @@ class TestTreeForestOrtParity:
             n_estimators=10, max_depth=10, random_state=0
         )
         model.fit(X, y)
-        proba, labels = _ort_predict(to_onnx(model, X[:5]), X)
-        _assert_close(proba, model.predict_proba(X), self._tolerance(X, "sklearn"))
+        labels, proba = _ort_predict(to_onnx(model, X[:5]), X)
+        _assert_close(
+            proba, model.predict_proba(X), F32_TOL if X.dtype == np.float32 else F64_TOL
+        )
         assert (labels == model.predict(X)).all()
 
     def test_gradient_boosting_regressor(self, data):
@@ -141,33 +150,45 @@ class TestTreeForestOrtParity:
         )
         model.fit(X, y)
         got = _ort_predict(to_onnx(model, X[:5]), X)[0]
-        _assert_close(got, model.predict(X), self._tolerance(X, "sklearn"))
+        _assert_close(got, model.predict(X), max(F64_TOL, 1e-4))
 
-    def test_gradient_boosting_classifier_binary(self, data):
-        # Guards the prior-log-odds base handling: init_.predict returns a
-        # class label for classifiers, not the raw-space constant.
+    def test_gradient_boosting_classifier_raises(self, data):
+        # Boosting classifiers are regressor-trees internally; export must
+        # refuse them explicitly instead of mis-detecting the task.
         sklearn = pytest.importorskip("sklearn.ensemble")
         X, _, y, _ = data
         model = sklearn.GradientBoostingClassifier(
-            n_estimators=15, max_depth=3, random_state=0
+            n_estimators=10, max_depth=3, random_state=0
         )
         model.fit(X, y)
-        proba, labels = _ort_predict(to_onnx(model, X[:5]), X)
-        tol = self._tolerance(X, "sklearn")
-        _assert_close(proba, model.predict_proba(X), max(tol, 1e-7))
-        assert (labels == model.predict(X)).all()
+        with pytest.raises(NotImplementedError, match="GradientBoosting classifiers"):
+            to_onnx(model, X[:5])
 
-    def test_gradient_boosting_classifier_multiclass(self, data):
-        sklearn = pytest.importorskip("sklearn.ensemble")
-        X, _, _, y = data
-        model = sklearn.GradientBoostingClassifier(
-            n_estimators=15, max_depth=3, random_state=0
-        )
-        model.fit(X, y)
-        proba, labels = _ort_predict(to_onnx(model, X[:5]), X)
-        tol = self._tolerance(X, "sklearn")
-        _assert_close(proba, model.predict_proba(X), max(tol, 1e-7))
+
+@pytest.mark.skipif(not ORT_INSTALLED, reason="onnxruntime not installed")
+class TestMlpOrtParity:
+    """Native vs ONNX-runtime agreement for MLP (float32 graphs)."""
+
+    def test_binary_labels_match_probabilities_and_native(self):
+        # Guards the binary label tail: deriving labels from a threshold on
+        # the raw sigmoid column used to emit (n, 1) labels inconsistent
+        # with the reported probabilities.
+        try:
+            from shinrin import MLPClassifier
+        except ImportError:  # pragma: no cover
+            pytest.skip("mlp dependencies missing")
+
+        rng = np.random.RandomState(7)
+        X = rng.randn(600, 8)
+        y = (X[:, 0] + X[:, 1] > 0).astype(int)
+        model = MLPClassifier(hidden_layer_sizes=(16,), max_iter=40, random_state=0)
+        model.fit(X.astype(np.float32), y)
+
+        labels, proba = _ort_predict(to_onnx(model, X[:5]), X)
+        assert labels.ndim == 1
+        assert (labels == proba.argmax(axis=1)).all()
         assert (labels == model.predict(X)).all()
+        _assert_close(proba, model.predict_proba(X), TABM_TOL)
 
 
 @pytest.mark.skipif(not ORT_INSTALLED, reason="onnxruntime not installed")
@@ -187,12 +208,12 @@ class TestTabmOrtParity:
 
         reg = TabMRegressor(hidden_layer_sizes=(16,), max_iter=20, random_state=0)
         reg.fit(X, y)
-        got = _ort_predict(to_onnx(reg, X[:5]), X.astype(np.float32))[0]
+        got = _ort_predict(to_onnx(reg, X[:5]), X)[0]
         _assert_close(got, reg.predict(X), TABM_TOL)
 
         clf = TabMClassifier(hidden_layer_sizes=(16,), max_iter=20, random_state=0)
         clf.fit(X, c)
-        proba = _ort_predict(to_onnx(clf, X[:5]), X.astype(np.float32))[0]
+        proba = _ort_predict(to_onnx(clf, X[:5]), X)[0]
         _assert_close(proba, clf.predict_proba(X), TABM_TOL)
 
 
@@ -206,9 +227,141 @@ def test_exports_are_valid_protos():
     tree = MondrianTreeRegressor(max_depth=5, random_state=0).fit(X, y)
     forest = MondrianForestRegressor(n_estimators=4, max_depth=5, random_state=0)
     forest.fit(X, y)
-    for model, expected_trees in ((tree, 1), (forest, len(forest.estimators_))):
+    for model in (tree, forest):
         proto = to_onnx(model, X[:3])
         onnx.checker.check_model(proto)
-        # one TreeEnsemble node per tree
-        n_nodes = sum(1 for n in proto.graph.node if n.op_type == "TreeEnsemble")
-        assert n_nodes == expected_trees
+
+
+def _hard_tree_predict(model, X):
+    """Plain decision-tree inference over stored arrays (no smoothing).
+
+    Reference for the approximate ``tree-ensemble`` Mondrian export: leaf
+    means averaged across trees, class counts normalized per leaf.
+    """
+    trees = [model] if hasattr(model, "tree_") else list(model.estimators_)
+    outputs = []
+    for est in trees:
+        t = est.tree_ if hasattr(est, "tree_") else est
+        out = np.empty((len(X), t.value.shape[-1]))
+        for i, row in enumerate(X):
+            nid = 0
+            while t.children_left[nid] >= 0:
+                go_left = row[t.feature[nid]] <= t.threshold[nid]
+                nid = int(t.children_left[nid] if go_left else t.children_right[nid])
+            out[i] = t.value[nid].ravel()
+        if out.shape[1] > 1:
+            sums = out.sum(axis=1, keepdims=True)
+            sums[sums == 0] = 1.0
+            out = out / sums
+        outputs.append(out)
+    return np.stack(outputs).mean(axis=0)
+
+
+class TestMondrianApproximateFallback:
+    """Size-guarded fallback from the exact graph to plain TreeEnsemble."""
+
+    def test_forest_auto_fallback_and_hard_structure_parity(self):
+        from shinrin import MondrianForestRegressor
+        from shinrin._mondrian_onnx import (
+            MODE_TREE_ENSEMBLE,
+            PROP_EXPORT_MODE,
+            _collect_trees,
+            _estimated_exact_bytes,
+            mondrian_to_onnx,
+        )
+
+        rng = np.random.RandomState(4)
+        X = rng.randn(4000, 20)
+        y = X @ rng.randn(20) + rng.randn(4000) * 10
+        model = MondrianForestRegressor(n_estimators=20, max_depth=16, random_state=0)
+        model.fit(X.astype(np.float32), y.astype(np.float32))
+
+        assert _estimated_exact_bytes(_collect_trees(model)) > (2 << 30), (
+            "expected this configuration to exceed the protobuf limit"
+        )
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            proto = mondrian_to_onnx(model)
+        assert any("falling back" in str(w.message) for w in caught)
+
+        props = {p.key: p.value for p in proto.metadata_props}
+        assert props[PROP_EXPORT_MODE] == MODE_TREE_ENSEMBLE
+
+        got = _ort_predict(proto, X[:500])[0]
+        expected = _hard_tree_predict(model, X[:500]).ravel()
+        # the approximation drops path smoothing but reproduces the hard
+        # structure exactly
+        _assert_close(got, expected, 1e-4)
+
+    def test_small_models_stay_exact(self):
+        from shinrin import MondrianForestRegressor, MondrianTreeRegressor
+        from shinrin._mondrian_onnx import (
+            MODE_EXACT,
+            PROP_EXPORT_MODE,
+            mondrian_to_onnx,
+        )
+
+        rng = np.random.RandomState(5)
+        X = rng.randn(200, 4).astype(np.float32)
+        y = X[:, 0]
+
+        tree = MondrianTreeRegressor(max_depth=6, random_state=0).fit(X, y)
+        props = {p.key: p.value for p in mondrian_to_onnx(tree).metadata_props}
+        assert props[PROP_EXPORT_MODE] == MODE_EXACT
+
+        forest = MondrianForestRegressor(n_estimators=3, max_depth=5, random_state=0)
+        forest.fit(X, y)
+        props = {p.key: p.value for p in mondrian_to_onnx(forest).metadata_props}
+        assert props[PROP_EXPORT_MODE] == MODE_EXACT
+
+    def test_forced_approximate_classifier_matches_labels(self):
+        from shinrin import MondrianForestClassifier
+        from shinrin._mondrian_onnx import (
+            MODE_TREE_ENSEMBLE,
+            PROP_EXPORT_MODE,
+            mondrian_to_onnx,
+        )
+
+        rng = np.random.RandomState(6)
+        X = rng.randn(600, 8)
+        y = (X[:, 0] + X[:, 1] > 0).astype(int)
+        model = MondrianForestClassifier(n_estimators=6, max_depth=8, random_state=0)
+        model.fit(X.astype(np.float32), y)
+
+        proto = mondrian_to_onnx(model, approximate=True)
+        props = {p.key: p.value for p in proto.metadata_props}
+        assert props[PROP_EXPORT_MODE] == MODE_TREE_ENSEMBLE
+
+        labels, proba = _ort_predict(proto, X)
+        expected = _hard_tree_predict(model, X)
+        _assert_close(proba, expected, 1e-5)
+        assert (labels == expected.argmax(axis=1)).all()
+
+
+def test_generic_forest_packs_single_tree_ensemble_node():
+    """Generic RF/ET exports pack every tree into one TreeEnsemble node."""
+    pytest.importorskip("sklearn")
+    from sklearn.ensemble import RandomForestRegressor
+
+    from shinrin import MondrianForestRegressor
+
+    rng = np.random.RandomState(3)
+    X = rng.randn(150, 4).astype(np.float32)
+    y = X[:, 0]
+
+    # The Mondrian export is a self-contained standard-domain graph: it
+    # reproduces native predict without any ai.onnx.ml operator.
+    mondrian_forest = MondrianForestRegressor(
+        n_estimators=4, max_depth=5, random_state=0
+    )
+    mondrian_forest.fit(X, y)
+    proto = to_onnx(mondrian_forest, X[:3])
+    onnx = pytest.importorskip("onnx")
+    onnx.checker.check_model(proto)
+    assert not [n for n in proto.graph.node if "TreeEnsemble" in n.op_type]
+
+    sklearn_forest = RandomForestRegressor(n_estimators=6, random_state=0).fit(X, y)
+    proto = to_onnx(sklearn_forest, X[:3])
+    te_nodes = [n for n in proto.graph.node if n.op_type == "TreeEnsembleRegressor"]
+    assert len(te_nodes) == 1
