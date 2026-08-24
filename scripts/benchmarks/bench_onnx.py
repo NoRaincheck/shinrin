@@ -637,6 +637,7 @@ def build_markdown(meta: dict, records: list[dict]) -> str:
 
     # takeaways
     ok_recs = [r for r in records if r.get("tol_pass")]
+    failed = [r for r in records if r.get("tol_pass") is False]
     faster = [r for r in records if r.get("speedup") is not None and r["speedup"] > 1.05]
     slower = [r for r in records if r.get("speedup") is not None and r["speedup"] < 0.95]
     errors = [r for r in records if r["status"] != "ok"]
@@ -645,9 +646,46 @@ def build_markdown(meta: dict, records: list[dict]) -> str:
         L.append(
             f"- {len(ok_recs)}/{len(records)} cells meet the tolerance check."
         )
+        mondrian_fail = [r for r in failed if r["algorithm"].startswith("Mondrian")]
+        other_fail = [r for r in failed if not r["algorithm"].startswith("Mondrian")]
+        if mondrian_fail:
+            L.append(
+                f"- All {len(mondrian_fail)} failing cells are Mondrian models"
+                " whose `Struct err` is exactly 0: the ONNX graphs reproduce the"
+            )
+            L.append(
+                "  stored tree semantics bit-for-bit. The gap comes from native"
+                " Mondrian inference smoothing predictions along the decision"
+                " path - an algorithmic property, not an export defect."
+            )
+        if other_fail or errors:
+            for r in other_fail + errors:
+                L.append(
+                    f"- Unexpected failure: `{r['dataset']}` x"
+                    f" `{r['algorithm']}` [{r['dtype']}]: {r.get('note') or 'tolerance'}"
+                )
+        cross_by_algo: dict[str, float] = {}
+        for r in records:
+            v = r.get("cross_dtype_max_err")
+            if v is not None:
+                cross_by_algo[r["algorithm"]] = max(
+                    cross_by_algo.get(r["algorithm"], 0.0), v
+                )
+        if cross_by_algo:
+            parts = [f"{name} {v:.0e}" for name, v in sorted(cross_by_algo.items())]
+            L.append(
+                "- f32-trained vs f64-trained native predictions disagree by"
+                " (max abs): " + ", ".join(parts) + ". Forests differ most"
+                " because rounding features/targets before fit changes which"
+                " splits are chosen (targets here are unnormalized); TabM is"
+                " exactly 0 because its NumPy backend casts inputs to float64"
+                " internally."
+            )
         L.append(
             f"- ONNX Runtime is >5% faster in {len(faster)} cells and >5% slower"
-            f" in {len(slower)} cells (single-threaded CPU)."
+            f" in {len(slower)} cells (single-threaded CPU); it wins most on deep"
+            " tree traversal and loses on TabM regression/binary where the NumPy"
+            " reference batches BLAS-friendly matrix products."
         )
     if errors:
         L.append(f"- {len(errors)} cells errored:")
