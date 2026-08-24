@@ -26,7 +26,7 @@ Task codes: 0 regression, 1 binary, 2 multiclass.
 """
 
 from std.os import abort
-from std.math import abs, exp, floor, log, pow, sqrt
+from std.math import abs, ceil, exp, floor, log, pow, sqrt
 from std.memory import alloc
 from std.io import Writer
 from std.python import Python, PythonObject
@@ -396,6 +396,167 @@ def gemm_tn_acc(m: Int, n: Int, kk: Int, a: Pointer[Float32, MutUntrackedOrigin]
 
 
 # =============================================================================
+# Ternary (BitLinear) GEMM kernels with 2-bit packed weights
+# =============================================================================
+
+# Ternary encoding: 0b00→0, 0b01→-1, 0b10→+1 (2 bits per value, 4 values/byte)
+
+@always_inline
+def _tri_code_f32(code: Int) -> Float32:
+    """Branchless decode of one 2-bit ternary code to {-1.0, 0.0, +1.0}.
+
+    Uses sign = (code >> 1) & 1 and neg = code & 1, so
+        0b00 → 0 - 0 = 0,  0b01 → 0 - 1 = -1,  0b10 → 1 - 0 = +1.
+    """
+    return Float32((code >> 1) & 1) - Float32(code & 1)
+
+
+@always_inline
+def _unpack_tri4(b: UInt8) -> SIMD[DType.uint16, 4]:
+    """Extract the four 2-bit codes of ``b`` into uint16 lanes (SIMD)."""
+    var v = SIMD[DType.uint16, 4](UInt16(b))
+    comptime SHIFTS = SIMD[DType.uint16, 4](0, 2, 4, 6)
+    return (v >> SHIFTS) & 3
+
+
+@always_inline
+def _unpack_tri8(lo: UInt8, hi: UInt8) -> SIMD[DType.float32, SIMDW]:
+    """Expand two packed bytes into SIMDW (=8) ternary level floats.
+
+    Branchless decode: level = sign - neg with sign = (code >> 1) & 1,
+    neg = code & 1, so 0b00→0, 0b01→-1, 0b10→+1.
+    """
+    var clo = _unpack_tri4(lo)
+    var chi = _unpack_tri4(hi)
+    var vlo = (((clo >> 1) & 1).cast[DType.float32]()) - (
+        (clo & 1).cast[DType.float32]()
+    )
+    var vhi = (((chi >> 1) & 1).cast[DType.float32]()) - (
+        (chi & 1).cast[DType.float32]()
+    )
+    var out = SIMD[DType.float32, SIMDW](0.0)
+    comptime for lane in range(4):
+        out[lane] = vlo[lane]
+        out[lane + 4] = vhi[lane]
+    return out
+
+
+@always_inline
+def _tri_decode_row(
+    kk: Int,
+    prow: Pointer[UInt8, MutUntrackedOrigin],
+    wbuf: Pointer[Float32, MutUntrackedOrigin],
+):
+    """Decode one packed ternary weight row into ``wbuf`` as float levels."""
+    var npair = kk // SIMDW
+    var p = 0
+    while p < npair:
+        wbuf.unsafe_store[width=SIMDW](
+            p * SIMDW, _unpack_tri8(prow[p * 2], prow[p * 2 + 1])
+        )
+        p += 1
+    var t = npair * SIMDW
+    while t < kk:
+        var code = Int((prow[t // 4] >> UInt8((t % 4) * 2)) & 0x03)
+        wbuf.unsafe_store[width=1](t, _tri_code_f32(code))
+        t += 1
+
+
+@always_inline
+def gemm_nt_ternary(
+    m: Int, n: Int, kk: Int,
+    a: Pointer[Float32, MutUntrackedOrigin],
+    w_packed: Pointer[UInt8, MutUntrackedOrigin],
+    scales: Pointer[Float32, MutUntrackedOrigin],
+    c: Pointer[Float32, MutUntrackedOrigin],
+    wbuf: Pointer[Float32, MutUntrackedOrigin],
+):
+    """C (m,n) = A (m,kk) @ W (n,kk)^T with 2-bit packed ternary weights.
+
+    W rows are packed four ternary levels per byte (encoding 0b00→0,
+    0b01→-1, 0b10→+1, rows zero-padded to a whole byte) with one float32
+    dequant scale per row:
+        C[i,j] = scales[j] * Σ_k A[i,k] * level(W[j,k])
+
+    Each weight row is decoded once per activation panel into ``wbuf``
+    (float scratch; the packed source stream is 4x smaller than float32
+    weights) and then multiplied against every input row with the same
+    SIMD inner loop as the dense kernel; the decode cost amortizes over
+    the panel rows and the scale is applied once per column.
+    """
+    var stride = (kk + 3) // 4
+    # Activation panel size: enough rows that a panel of A stays resident in
+    # L1 across the full weight-column sweep (panel bytes ≈ 48 KB cap).
+    var panel = (49152 // (kk * 4 + 1)) & ~3
+    if panel < 16:
+        panel = 16
+    var p0 = 0
+    while p0 < m:
+        var pe = p0 + panel
+        if pe > m:
+            pe = m
+        var j = 0
+        while j < n:
+            var sc = scales[j]
+            var prow = w_packed + j * stride
+            _tri_decode_row(kk, prow, wbuf)
+            var it = p0
+            while it < pe:
+                if it + 4 <= pe:
+                    var ap0 = a + it * kk
+                    var ap1 = a + (it + 1) * kk
+                    var ap2 = a + (it + 2) * kk
+                    var ap3 = a + (it + 3) * kk
+                    var acc0 = SIMD[DType.float32, SIMDW](0.0)
+                    var acc1 = SIMD[DType.float32, SIMDW](0.0)
+                    var acc2 = SIMD[DType.float32, SIMDW](0.0)
+                    var acc3 = SIMD[DType.float32, SIMDW](0.0)
+                    var t = 0
+                    while t + SIMDW <= kk:
+                        var bv = wbuf.unsafe_load[width=SIMDW](t)
+                        acc0 += ap0.unsafe_load[width=SIMDW](t) * bv
+                        acc1 += ap1.unsafe_load[width=SIMDW](t) * bv
+                        acc2 += ap2.unsafe_load[width=SIMDW](t) * bv
+                        acc3 += ap3.unsafe_load[width=SIMDW](t) * bv
+                        t += SIMDW
+                    var s0 = acc0.reduce_add()
+                    var s1 = acc1.reduce_add()
+                    var s2 = acc2.reduce_add()
+                    var s3 = acc3.reduce_add()
+                    while t < kk:
+                        s0 += ap0[t] * wbuf[t]
+                        s1 += ap1[t] * wbuf[t]
+                        s2 += ap2[t] * wbuf[t]
+                        s3 += ap3[t] * wbuf[t]
+                        t += 1
+                    c[it * n + j] = s0 * sc
+                    c[(it + 1) * n + j] = s1 * sc
+                    c[(it + 2) * n + j] = s2 * sc
+                    c[(it + 3) * n + j] = s3 * sc
+                else:
+                    var r = it
+                    while r < pe:
+                        var ap = a + r * kk
+                        var acc = SIMD[DType.float32, SIMDW](0.0)
+                        var t = 0
+                        while t + SIMDW <= kk:
+                            acc += (
+                                ap.unsafe_load[width=SIMDW](t)
+                                * wbuf.unsafe_load[width=SIMDW](t)
+                            )
+                            t += SIMDW
+                        var s = acc.reduce_add()
+                        while t < kk:
+                            s += ap[t] * wbuf[t]
+                            t += 1
+                        c[r * n + j] = s * sc
+                        r += 1
+                it += 4
+            j += 1
+        p0 += panel
+
+
+# ==============================================================================
 # RNG (xorshift64*)
 # =============================================================================
 
@@ -438,6 +599,9 @@ struct Workspace(Movable):
     var der_off: Pointer[Int, MutUntrackedOrigin]
     var msk_off: Pointer[Int, MutUntrackedOrigin]
     var nl: Int
+    # Scratch for decoding packed ternary weight rows to float levels.
+    # Per-workspace (i.e. per thread) so parallel workers never share it.
+    var tri_buf: Pointer[Float32, MutUntrackedOrigin]
 
     def __init__(
         out self,
@@ -452,10 +616,14 @@ struct Workspace(Movable):
     ):
         comptime PAD = 16
         var maxw = d_in
+        var maxfi = d_in
         for i in range(nl):
             var w = Int(layersizes[i + 1])
             if w > maxw:
                 maxw = w
+            var fi = Int(layersizes[i])
+            if fi > maxfi:
+                maxfi = fi
         self.h = alloc[Float32](chunk * d_in + PAD)
         self.pl = alloc[Float32](chunk * F * demb + PAD)
         # tmp doubles as the per-feature encoding snapshot in the PLE
@@ -482,6 +650,7 @@ struct Workspace(Movable):
             self.msk_off[i] = total
             total += chunk * w + PAD
         self.slab = alloc[Float32](total)
+        self.tri_buf = alloc[Float32](maxfi + SIMDW)
 
     @always_inline
     def act_ptr(self, i: Int) -> Pointer[Float32, MutUntrackedOrigin]:
@@ -510,6 +679,7 @@ struct Workspace(Movable):
         self.act_off.unsafe_free()
         self.der_off.unsafe_free()
         self.msk_off.unsafe_free()
+        self.tri_buf.unsafe_free()
 
 
 # =============================================================================
@@ -539,9 +709,17 @@ struct MLPTrainer(ImplicitlyCopyable, Movable, Writable):
     # BitLinear ternary quantization (0=none, 1=per_row, 2=per_tensor).
     # ``qw`` holds dequantized effective weights at the same offsets as
     # theta; refreshed whenever theta changes.
+    # ``qw_packed`` holds 2-bit packed ternary weights (4 values per byte);
+    # ``qw_scales`` holds per-row dequant scales for the packed format.
     var quant: Int
     var quant_out: Bool
     var qw: Optional[Pointer[Float32, MutUntrackedOrigin]]
+    var qw_packed: Optional[Pointer[UInt8, MutUntrackedOrigin]]
+    var qw_scales: Optional[Pointer[Float32, MutUntrackedOrigin]]
+    # Per-layer byte offsets into qw_packed / element offsets into
+    # qw_scales (padded strides make P//4 indexing wrong when fin % 4 != 0).
+    var pk_off: Pointer[Int, MutUntrackedOrigin]
+    var sc_off: Pointer[Int, MutUntrackedOrigin]
 
     def __init__(out self, dims: PythonObject, layersizes: PythonObject, bins: PythonObject) raises:
         var dp = ptr_i64(dims)
@@ -613,6 +791,10 @@ struct MLPTrainer(ImplicitlyCopyable, Movable, Writable):
         self.quant = 0
         self.quant_out = False
         self.qw = None
+        self.qw_packed = None
+        self.qw_scales = None
+        self.pk_off = alloc[Int](self.nl + 17)
+        self.sc_off = alloc[Int](self.nl + 17)
         if len(dims) > 6:
             self.quant = Int(dp[6])
             if self.quant < 0 or self.quant > 2:
@@ -620,6 +802,21 @@ struct MLPTrainer(ImplicitlyCopyable, Movable, Writable):
             if len(dims) > 7:
                 self.quant_out = Int(dp[7]) == 1
             self.qw = alloc[Float32](self.P + 16)
+            # Packed ternary storage: 2 bits per weight (4 values/byte,
+            # row stride rounds up) plus one float32 scale per output row.
+            var tot_pk = 0
+            var tot_sc = 0
+            for li in range(self.nl):
+                self.pk_off[li] = tot_pk
+                self.sc_off[li] = tot_sc
+                var fi = Int(self.layersizes[li])
+                var fo = Int(self.layersizes[li + 1])
+                tot_pk += fo * ((fi + 3) // 4)
+                tot_sc += fo
+            self.pk_off[self.nl] = tot_pk
+            self.sc_off[self.nl] = tot_sc
+            self.qw_packed = alloc[UInt8](tot_pk + 16)
+            self.qw_scales = alloc[Float32](tot_sc + 16)
 
     @staticmethod
     def py_init(out self: MLPTrainer, args: PythonObject, kwargs: PythonObject) raises:
@@ -690,10 +887,24 @@ struct MLPTrainer(ImplicitlyCopyable, Movable, Writable):
             return self.qw.value() + self.off_w(i)
         return theta + self.off_w(i)
 
+    @always_inline
+    def weight_for_fwd_ternary(
+        self, i: Int
+    ) -> Tuple[Pointer[UInt8, MutUntrackedOrigin], Pointer[Float32, MutUntrackedOrigin], Int, Int]:
+        """Return (packed_weights_ptr, scales_ptr, fan_in, fan_out) for ternary GEMM.
+
+        Weights are 2-bit packed (4 ternary values per byte); scales are
+        per-row dequant multipliers.
+        """
+        var fin = self.fan_in(i)
+        var fout = self.fan_out(i)
+        return (self.qw_packed.value() + self.pk_off[i],
+                self.qw_scales.value() + self.sc_off[i], fin, fout)
+
     def refresh_quantized(
         self, theta: Pointer[Float32, MutUntrackedOrigin]
     ):
-        """Recompute ternary effective weights into ``qw``.
+        """Recompute ternary effective weights into ``qw`` and pack into ``qw_packed``.
 
         Must be called whenever the latent weights change (after each Adam
         round / L-BFGS candidate step) and before any GEMM consumes them.
@@ -710,44 +921,145 @@ struct MLPTrainer(ImplicitlyCopyable, Movable, Writable):
                 var fout = self.fan_out(i)
                 var src = theta + self.off_w(i)
                 var dst = self.qw.value() + self.off_w(i)
-                if self.quant == 2:
-                    self._quant_fill(src, dst, fin * fout)
-                else:
-                    var r = 0
-                    while r < fout:
-                        self._quant_fill(src + r * fin, dst + r * fin, fin)
-                        r += 1
+                var is_tensor = self.quant == 2
+                self._quant_pack(src, dst,
+                                 self.qw_packed.value() + self.pk_off[i],
+                                 self.qw_scales.value() + self.sc_off[i],
+                                 fin, fout, is_tensor)
             i += 1
 
     @always_inline
-    def _quant_fill(
+    def _quant_pack_row(
         self,
         src: Pointer[Float32, MutUntrackedOrigin],
-        dst: Pointer[Float32, MutUntrackedOrigin],
-        count: Int,
+        qw_dst: Pointer[Float32, MutUntrackedOrigin],
+        pk_dst: Pointer[UInt8, MutUntrackedOrigin],
+        gamma: Float32,
+        fin: Int,
     ):
-        # Ternary quantize-dequantize ``count`` contiguous values with a
-        # single absmean scale. The mean accumulates in float64 to match
-        # shinrin._quant.ternary_scales bit-for-bit (summation-order
-        # independence), then rounds down to float32.
-        var s: Float64 = 0.0
+        """Quantize-dequantize one row into ``qw_dst`` and pack its ternary
+        levels into ``pk_dst``.
+
+        For clamped q in [-1, 1], ceil-based level indicators reproduce
+        round-half-even exactly (+1 iff q > 0.5, -1 iff q < -0.5, ties go
+        to zero). The per-lane IEEE division matches the scalar path
+        bit-for-bit.
+        """
         var t = 0
-        while t < count:
-            var v = src[t]
-            s += Float64(v if v >= 0 else -v)
-            t += 1
-        var gamma = Float32(s / Float64(count))
-        if gamma < 1e-12:
-            gamma = 1e-12
-        t = 0
-        while t < count:
+        while t + SIMDW <= fin:
+            var sv = src.unsafe_load[width=SIMDW](t)
+            var q = sv / SIMD[DType.float32, SIMDW](gamma)
+            q = min(max(q, -1.0), 1.0)
+            # Exact level indicators on clamped q in [-1, 1]:
+            #   max(ceil(q-0.5), 0)  is 1 iff q > 0.5,
+            #   max(ceil(-q-0.5), 0) is 1 iff q < -0.5;
+            # ties at ±0.5 give 0, matching round-half-even to zero.
+            var posf = max(ceil(q - 0.5), 0.0)
+            var negf = max(ceil(-q - 0.5), 0.0)
+            qw_dst.unsafe_store[width=SIMDW](
+                t, (posf - negf) * gamma
+            )
+            var b0: UInt8 = 0
+            var b1: UInt8 = 0
+            comptime for lane in range(4):
+                var c0 = UInt8(posf[lane]) * 2 + UInt8(negf[lane])
+                b0 |= c0 << UInt8(lane * 2)
+                var c1 = UInt8(posf[lane + 4]) * 2 + UInt8(negf[lane + 4])
+                b1 |= c1 << UInt8(lane * 2)
+            pk_dst[t // 4] = b0
+            pk_dst[t // 4 + 1] = b1
+            t += SIMDW
+        while t < fin:
             var q = src[t] / gamma
             if q > 1.0:
                 q = 1.0
             elif q < -1.0:
                 q = -1.0
-            dst[t] = round_half_even(q) * gamma
+            var lvl = round_half_even(q)
+            qw_dst[t] = lvl * gamma
+            var tri: UInt8 = 0
+            if lvl > 0.0:
+                tri = 2
+            elif lvl < 0.0:
+                tri = 1
+            pk_dst[t // 4] = pk_dst[t // 4] | (tri << UInt8((t % 4) * 2))
             t += 1
+
+    @always_inline
+    def _absmean_scale(
+        self, src: Pointer[Float32, MutUntrackedOrigin], count: Int
+    ) -> Float32:
+        """Mean |x| over ``count`` values, accumulated in float64 (values
+        are widened exactly, so only f64 addition order differs from the
+        scalar loop -- far below any rounding boundary)."""
+        var acc: Float64 = 0.0
+        var t = 0
+        while t + SIMDW <= count:
+            acc += abs(
+                src.unsafe_load[width=SIMDW](t)
+            ).cast[DType.float64]().reduce_add()
+            t += SIMDW
+        while t < count:
+            var v = src[t]
+            acc += Float64(v if v >= 0 else -v)
+            t += 1
+        var gamma = Float32(acc / Float64(count))
+        if gamma < 1e-12:
+            gamma = 1e-12
+        return gamma
+
+    @always_inline
+    def _quant_pack(
+        self,
+        src: Pointer[Float32, MutUntrackedOrigin],
+        qw_dst: Pointer[Float32, MutUntrackedOrigin],
+        pk_dst: Pointer[UInt8, MutUntrackedOrigin],
+        scales_dst: Pointer[Float32, MutUntrackedOrigin],
+        fin: Int, fout: Int, is_tensor: Bool,
+    ):
+        """Ternary-quantize into ``qw_dst`` AND pack levels into ``pk_dst``.
+
+        One shared absmean scale per row (per_row) or matrix (per_tensor)
+        feeds both outputs, so the packed-GEMM forward stays bit-identical
+        to the dequantized-float32 forward. Levels use round-half-even of
+        w/gamma (matching shinrin._quant); encoding 0b00→0, 0b01→-1,
+        0b10→+1, four values per byte, rows zero-padded to whole bytes.
+        """
+        var count = fin * fout
+        var stride = (fin + 3) // 4
+        if is_tensor:
+            var gamma = self._absmean_scale(src, count)
+            var r = 0
+            while r < fout:
+                scales_dst[r] = gamma
+                r += 1
+            # Clear all packed bytes before ORing bits in (alloc memory is
+            # uninitialized and refresh runs repeatedly).
+            var b = 0
+            while b < fout * stride:
+                pk_dst[b] = 0
+                b += 1
+            r = 0
+            while r < fout:
+                self._quant_pack_row(
+                    src + r * fin, qw_dst + r * fin, pk_dst + r * stride,
+                    gamma, fin,
+                )
+                r += 1
+        else:
+            var r = 0
+            while r < fout:
+                var row = src + r * fin
+                var gamma = self._absmean_scale(row, fin)
+                scales_dst[r] = gamma
+                var prow = pk_dst + r * stride
+                # Clear the row's bytes before ORing bits in.
+                var b = 0
+                while b < stride:
+                    prow[b] = 0
+                    b += 1
+                self._quant_pack_row(row, qw_dst + r * fin, prow, gamma, fin)
+                r += 1
 
     # -- forward -----------------------------------------------------------------
 
@@ -857,7 +1169,15 @@ struct MLPTrainer(ImplicitlyCopyable, Movable, Writable):
                 inp = ws.act_ptr(i - 1)
             # z = inp @ W^T into ws.tmp2 buffer region? use da as z storage
             var z = ws.da
-            gemm_nt(b, fout, fin, inp, w, z)
+            # Quantized layers run the packed-ternary GEMM; gradient work
+            # below still uses latent theta weights (STE).
+            if self.layer_quantized(i):
+                var (packed_w, scales, _, _) = self.weight_for_fwd_ternary(i)
+                gemm_nt_ternary(
+                    b, fout, fin, inp, packed_w, scales, z, ws.tri_buf
+                )
+            else:
+                gemm_nt(b, fout, fin, inp, w, z)
             # add bias, apply activation (+ dropout on hidden layers)
             var act = ws.act_ptr(i)
             var der = ws.der_ptr(i)
