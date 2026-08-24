@@ -1,8 +1,24 @@
-"""ONNX exporter for shinrin tree, forest, and TabM models.
+"""ONNX exporter for shinrin models.
 
-This module provides functionality to export fitted shinrin tree, forest,
-and TabM models to the ONNX format, enabling deployment on platforms that
-support ONNX runtime inference.
+``to_onnx`` converts a fitted shinrin estimator into a self-contained ONNX
+model proto. Supported model families and their export strategies:
+
+- **Trees / forests** (:mod:`shinrin._skgarden`): emitted as ``ai.onnx.ml``
+  ``TreeEnsembleRegressor`` / ``TreeEnsembleClassifier`` graphs (domain
+  version 3). All trees of a forest are packed into a single node whose
+  aggregated output equals the average of the per-tree predictions.
+- **Quantile trees / forests**: exported exactly for one quantile chosen at
+  export time (see :func:`to_onnx`); training targets are embedded in the
+  graph so weighted-percentile parity is preserved (forests).
+- **Rule-based models** (SkopeRules, CorelsClassifier, OrdtClassifier,
+  GOSDTClassifier): rules/trees are compiled to standard-domain boolean ops
+  or tree ensembles.
+- **MLP**: self-contained standard-domain graph with preprocessing baked in
+  (mirrors the TabM exporter).
+- **TabM**: dedicated exporter :mod:`shinrin._tabm_onnx`.
+- **TabICL**: not supported (explicit error).
+
+All exports use dynamic batch size and expect a float32 ``X`` input tensor.
 """
 
 from __future__ import annotations
@@ -11,176 +27,322 @@ from typing import Any
 
 import numpy as np
 
-# Lazy import for ONNX types (used in _onnx_dtype)
 try:
     from onnx import TensorProto
 except ImportError:  # pragma: no cover
     TensorProto: Any = None
 
-
-# ai.onnx.ml opset that introduced the standalone ``TreeEnsemble`` operator
-# used for all tree/forest exports. Runtimes must support this opset (or
-# newer) to load the exported models.
-TREE_ENSEMBLE_OPSET = 5
-
-# Model metadata property marking exports emitted by this module. The value
-# records the leaf-value encoding so :mod:`shinrin.onnx_import` can parse
-# models without guessing.
-_ENCODING_PROP = "shinrin_tree_encoding"
-_TASK_PROP = "shinrin_task"
-_BASE_VALUES_PROP = "shinrin_base_values"
-
-# Leaf-value encodings recorded in model metadata:
-#   "probs-v5"            classification, per-class probability rows
-#   "logit-v5"            classification, per-class log-odds columns
-#   "mean-v5"             regression, per-leaf means
-_ENCODING_PROBS = "probs-v5"
-_ENCODING_LOGIT = "logit-v5"
-_ENCODING_MEAN = "mean-v5"
+# ai.onnx.ml domain version used by all tree-ensemble exports. Version 3
+# introduced TreeEnsembleRegressor/TreeEnsembleClassifier and is supported
+# by every major runtime.
+AI_ONNX_ML_OPSET = 3
 
 
-def _tree_info(tree) -> dict[str, Any]:
-    """Extract a sklearn-style ``tree_`` into plain arrays.
+def _require_onnx():
+    try:
+        from onnx import TensorProto, helper
 
-    Returns a dict with:
+        return TensorProto, helper
+    except ImportError:
+        raise ImportError(
+            "onnx is required for ONNX export. Install it with: pip install onnx"
+        )
 
-    - ``feature``: split feature ids, ``-2`` marking leaf nodes
-    - ``threshold``: split thresholds (``0`` at leaves)
-    - ``left``/``right``: child node ids (leaves point at ``-1``)
-    - ``value``: leaf prediction targets — regression means shaped
-      ``(n_nodes,)`` or class counts shaped ``(n_nodes, n_classes)``;
-      non-leaf rows are zeroed
-    - ``n_classes``: number of classes (1 for regression)
-    """
-    t = tree.tree_
-    feature = t.feature.astype(np.int64)
-    leaf = feature == -2
-    left = t.children_left.astype(np.int64)
-    right = t.children_right.astype(np.int64)
-    n_classes = int(t.n_classes[0])
-    if n_classes == 1:
-        value = np.where(leaf, t.value.ravel(), 0.0).astype(np.float64)
+
+def _set_props(model, props: dict[str, str]) -> None:
+    from onnx import helper
+
+    helper.set_model_props(model, props)
+
+
+# ---------------------------------------------------------------------------
+# Ensemble builder shared by regressor / classifier exports
+# ---------------------------------------------------------------------------
+
+
+class _EnsembleBuilder:
+    """Accumulates node arrays for one multi-tree ONNX ensemble."""
+
+    def __init__(self) -> None:
+        self.nodes_treeids: list[int] = []
+        self.nodes_nodeids: list[int] = []
+        self.nodes_featureids: list[int] = []
+        self.nodes_modes: list[str] = []
+        self.nodes_values: list[float] = []
+        self.nodes_truenodeids: list[int] = []
+        self.nodes_falsenodeids: list[int] = []
+        # Per-tree mapping leaf node id -> value vector (``tree_.value``
+        # flattened: mean for regression trees, class counts otherwise).
+        self.leaves_by_tree: list[dict[int, np.ndarray]] = []
+
+    def add_tree(self, tree_id: int, tree) -> None:
+        """Append one fitted ``tree_`` (sklearn or native Mondrian layout)."""
+        left = np.asarray(tree.children_left)
+        right = np.asarray(tree.children_right)
+        feature = np.asarray(tree.feature)
+        threshold = np.asarray(tree.threshold, dtype=np.float64)
+        value = np.asarray(tree.value, dtype=np.float64)
+        n_nodes = int(tree.node_count)
+
+        leaves: dict[int, np.ndarray] = {}
+        for i in range(n_nodes):
+            self.nodes_treeids.append(tree_id)
+            self.nodes_nodeids.append(i)
+            if left[i] < 0 and right[i] < 0:
+                self.nodes_featureids.append(0)
+                self.nodes_modes.append("LEAF")
+                self.nodes_values.append(0.0)
+                self.nodes_truenodeids.append(i)
+                self.nodes_falsenodeids.append(i)
+                leaves[i] = value[i].reshape(-1)
+            else:
+                self.nodes_featureids.append(int(feature[i]))
+                self.nodes_modes.append("BRANCH_LEQ")
+                self.nodes_values.append(float(threshold[i]))
+                true_id = int(left[i]) if left[i] >= 0 else i
+                false_id = int(right[i]) if right[i] >= 0 else i
+                self.nodes_truenodeids.append(true_id)
+                self.nodes_falsenodeids.append(false_id)
+        self.leaves_by_tree.append(leaves)
+
+
+def _tree_iter(estimator) -> tuple[list[Any], bool]:
+    """Return ``(list_of_tree_, is_classification)`` for a tree/forest model."""
+    trees_attr = getattr(estimator, "estimators_", None)
+    if trees_attr is not None:
+        arr = getattr(trees_attr, "ndim", 1)
+        if isinstance(arr, int) and arr > 1:
+            first = trees_attr[0][0]
+            estimators = [e[0] for e in trees_attr]
+        else:
+            first = trees_attr[0]
+            estimators = list(trees_attr)
+        if not hasattr(first, "tree_"):
+            raise ValueError("Forest estimators must contain tree models.")
+        trees = [t.tree_ for t in estimators]
+    elif getattr(estimator, "tree_", None) is not None:
+        trees = [estimator.tree_]
     else:
-        counts = t.value[:, 0, :n_classes].astype(np.float64)
-        totals = counts.sum(axis=1, keepdims=True)
-        totals[totals == 0] = 1.0
-        value = np.where(leaf.reshape(-1, 1), counts / totals, 0.0)
-    return {
-        "feature": feature,
-        "threshold": t.threshold.astype(np.float64),
-        "left": left,
-        "right": right,
-        "value": value,
-        "n_classes": n_classes,
-    }
+        raise ValueError(
+            f"Unsupported estimator {type(estimator).__name__}: expected a "
+            "fitted tree ('tree_') or forest ('estimators_') model."
+        )
+
+    n_classes = int(np.asarray(trees[0].n_classes).ravel()[0])
+    return trees, n_classes > 1
 
 
-def _ensemble_attributes(
-    entries: list[tuple[dict[str, Any], int]],
-    n_targets: int,
-    dtype: np.dtype | type[np.generic],
-    scale: float = 1.0,
-) -> dict[str, Any]:
-    """Build attributes for one ``ai.onnx.ml.TreeEnsemble`` node (opset 5).
+# ---------------------------------------------------------------------------
+# Generic tree / forest export
+# ---------------------------------------------------------------------------
 
-    ``entries`` pairs tree-info dicts with a fixed target column whose leaf
-    weights contribute to. The v5 operator addresses leaves through compact
-    parallel ``leaf_weights``/``leaf_targetids`` arrays where every entry is
-    one ``(weight, target)`` tuple; branch ids index the node arrays unless
-    the matching ``nodes_trueleafs``/``nodes_falseleafs`` flag selects the
-    leaf-entry array instead. Aggregation is always ``SUM``; callers fold
-    averaging factors (``1 / n_trees``) or boosting learning rates into the
-    leaf weights beforehand.
-    """
-    from onnx import numpy_helper
 
-    dt = np.dtype(dtype)
-    feats: list[int] = []
-    splits: list[float] = []
-    true_ids: list[int] = []
-    true_leafs: list[int] = []
-    false_ids: list[int] = []
-    false_leafs: list[int] = []
-    leaf_w: list[float] = []
-    leaf_t: list[int] = []
-    roots: list[int] = []
-    node_off = 0
-    entry_off = 0
+def _generic_to_onnx(
+    estimator,
+    feature_names: list[str] | None,
+    name: str,
+    target_opset: int,
+):
+    """Export a fitted tree or forest to an ai.onnx.ml tree-ensemble graph."""
+    TensorProto, helper = _require_onnx()
 
-    for info, target in entries:
-        feature = info["feature"]
-        leaf = feature == -2
-        interior_idx = np.flatnonzero(~leaf)
-        leaf_idx = np.flatnonzero(leaf)
-        rank = {int(orig): p for p, orig in enumerate(interior_idx)}
-        entry_of_leaf = {int(orig): k for k, orig in enumerate(leaf_idx)}
-        values = info["value"]
+    trees, is_classification = _tree_iter(estimator)
+    n_features_in = int(trees[0].n_features)
+    n_classes = (
+        max(int(np.asarray(t.n_classes).ravel()[0]) for t in trees)
+        if is_classification
+        else 1
+    )
+    n_trees = len(trees)
 
-        n_interior = len(interior_idx)
-        if n_interior == 0:
-            # Degenerate tree without splits: synthesize a root whose two
-            # branches both resolve to the single leaf entry.
-            feats.append(0)
-            splits.append(0.0)
-            true_ids.append(entry_off)
-            true_leafs.append(1)
-            false_ids.append(entry_off)
-            false_leafs.append(1)
-            leaf_w.append(float(values.ravel()[leaf_idx[0]]) * scale)
-            leaf_t.append(target)
-            roots.append(node_off)
-            node_off += 1
-            entry_off += 1
-            continue
-
-        for orig in interior_idx:
-            l_orig = int(info["left"][orig])
-            r_orig = int(info["right"][orig])
-            tl = bool(leaf[l_orig])
-            fl = bool(leaf[r_orig])
-            feats.append(int(feature[orig]))
-            splits.append(float(info["threshold"][orig]))
-            true_ids.append(
-                entry_of_leaf[l_orig] + entry_off if tl else rank[l_orig] + node_off
+    # GradientBoosting ensembles sum learning-rate-scaled tree outputs on top
+    # of the initial constant prediction; forests plain-average raw outputs.
+    is_gb = type(estimator).__name__.startswith("GradientBoosting")
+    if is_gb:
+        learning_rate = float(getattr(estimator, "learning_rate", 1.0))
+        if is_classification:
+            raise NotImplementedError(
+                "ONNX export for GradientBoosting classifiers is not supported; "
+                "use GradientBoostingRegressor or a shinrin forest model."
             )
-            true_leafs.append(int(tl))
-            false_ids.append(
-                entry_of_leaf[r_orig] + entry_off if fl else rank[r_orig] + node_off
-            )
-            false_leafs.append(int(fl))
+        base_value = float(np.ravel(estimator.init_.constant_)[0])
+    else:
+        learning_rate = 1.0
+        base_value = 0.0
 
-        leaf_vals = values[leaf_idx]
-        for k in range(len(leaf_idx)):
-            w = float(leaf_vals[k, target] if leaf_vals.ndim == 2 else leaf_vals[k])
-            leaf_w.append(w * scale)
-            leaf_t.append(target)
+    builder = _EnsembleBuilder()
+    for tid, tree in enumerate(trees):
+        builder.add_tree(tid, tree)
 
-        roots.append(node_off)
-        node_off += n_interior
-        entry_off += len(leaf_idx)
+    inputs = [
+        helper.make_tensor_value_info("X", TensorProto.FLOAT, [None, n_features_in])
+    ]
+    opset_imports = [
+        helper.make_opsetid("", target_opset),
+        helper.make_opsetid("ai.onnx.ml", AI_ONNX_ML_OPSET),
+    ]
 
-    return {
-        "name": "shinrin_tree_ensemble",
-        "domain": "ai.onnx.ml",
-        "tree_roots": np.array(roots, dtype=np.int64),
-        "nodes_featureids": np.array(feats, dtype=np.int64),
-        "nodes_splits": numpy_helper.from_array(np.array(splits, dtype=dt), "splits"),
-        # 0 encodes BRANCH_LEQ ("x <= split" takes the true branch), which
-        # matches sklearn's children_left/children_right semantics.
-        "nodes_modes": numpy_helper.from_array(
-            np.zeros(len(feats), dtype=np.uint8), "modes"
+    common_attrs = {
+        "nodes_treeids": np.array(builder.nodes_treeids, dtype=np.int64),
+        "nodes_nodeids": np.array(builder.nodes_nodeids, dtype=np.int64),
+        "nodes_featureids": np.array(builder.nodes_featureids, dtype=np.int64),
+        "nodes_modes": builder.nodes_modes,
+        "nodes_values": np.array(builder.nodes_values, dtype=np.float32),
+        "nodes_truenodeids": np.array(builder.nodes_truenodeids, dtype=np.int64),
+        "nodes_falsenodeids": np.array(builder.nodes_falsenodeids, dtype=np.int64),
+        "nodes_missing_value_tracks_true": np.zeros(
+            len(builder.nodes_modes), dtype=np.int64
         ),
-        "nodes_truenodeids": np.array(true_ids, dtype=np.int64),
-        "nodes_trueleafs": np.array(true_leafs, dtype=np.int64),
-        "nodes_falsenodeids": np.array(false_ids, dtype=np.int64),
-        "nodes_falseleafs": np.array(false_leafs, dtype=np.int64),
-        "nodes_missing_value_tracks_true": np.zeros(len(feats), dtype=np.int64),
-        "leaf_weights": numpy_helper.from_array(np.array(leaf_w, dtype=dt), "leaf_w"),
-        "leaf_targetids": np.array(leaf_t, dtype=np.int64),
-        "n_targets": max(1, n_targets),
-        "aggregate_function": 1,  # SUM
-        "post_transform": 0,  # NONE
     }
+
+    if not is_classification:
+        target_treeids, target_nodeids, target_weights = [], [], []
+        for tid, leaves in enumerate(builder.leaves_by_tree):
+            for nid, vec in leaves.items():
+                target_treeids.append(tid)
+                target_nodeids.append(nid)
+                target_weights.append(float(vec[0]))
+        attrs = {
+            **common_attrs,
+            "n_targets": 1,
+            # GB sums lr-scaled trees; single trees emit one SUM entry;
+            # forests average their trees' outputs.
+            "aggregate_function": ("AVERAGE" if n_trees > 1 and not is_gb else "SUM"),
+            "post_transform": "NONE",
+            "target_treeids": np.array(target_treeids, dtype=np.int64),
+            "target_nodeids": np.array(target_nodeids, dtype=np.int64),
+            "target_ids": np.zeros(len(target_weights), dtype=np.int64),
+            "target_weights": np.array(target_weights, dtype=np.float32)
+            * np.float32(learning_rate),
+        }
+        node = helper.make_node(
+            "TreeEnsembleRegressor",
+            inputs=["X"],
+            outputs=["te_out"],
+            domain="ai.onnx.ml",
+            **attrs,
+        )
+        nodes = [node]
+        initializers = [helper.make_tensor("neg1", TensorProto.INT64, [1], [-1])]
+        tail_outputs = [
+            helper.make_tensor_value_info("predictions", TensorProto.FLOAT, [None])
+        ]
+        if base_value != 0.0:
+            initializers.append(
+                helper.make_tensor(
+                    "base_value", TensorProto.FLOAT, [], [np.float32(base_value)]
+                )
+            )
+            nodes.append(helper.make_node("Add", ["te_out", "base_value"], ["te_base"]))
+            reshape = helper.make_node("Reshape", ["te_base", "neg1"], ["predictions"])
+        else:
+            reshape = helper.make_node("Reshape", ["te_out", "neg1"], ["predictions"])
+        nodes.append(reshape)
+        graph = helper.make_graph(
+            nodes,
+            f"{name}_graph",
+            inputs,
+            tail_outputs,
+            initializer=initializers,
+        )
+        model = helper.make_model(
+            graph, opset_imports=opset_imports, producer_name=name, ir_version=8
+        )
+        return model
+
+    # Classification: each leaf contributes its normalized class distribution;
+    # summed over trees this yields the averaged probabilities. post_transform
+    # NONE keeps them normalized since every tree's vector sums to 1.
+    class_treeids, class_nodeids, class_ids, class_weights = [], [], [], []
+    scale = 1.0 / n_trees
+    for tid, leaves in enumerate(builder.leaves_by_tree):
+        for nid, counts in leaves.items():
+            total = float(counts.sum())
+            probs = (
+                counts / total if total > 0 else np.full_like(counts, 1.0 / n_classes)
+            )
+            for k in range(n_classes):
+                class_treeids.append(tid)
+                class_nodeids.append(nid)
+                class_ids.append(k)
+                class_weights.append(float(probs[k]) * scale)
+
+    classes = np.asarray(getattr(estimator, "classes_", np.arange(n_classes)))
+    attrs = {
+        **common_attrs,
+        "class_treeids": np.array(class_treeids, dtype=np.int64),
+        "class_nodeids": np.array(class_nodeids, dtype=np.int64),
+        "class_ids": np.array(class_ids, dtype=np.int64),
+        "class_weights": np.array(class_weights, dtype=np.float32),
+        "post_transform": "NONE",
+    }
+    if classes.shape[0] == n_classes:
+        if np.issubdtype(classes.dtype, np.number):
+            attrs["classlabels_int64s"] = classes.astype(np.int64)
+            labels_dtype = TensorProto.INT64
+        else:
+            attrs["classlabels_strings"] = np.array([str(c) for c in classes], object)
+            labels_dtype = TensorProto.STRING
+    else:  # pragma: no cover - classes_ always matches n_classes when fitted
+        labels_dtype = TensorProto.INT64
+
+    node = helper.make_node(
+        "TreeEnsembleClassifier",
+        inputs=["X"],
+        outputs=["te_labels", "probabilities"],
+        domain="ai.onnx.ml",
+        **attrs,
+    )
+    # ORT derives the ensemble's own label output with the skl2onnx binary
+    # convention (score > 0), which disagrees with argmax over plain
+    # probability weights. Ignore it and derive labels from the exact
+    # averaged probabilities instead.
+    if np.issubdtype(classes.dtype, np.number):
+        _add_i64_init = helper.make_tensor(
+            "classes",
+            TensorProto.INT64,
+            list(classes.shape),
+            classes.astype(np.int64).ravel(),
+        )
+        labels_dtype = TensorProto.INT64
+    else:
+        _add_i64_init = helper.make_tensor(
+            "classes",
+            TensorProto.STRING,
+            list(classes.shape),
+            np.array([str(c) for c in classes], object).ravel(),
+        )
+        labels_dtype = TensorProto.STRING
+    initializers = [_add_i64_init]
+    nodes = [
+        node,
+        helper.make_node("ArgMax", ["probabilities"], ["amax"], axis=1, keepdims=0),
+        helper.make_node("Unsqueeze", ["amax", "cls_ax"], ["amax4g"]),
+        helper.make_node("Gather", ["classes", "amax4g"], ["labels2d"], axis=0),
+        helper.make_node("Squeeze", ["labels2d", "cls_ax"], ["labels"]),
+    ]
+    initializers.append(helper.make_tensor("cls_ax", TensorProto.INT64, [1], [1]))
+    graph = helper.make_graph(
+        nodes,
+        f"{name}_graph",
+        inputs,
+        [
+            helper.make_tensor_value_info("labels", labels_dtype, [None]),
+            helper.make_tensor_value_info(
+                "probabilities", TensorProto.FLOAT, [None, n_classes]
+            ),
+        ],
+        initializer=initializers,
+    )
+    model = helper.make_model(
+        graph, opset_imports=opset_imports, producer_name=name, ir_version=8
+    )
+    return model
+
+
+# ---------------------------------------------------------------------------
+# Routing
+# ---------------------------------------------------------------------------
 
 
 def _is_tabm_estimator(estimator) -> bool:
@@ -197,80 +359,72 @@ def to_onnx(
     X=None,
     feature_names=None,
     class_names=None,
-    name="ShinrinTree",
+    name="ShinrinModel",
     target_opset=None,
+    quantile=None,
 ):
-    """Convert a fitted shinrin tree, forest, or TabM model to ONNX format.
+    """Convert a fitted shinrin model to ONNX format.
 
     Parameters
     ----------
-    estimator : fitted tree, forest, or TabM estimator
-        The model to export. Must have ``tree_`` (single tree),
-        ``estimators_`` (forest) attribute, or be a fitted
-        :class:`~shinrin.tabm.TabMClassifier` /
-        :class:`~shinrin.tabm.TabMRegressor`.
+    estimator : fitted shinrin estimator
+        The model to export. See the module docstring for supported families.
     X : ndarray of shape (n_samples, n_features), optional
-        Training data used to infer input shape and dtype.
-        If not provided, defaults to 4 features with float64 dtype.
+        Training-like data used to infer the number of features. The exported
+        graph always accepts float32 tensors with a dynamic batch dimension.
     feature_names : list of str, optional
-        Names of input features. Defaults to ["x0", "x1", ...].
+        Names of input features; stored as model metadata.
     class_names : list of str, optional
-        Class names for classification models.
+        Class names for classification models; when provided the ``labels``
+        output yields these names instead of integer class values.
     name : str
-        Name of the ONNX model. Defaults to "ShinrinTree".
+        Name of the ONNX model.
     target_opset : int, optional
-        ONNX opset version. Defaults to 15. Tree/forest exports require
-        ``target_opset >= 15`` and emit nodes from ``ai.onnx.ml`` opset 5
-        (the standalone ``TreeEnsemble`` operator), so runtimes must
-        support that opset.
+        Default-domain opset version (default 15).
+    quantile : int, optional
+        For quantile models: quantile (0-100) baked into the exported graph.
+        Required for quantile estimators, ignored elsewhere.
 
     Returns
     -------
     onnx.ModelProto
-        The ONNX model representation.
-
-        Tree/forest graphs expose the following outputs (float32 or
-        float64, matching the dtype of ``X``):
-
-        - regression: ``predictions`` of shape ``(n_samples,)``
-        - classification: ``probabilities`` of shape
-          ``(n_samples, n_classes)`` plus integer ``labels``
-          (or string labels when ``class_names`` is provided)
-
-        TabM graphs are always float32; see
-        :func:`shinrin._tabm_onnx.tabm_to_onnx`.
 
     Raises
     ------
     ValueError
-        If the estimator is not fitted or is not a tree-based model.
+        If the estimator is not fitted or is not a supported model.
+    NotImplementedError
+        For models without an ONNX representation (TabICL).
     ImportError
-        If onnx package is not installed.
+        If the onnx package is not installed.
 
     Examples
     --------
-    >>> from shinrin import MondrianTreeRegressor
+    >>> from shinrin import MondrianForestRegressor
     >>> from shinrin.onnx import to_onnx
     >>> import numpy as np
     >>> X = np.random.randn(100, 4).astype(np.float32)
     >>> y = np.random.randn(100)
-    >>> tree = MondrianTreeRegressor(random_state=0)
-    >>> tree.fit(X, y)
-    >>> onnx_model = to_onnx(tree, X)
+    >>> forest = MondrianForestRegressor(random_state=0).fit(X, y)
+    >>> onnx_model = to_onnx(forest, X)
     """
-    try:
-        from onnx import (
-            TensorProto,
-            helper,
-            numpy_helper,
-        )
-    except ImportError:
-        raise ImportError(
-            "onnx is required for ONNX export. Install it with: pip install onnx"
-        )
+    _require_onnx()
 
-    # Route TabM models to the dedicated exporter (self-contained graph with
-    # preprocessing baked in; no ai.onnx.ml ops).
+    if X is not None:
+        X = np.asarray(X)
+        if X.ndim != 2:
+            raise ValueError(f"X must be 2-dimensional, got ndim={X.ndim}")
+        n_features_in: int | None = X.shape[1]
+    else:
+        n_features_in = getattr(estimator, "n_features_in_", None)
+
+    if feature_names is None and n_features_in is not None:
+        feature_names = [f"x{i}" for i in range(n_features_in)]
+
+    if target_opset is None:
+        target_opset = 15
+
+    # --- family routing -------------------------------------------------------
     if _is_tabm_estimator(estimator):
         from shinrin._tabm_onnx import tabm_to_onnx
 
@@ -283,278 +437,156 @@ def to_onnx(
             target_opset=target_opset,
         )
 
-    if target_opset is None:
-        target_opset = 15
-    if target_opset < 15:
-        raise ValueError(f"Tree/forest export requires opset >= 15, got {target_opset}")
-
-    # Infer input shape and dtype
-    if X is not None:
-        X = np.asarray(X)
-        n_features = X.shape[1]
-        input_dtype = np.dtype(X.dtype).type
-    else:
-        n_features = 4
-        input_dtype = np.float64
-
-    if feature_names is None:
-        feature_names = [f"x{i}" for i in range(n_features)]
-
-    # Collect per-tree info dicts plus estimator-level metadata.
-    if hasattr(estimator, "tree_"):
-        infos = [_tree_info(estimator)]
-        is_gb = False
-    elif hasattr(estimator, "estimators_"):
-        estimators_attr = estimator.estimators_
-        is_2d = hasattr(estimators_attr, "ndim") and estimators_attr.ndim > 1
-        first_tree = estimators_attr[0][0] if is_2d else estimators_attr[0]
-        if not hasattr(first_tree, "tree_"):
-            raise ValueError("Forest estimators must contain tree models.")
-        if is_2d:
-            # scikit-learn gradient boosting: one regressor tree per stage
-            # (the per-class columns are collected separately below).
-            infos = [_tree_info(row[0]) for row in estimators_attr]
-        else:
-            infos = [_tree_info(t) for t in estimators_attr]
-        # Plain forests always use a 1D ``estimators_``; 2D marks boosted.
-        is_gb = is_2d
-    else:
-        raise ValueError(
-            "Estimator must have a 'tree_' attribute (single tree) or "
-            "'estimators_' attribute (forest)."
-        )
-
-    learning_rate = float(getattr(estimator, "learning_rate", 1.0))
-    classes = getattr(estimator, "classes_", None)
-    if classes is not None and np.asarray(classes).size > 1:
-        is_regression = False
-        n_classes = int(np.asarray(classes).size)
-    else:
-        n_classes = max(info["n_classes"] for info in infos)
-        is_regression = n_classes == 1
-
-    onnx_dtype = _onnx_dtype(input_dtype)
-    input_tensor = helper.make_tensor_value_info("X", onnx_dtype, [None, n_features])
-    graph_nodes: list = []
-    initializers: list = []
-    outputs: list = []
-
-    def _add_labels_tail(prob_name: str) -> None:
-        graph_nodes.append(
-            helper.make_node("ArgMax", [prob_name], ["label_idx"], axis=1, keepdims=0)
-        )
-        if class_names is not None:
-            names = np.array([str(c) for c in class_names], dtype=np.str_)
-            initializers.append(numpy_helper.from_array(names, "class_names"))
-            graph_nodes.append(
-                helper.make_node(
-                    "Gather", ["class_names", "label_idx"], ["labels"], axis=0
-                )
-            )
-            outputs.append(
-                helper.make_tensor_value_info("labels", TensorProto.STRING, [None])
-            )
-        else:
-            graph_nodes.append(helper.make_node("Identity", ["label_idx"], ["labels"]))
-            outputs.append(
-                helper.make_tensor_value_info("labels", TensorProto.INT64, [None])
-            )
-
-    # Constant base prediction of boosted ensembles (None for forests).
-    # ``_raw_predict_init`` returns sklearn's raw-space init: the target
-    # mean for regressors, the prior log-odds for binary classifiers and
-    # the centered log-prior vector for multi-class classifiers.
-    base_values: np.ndarray | None = None
-    if is_gb:
-        probe_row = (
-            np.zeros((1, n_features), dtype=input_dtype)
-            if X is None
-            else X[:1].astype(input_dtype, copy=False)
-        )
-        if hasattr(estimator, "_raw_predict_init"):
-            base_values = np.asarray(
-                estimator._raw_predict_init(probe_row), dtype=input_dtype
-            ).ravel()
-        elif hasattr(estimator, "init_"):
-            base_values = np.asarray(
-                estimator.init_.predict(probe_row), dtype=input_dtype
-            ).ravel()
-
-    def _emit_tree_nodes(
-        entry_sets: list[list[tuple[dict, int]]],
-        n_targets: int,
-        scale: float,
-        combine: str,
-    ) -> str:
-        """One TreeEnsemble node per tree, combined into a single tensor.
-
-        A single node per tree preserves the one-node-per-tree contract
-        relied upon by :mod:`shinrin.onnx_import`. Leaf weights are stored
-        unscaled unless ``scale`` carries a boosting learning rate (which is
-        part of a stage's own semantics). Per-tree outputs merge through an
-        Add chain; ``combine="mean"`` divides the sum by the tree count so
-        downstream consumers observe true per-tree prediction values.
-        """
-        outs = []
-        for k, entries in enumerate(entry_sets):
-            attrs = _ensemble_attributes(entries, n_targets, input_dtype, scale)
-            attrs["name"] = f"tree_{k}"
-            out = f"tree_out_{k}"
-            graph_nodes.append(helper.make_node("TreeEnsemble", ["X"], [out], **attrs))
-            outs.append(out)
-        cur = outs[0]
-        for k in range(1, len(outs)):
-            nxt = f"tree_add_{k}"
-            graph_nodes.append(helper.make_node("Add", [cur, outs[k]], [nxt]))
-            cur = nxt
-        if combine == "mean" and len(outs) > 1:
-            div_name = f"tree_div_{len(outs)}"
-            initializers.append(
-                numpy_helper.from_array(
-                    np.array(float(len(outs)), dtype=input_dtype), div_name
-                )
-            )
-            final = "tree_mean"
-            graph_nodes.append(helper.make_node("Div", [cur, div_name], [final]))
-            cur = final
-        return cur
-
-    if is_regression:
-        # Forests average their trees; boosted ensembles sum
-        # learning-rate-scaled stages.
-        raw = _emit_tree_nodes(
-            [[(info, 0)] for info in infos],
-            1,
-            learning_rate if is_gb else 1.0,
-            "sum" if is_gb else "mean",
-        )
-        if base_values is not None:
-            initializers.append(numpy_helper.from_array(base_values, "base"))
-            graph_nodes.append(helper.make_node("Add", [raw, "base"], ["offset"]))
-            raw = "offset"
-        initializers.append(
-            numpy_helper.from_array(np.array([1], dtype=np.int64), "ax_last")
-        )
-        graph_nodes.append(
-            helper.make_node("Squeeze", [raw, "ax_last"], ["predictions"])
-        )
-        outputs.append(helper.make_tensor_value_info("predictions", onnx_dtype, [None]))
-        task, encoding = "regression", _ENCODING_MEAN
-
-    elif is_gb:
-        # Boosted classifiers emit per-class log-odds columns.
-        encoding = _ENCODING_LOGIT
-        if n_classes == 2:
-            raw = _emit_tree_nodes(
-                [[(info, 0)] for info in infos], 1, learning_rate, "sum"
-            )
-            if base_values is not None:
-                initializers.append(numpy_helper.from_array(base_values[:1], "base"))
-                graph_nodes.append(helper.make_node("Add", [raw, "base"], ["offset"]))
-                raw = "offset"
-            graph_nodes.append(helper.make_node("Sigmoid", [raw], ["p1"]))
-            initializers.append(
-                numpy_helper.from_array(np.ones(1, dtype=input_dtype), "one")
-            )
-            graph_nodes.append(helper.make_node("Sub", ["one", "p1"], ["p0"]))
-            graph_nodes.append(
-                helper.make_node("Concat", ["p0", "p1"], ["probabilities"], axis=1)
-            )
-        else:
-            # One node per boosting stage; each stage carries n_classes
-            # trees whose log-odds feed distinct targets.
-            stage_entries = [
-                [(_tree_info(tree), c) for c, tree in enumerate(row)]
-                for row in estimator.estimators_
-            ]
-            raw = _emit_tree_nodes(stage_entries, n_classes, learning_rate, "sum")
-            if base_values is not None:
-                initializers.append(numpy_helper.from_array(base_values, "base"))
-                graph_nodes.append(helper.make_node("Add", [raw, "base"], ["offset"]))
-                raw = "offset"
-            graph_nodes.append(
-                helper.make_node("Softmax", [raw], ["probabilities"], axis=1)
-            )
-        outputs.append(
-            helper.make_tensor_value_info(
-                "probabilities", onnx_dtype, [None, n_classes]
-            )
-        )
-        task = "classification-logits"
-        _add_labels_tail("probabilities")
-
-    else:
-        # Plain trees/forests carry normalized class probabilities at their
-        # leaves; every tree is replicated once per class so each leaf
-        # contributes exactly one (probability, target) tuple.
-        prob_out = _emit_tree_nodes(
-            [[(info, c) for c in range(n_classes)] for info in infos],
-            n_classes,
-            1.0,
-            "mean",
-        )
-        graph_nodes.append(helper.make_node("Identity", [prob_out], ["probabilities"]))
-        outputs.append(
-            helper.make_tensor_value_info(
-                "probabilities", onnx_dtype, [None, n_classes]
-            )
-        )
-        task, encoding = "classification", _ENCODING_PROBS
-        _add_labels_tail("probabilities")
-
-    graph = helper.make_graph(
-        graph_nodes,
-        f"{name}_graph",
-        [input_tensor],
-        outputs,
-        initializer=initializers,
-    )
-    model = helper.make_model(
-        graph,
-        opset_imports=[
-            helper.make_opsetid("", target_opset),
-            helper.make_opsetid("ai.onnx.ml", TREE_ENSEMBLE_OPSET),
-        ],
-        producer_name=name,
-        ir_version=8,
-    )
-    props = {
-        _TASK_PROP: task,
-        _ENCODING_PROP: encoding,
-    }
-    if base_values is not None:
-        props[_BASE_VALUES_PROP] = ",".join(repr(float(v)) for v in base_values)
-    helper.set_model_props(model, props)
-    return model
-
-
-def _onnx_dtype(dtype):
-    """Map a numpy dtype (class or instance) to an ONNX TensorProto dtype."""
     try:
-        from onnx import TensorProto
-    except ImportError:  # pragma: no cover
-        TensorProto = None
+        from shinrin.tabicl import TabICLClassifier, TabICLRegressor
 
-    # Normalize through np.dtype so both ``np.float32`` and
-    # ``np.dtype("float32")`` resolve to the same entry.
-    mapping: dict[str, Any] = {
-        "float16": "FLOAT16",
-        "float32": "FLOAT",
-        "float64": "DOUBLE",
-        "int8": "INT8",
-        "int16": "INT16",
-        "int32": "INT32",
-        "int64": "INT64",
-        "uint8": "UINT8",
-        "uint16": "UINT16",
-        "uint32": "UINT32",
-        "uint64": "UINT64",
-        "bool": "BOOL",
+        if isinstance(estimator, (TabICLClassifier, TabICLRegressor)):
+            raise NotImplementedError(
+                "ONNX export is not supported for TabICL models. TabICL "
+                "performs in-context learning with a pretrained transformer, "
+                "an ensemble generator and KV caching; there is no faithful "
+                "static-graph representation yet."
+            )
+    except ImportError:
+        pass
+
+    try:
+        from shinrin.mondrian import (
+            MondrianForestClassifier,
+            MondrianForestRegressor,
+            MondrianTreeClassifier,
+            MondrianTreeRegressor,
+        )
+
+        if isinstance(
+            estimator,
+            (
+                MondrianTreeRegressor,
+                MondrianTreeClassifier,
+                MondrianForestRegressor,
+                MondrianForestClassifier,
+            ),
+        ):
+            from shinrin._mondrian_onnx import mondrian_to_onnx
+
+            return mondrian_to_onnx(
+                estimator,
+                feature_names=feature_names,
+                class_names=class_names,
+                name=name,
+                target_opset=target_opset,
+            )
+    except ImportError:  # pragma: no cover - sklearn missing
+        pass
+
+    from shinrin._skgarden.quantile.ensemble import BaseForestQuantileRegressor
+    from shinrin._skgarden.quantile.tree import BaseTreeQuantileRegressor
+
+    if isinstance(estimator, BaseTreeQuantileRegressor):
+        from shinrin._quantile_onnx import quantile_tree_to_onnx
+
+        return quantile_tree_to_onnx(
+            estimator,
+            quantile=quantile,
+            feature_names=feature_names,
+            name=name,
+            target_opset=target_opset,
+        )
+    if isinstance(estimator, BaseForestQuantileRegressor):
+        from shinrin._quantile_onnx import quantile_forest_to_onnx
+
+        return quantile_forest_to_onnx(
+            estimator,
+            quantile=quantile,
+            feature_names=feature_names,
+            name=name,
+            target_opset=target_opset,
+        )
+
+    try:
+        from shinrin.mlp import MLPClassifier, MLPRegressor
+
+        if isinstance(estimator, (MLPClassifier, MLPRegressor)):
+            from shinrin._mlp_onnx import mlp_to_onnx
+
+            return mlp_to_onnx(
+                estimator,
+                X=X,
+                feature_names=feature_names,
+                class_names=class_names,
+                name=name,
+                target_opset=target_opset,
+            )
+    except ImportError:  # pragma: no cover - sklearn missing
+        pass
+
+    try:
+        from shinrin._corels.corels import CorelsClassifier
+
+        if isinstance(estimator, CorelsClassifier):
+            from shinrin._rules_onnx import corels_to_onnx
+
+            return corels_to_onnx(
+                estimator,
+                feature_names=feature_names,
+                class_names=class_names,
+                name=name,
+                target_opset=target_opset,
+            )
+    except ImportError:  # pragma: no cover - sklearn missing
+        pass
+
+    try:
+        from shinrin._gosdt.classifier import GOSDTClassifier
+
+        if isinstance(estimator, GOSDTClassifier):
+            from shinrin._rules_onnx import gosdt_to_onnx
+
+            return gosdt_to_onnx(
+                estimator,
+                feature_names=feature_names,
+                class_names=class_names,
+                name=name,
+                target_opset=target_opset,
+            )
+    except ImportError:  # pragma: no cover
+        pass
+
+    try:
+        from shinrin._ordt import OrdtClassifier
+        from shinrin._skrules.skope_rules import SkopeRules
+
+        if isinstance(estimator, OrdtClassifier):
+            from shinrin._rules_onnx import ordt_to_onnx
+
+            return ordt_to_onnx(
+                estimator,
+                feature_names=feature_names,
+                class_names=class_names,
+                name=name,
+                target_opset=target_opset,
+            )
+        if isinstance(estimator, SkopeRules):
+            from shinrin._rules_onnx import skope_rules_to_onnx
+
+            return skope_rules_to_onnx(
+                estimator,
+                feature_names=feature_names,
+                name=name,
+                target_opset=target_opset,
+            )
+    except ImportError:  # pragma: no cover - pandas missing
+        pass
+
+    model = _generic_to_onnx(estimator, feature_names, name, target_opset)
+    props = {
+        "shinrin_version": "0.2.0",
+        "model_type": type(estimator).__name__,
     }
-    type_name = mapping.get(np.dtype(dtype).name, "FLOAT")
-    if TensorProto is not None:
-        return getattr(TensorProto, type_name)
-    return type_name
+    if feature_names is not None:
+        props["feature_names"] = ",".join(str(f) for f in feature_names)
+    _set_props(model, props)
+    return model
 
 
 def save_onnx(estimator, path, X=None, feature_names=None, class_names=None):
@@ -562,12 +594,12 @@ def save_onnx(estimator, path, X=None, feature_names=None, class_names=None):
 
     Parameters
     ----------
-    estimator : fitted tree, forest, or TabM estimator
+    estimator : fitted shinrin estimator
         The model to export.
     path : str
         File path to save the ONNX model.
     X : ndarray, optional
-        Training data for shape inference.
+        Training-like data for shape inference.
     feature_names : list of str, optional
         Feature names.
     class_names : list of str, optional
@@ -579,6 +611,5 @@ def save_onnx(estimator, path, X=None, feature_names=None, class_names=None):
         feature_names=feature_names,
         class_names=class_names,
     )
-    model_str = model.SerializeToString()
     with open(path, "wb") as f:
-        f.write(model_str)
+        f.write(model.SerializeToString())

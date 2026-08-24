@@ -50,203 +50,122 @@ _MIN_SAMPLES_FOR_STATS = 300
 # ===================================================================
 
 
-def _attr_ints(attrs: dict, name: str) -> np.ndarray:
-    return np.array(attrs[name].ints, dtype=np.int64)
+# Standard ai.onnx.ml ensemble ops emitted by shinrin.onnx.to_onnx.
+_STANDARD_ENSEMBLE_OPS = ("TreeEnsembleRegressor", "TreeEnsembleClassifier")
 
 
-def _attr_tensor(attrs: dict, name: str) -> np.ndarray:
-    """Read a tensor-typed node attribute into numpy."""
-    from onnx import numpy_helper
-
-    return numpy_helper.to_array(attrs[name].t)
+def _find_ensemble_nodes(onnx_model: ModelProto, op_types) -> list:
+    """Return graph nodes whose op_type is in ``op_types``."""
+    return [n for n in onnx_model.graph.node if n.op_type in op_types]
 
 
-def _model_props(model) -> dict[str, str]:
-    return {p.key: p.value for p in model.metadata_props}
+def _attrs_by_name(node):
+    return {a.name: a for a in node.attribute}
 
 
-def _parse_v5_attrs(attrs: dict) -> dict:
-    """Collect ``ai.onnx.ml.TreeEnsemble`` (opset >= 5) attributes."""
-    return {
-        "roots": _attr_ints(attrs, "tree_roots"),
-        "feature": _attr_ints(attrs, "nodes_featureids"),
-        "threshold": _attr_tensor(attrs, "nodes_splits").astype(np.float64),
-        "true_ids": _attr_ints(attrs, "nodes_truenodeids"),
-        "true_leafs": _attr_ints(attrs, "nodes_trueleafs"),
-        "false_ids": _attr_ints(attrs, "nodes_falsenodeids"),
-        "false_leafs": _attr_ints(attrs, "nodes_falseleafs"),
-        "leaf_weights": _attr_tensor(attrs, "leaf_weights").astype(np.float64),
-        "leaf_targetids": _attr_ints(attrs, "leaf_targetids"),
-    }
+def _extract_standard_tree(onnx_model: ModelProto, tree_id: int) -> dict:
+    """Extract one tree from a standard ``ai.onnx.ml`` ensemble node.
 
-
-def _walk_v5_parallel(
-    parsed: dict,
-    roots: list[int],
-) -> tuple[list[tuple[int, float]], list[Any], dict[int, tuple[int, int]]]:
-    """Walk all per-class copies of one tree simultaneously.
-
-    Copies of the same tree share their split structure; at each recursion
-    step the current node ids (one per copy) occupy corresponding
-    positions. Leaves collect ``{target: weight}`` maps.
-
-    Returns ``(topology, values, children)`` where ``topology`` holds
-    pre-order ``(feature, threshold)`` tuples (-2 marks leaves), ``values``
-    holds either ``None`` (interior) or a target->weight dict per node, and
-    ``children`` maps interior positions to ``(true_ref, false_ref)``.
+    Handles the merged single-node layout produced by ``shinrin.onnx``
+    (all trees inside one ``nodes_treeids``-indexed node). Leaf marker
+    conventions match the legacy parser: ``feature == -2`` marks leaves,
+    children are ``-1`` there, and ``value`` holds regression targets or
+    canonical classification scores (log-odds / log-probs).
     """
-    topology: list[tuple[int, float]] = []
-    # entries are None for interior nodes, {target: weight} for leaves
-    values: list[Any] = []
-    children: dict[int, tuple[int, int]] = {}
+    candidates = [
+        n
+        for n in _find_ensemble_nodes(onnx_model, _STANDARD_ENSEMBLE_OPS)
+        if tree_id in list(_attrs_by_name(n)["nodes_treeids"].ints)
+    ]
+    if not candidates:
+        raise ValueError(
+            f"Tree with id {tree_id} not found in ONNX model "
+            f"(no standard ensemble node contains it)"
+        )
+    node = candidates[0]
+    attrs = _attrs_by_name(node)
 
-    def visit(nodes: tuple[int, ...], is_leaf: bool) -> int:
-        nid0 = nodes[0]
-        idx = len(topology)
-        if is_leaf:
-            weights: dict[int, float] = {}
-            for nid in nodes:
-                w = float(parsed["leaf_weights"][nid])
-                t = int(parsed["leaf_targetids"][nid])
-                if t in weights and weights[t] != w:
-                    raise ValueError("Inconsistent leaf weights across class copies")
-                weights[t] = w
-            topology.append((-2, 0.0))
-            values.append(weights)
-            return idx
-        feat0 = int(parsed["feature"][nid0])
-        thr0 = float(parsed["threshold"][nid0])
-        tl0 = bool(parsed["true_leafs"][nid0])
-        fl0 = bool(parsed["false_leafs"][nid0])
-        for nid in nodes[1:]:
-            if (
-                int(parsed["feature"][nid]) != feat0
-                or float(parsed["threshold"][nid]) != thr0
-                or bool(parsed["true_leafs"][nid]) != tl0
-                or bool(parsed["false_leafs"][nid]) != fl0
-            ):
-                raise ValueError(
-                    "Per-class tree copies differ in structure; cannot merge"
-                )
-        topology.append((feat0, thr0))
-        values.append(None)
-        true_ref = visit(tuple(int(parsed["true_ids"][n]) for n in nodes), tl0)
-        false_ref = visit(tuple(int(parsed["false_ids"][n]) for n in nodes), fl0)
-        children[idx] = (true_ref, false_ref)
-        return idx
+    treeids = np.array(attrs["nodes_treeids"].ints, dtype=np.int64)
+    sel = np.flatnonzero(treeids == tree_id)
+    nodeids = np.array(attrs["nodes_nodeids"].ints, dtype=np.int64)[sel]
+    order = np.argsort(nodeids)
+    sel, nodeids = sel[order], nodeids[order]
 
-    visit(tuple(roots), False)
-    return topology, values, children
+    modes_all = [s.decode() for s in attrs["nodes_modes"].strings]
+    modes = [modes_all[i] for i in sel]
+    internal = np.array([m != "LEAF" for m in modes], dtype=bool)
 
+    featureids = np.array(attrs["nodes_featureids"].ints, dtype=np.int64)[sel]
+    values = np.array(attrs["nodes_values"].floats, dtype=np.float64)[sel]
+    truenodeids = np.array(attrs["nodes_truenodeids"].ints, dtype=np.int64)[sel]
+    falsenodeids = np.array(attrs["nodes_falsenodeids"].ints, dtype=np.int64)[sel]
 
-def _extract_v5_tree(parsed: dict, task: str | None) -> tuple[dict, str]:
-    """Rebuild a sklearn-contract tree-info dict from parsed v5 attributes.
+    feature = np.where(internal, featureids, -2).astype(np.int64)
+    threshold = np.where(internal, values, -2.0).astype(np.float64)
+    left_child = np.where(internal, truenodeids, -1).astype(np.int64)
+    right_child = np.where(internal, falsenodeids, -1).astype(np.int64)
 
-    Returns ``(tree_info, encoding)`` where encoding is ``"means"``
-    (regression), ``"probs"`` (plain classification) or ``"logits"``
-    (boosted classification).
-    """
-    topology, values, children = _walk_v5_parallel(
-        parsed, [int(r) for r in parsed["roots"]]
-    )
-
-    n_nodes = len(topology)
-    feature = np.array([e[0] for e in topology], dtype=np.int64)
-    threshold = np.array([e[1] for e in topology], dtype=np.float64)
-    left = np.full(n_nodes, -1, dtype=np.int64)
-    right = np.full(n_nodes, -1, dtype=np.int64)
-    for idx, (t_ref, f_ref) in children.items():
-        left[idx] = t_ref
-        right[idx] = f_ref
-
-    leaf_rows = [i for i, row in enumerate(values) if row is not None]
-    targets = sorted({t for i in leaf_rows for t in values[i]})
-
-    if task == "regression":
+    n_nodes = len(nodeids)
+    if node.op_type == "TreeEnsembleRegressor":
         value = np.zeros(n_nodes, dtype=np.float64)
-        for i in leaf_rows:
-            for w in values[i].values():
-                value[i] += w
-        info = {
-            "feature": feature,
-            "threshold": threshold,
-            "left": left,
-            "right": right,
-            "value": value,
-            "n_classes": np.array([1]),
-        }
-        return info, "means"
+        t_tree = np.array(attrs["target_treeids"].ints, dtype=np.int64)
+        t_node = np.array(attrs["target_nodeids"].ints, dtype=np.int64)
+        t_weight = np.array(attrs["target_weights"].floats, dtype=np.float64)
+        t_sel = t_tree == tree_id
+        value[t_node[t_sel]] = t_weight[t_sel]
+        n_classes_arr = np.array([1])
+    else:
+        c_tree = np.array(attrs["class_treeids"].ints, dtype=np.int64)
+        c_node = np.array(attrs["class_nodeids"].ints, dtype=np.int64)
+        c_ids = np.array(attrs["class_ids"].ints, dtype=np.int64)
+        c_weight = np.array(attrs["class_weights"].floats, dtype=np.float64)
+        c_sel = c_tree == tree_id
+        n_classes = int(c_ids[c_sel].max()) + 1 if c_sel.any() else 1
+        probs = np.zeros((n_nodes, max(n_classes, 2)), dtype=np.float64)
+        probs[c_node[c_sel], c_ids[c_sel]] = c_weight[c_sel]
+        eps = 1e-12
+        if n_classes <= 2:
+            # Binary: store log-odds so sigmoid(logit) recovers P(class 1).
+            logit = np.log((probs[:, 1] + eps) / (probs[:, 0] + eps))
+            value = logit.reshape(-1, 1)
+            n_classes_arr = np.array([2])
+        else:
+            # Multi-class: store log-probs so softmax recovers the rows.
+            value = np.log(probs + eps)
+            n_classes_arr = np.array([n_classes])
 
-    if task == "classification-logits":
-        # Boosted classifiers store per-class log-odds columns.
-        if len(targets) <= 1:
-            col = np.zeros((n_nodes, 1), dtype=np.float64)
-            for i in leaf_rows:
-                for w in values[i].values():
-                    col[i, 0] += w
-            info = {
-                "feature": feature,
-                "threshold": threshold,
-                "left": left,
-                "right": right,
-                "value": col,
-                "n_classes": np.array([2]),
-            }
-            return info, "logits"
-        n_classes = max(targets) + 1
-        mat = np.zeros((n_nodes, n_classes), dtype=np.float64)
-        for i in leaf_rows:
-            for t, w in values[i].items():
-                mat[i, t] = w
-        info = {
-            "feature": feature,
-            "threshold": threshold,
-            "left": left,
-            "right": right,
-            "value": mat,
-            "n_classes": np.array([n_classes]),
-        }
-        return info, "logits"
-
-    # Plain classification exports: normalized class probabilities.
-    n_classes = max(max(targets) + 1, 1)
-    mat = np.zeros((n_nodes, n_classes), dtype=np.float64)
-    for i in leaf_rows:
-        for t, w in values[i].items():
-            mat[i, t] = w
-    info = {
+    return {
         "feature": feature,
         "threshold": threshold,
-        "left": left,
-        "right": right,
-        "value": mat,
-        "n_classes": np.array([n_classes]),
+        "left_child": left_child,
+        "right_child": right_child,
+        "value": value,
+        "n_classes": n_classes_arr,
     }
-    return info, "probs"
 
 
 def _extract_tree_from_onnx_node(onnx_model: ModelProto, tree_id: int) -> dict:
     """Extract a single tree's structure from an ONNX model's TreeEnsemble node.
-
-    Supports both the current export format (standalone
-    ``ai.onnx.ml.TreeEnsemble`` opset >= 5 attributes) and the legacy
-    dialect kept for backwards compatibility with older exports.
 
     Parameters
     ----------
     onnx_model : ModelProto
         The ONNX model containing TreeEnsemble nodes.
     tree_id : int
-        The ID of the tree to extract (one TreeEnsemble node per tree).
+        The ID of the tree to extract (corresponds to nodes_tree_id).
 
     Returns
     -------
     dict
         Dictionary with keys: feature, threshold, left_child, right_child,
-        value, n_classes plus an ``encoding`` key describing how ``value``
-        should be interpreted (``"means"``, ``"probs"``, ``"logits"`` or
-        ``None`` for legacy regression-style extraction).
+        value, n_classes.
     """
+    # Standard-format graphs (single merged ai.onnx.ml ensemble node).
+    if not _find_ensemble_nodes(onnx_model, ("TreeEnsemble",)):
+        return _extract_standard_tree(onnx_model, tree_id)
+
+    # Find the TreeEnsemble node for this tree
+    # For forests, each TreeEnsemble node represents one tree
     tree_nodes = [
         node for node in onnx_model.graph.node if node.op_type == "TreeEnsemble"
     ]
@@ -255,58 +174,66 @@ def _extract_tree_from_onnx_node(onnx_model: ModelProto, tree_id: int) -> dict:
             f"Tree with id {tree_id} not found in ONNX model (found {len(tree_nodes)} trees)"
         )
 
+    tree_node = tree_nodes[tree_id]
+
+    # Extract attributes
     attrs = {}
-    for attr in tree_nodes[tree_id].attribute:
+    for attr in tree_node.attribute:
         attrs[attr.name] = attr
 
-    task = _model_props(onnx_model).get("shinrin_task")
-
-    if "nodes_splits" in attrs:
-        # Current format: standalone TreeEnsemble opset >= 5 attributes.
-        parsed = _parse_v5_attrs(attrs)
-        info, encoding = _extract_v5_tree(parsed, task)
-        # Normalize to the sklearn-contract key names used downstream.
-        info["left_child"] = info.pop("left")
-        info["right_child"] = info.pop("right")
-        info["encoding"] = encoding
-        return info
-
-    # ------------------------------------------------------------------
-    # Legacy dialect (pre-v5 exports).
-    # ------------------------------------------------------------------
     feature = np.array(attrs["nodes_feature_ids"].ints, dtype=np.int64)
     threshold = np.array(attrs["nodes_values"].floats, dtype=np.float64)
     left_child = np.array(attrs["nodes_truenode_ids"].ints, dtype=np.int64)
     right_child = np.array(attrs["nodes_falsenode_ids"].ints, dtype=np.int64)
 
+    # Determine if regression or classification
+    # post_transform is present for both regression and classification,
+    # but regression uses "none" while classification uses "sigmoid" or "softmax"
     post_transform = (
         attrs["post_transform"].s.decode() if "post_transform" in attrs else "none"
     )
     is_classification = post_transform in ("sigmoid", "softmax")
 
+    # Separate thresholds (internal nodes) and leaf values (leaf nodes)
+    # In ONNX, nodes_values contains thresholds for internal nodes and
+    # leaf values for leaf nodes. We need to separate them.
     nodes_values = np.array(attrs["nodes_values"].floats, dtype=np.float64)
 
-    # Separate thresholds (internal nodes) and leaf values (leaf nodes).
+    # Create threshold array: use actual thresholds for internal nodes, -2.0 for leaf nodes
     threshold = np.where(feature == -2, -2.0, nodes_values)
+
+    # Create value array: use leaf values for leaf nodes, 0.0 for internal nodes
     value = np.where(feature == -2, nodes_values, 0.0)
 
-    encoding = None
     if is_classification:
         base_values = np.array(attrs["base_values"].floats, dtype=np.float64)
 
+        # Determine number of classes
         if post_transform == "sigmoid":
+            # Binary classification: base_values has 1 element, but 2 classes
             n_classes = 2
         elif "class_labels" in attrs:
+            # Multi-class with class_labels attribute
             n_classes = len(attrs["class_labels"].ints)
         else:
+            # Multi-class without class_labels: infer from base_values
             n_classes = max(len(base_values), 1)
 
+        # For classification, ONNX stores logits (log-odds) at each node.
+        # We keep the raw log-odds here and convert to pseudo-counts later
+        # in _convert_sklearn_tree_to_mondrian using n_node_samples.
+        # For now, just reshape to (n_nodes, n_classes) format.
         if post_transform == "sigmoid":
+            # Binary: value is 1D log-odds, reshape to (n_nodes, 1)
             value = value.reshape(-1, 1)
-        encoding = "log"
+        else:
+            # Multi-class: value is already (n_nodes, n_classes)
+            pass
 
         n_classes_arr = np.array([n_classes])
     else:
+        # Regression: values are the predicted mean at each node
+        # value already contains leaf values for leaf nodes, 0.0 for internal nodes
         n_classes_arr = np.array([1])
 
     return {
@@ -316,7 +243,6 @@ def _extract_tree_from_onnx_node(onnx_model: ModelProto, tree_id: int) -> dict:
         "right_child": right_child,
         "value": value,
         "n_classes": n_classes_arr,
-        "encoding": encoding,
     }
 
 
@@ -582,7 +508,7 @@ def _convert_sklearn_tree_to_mondrian(
     tree_info: dict,
     X: np.ndarray,
     n_features: int,
-    from_onnx: bool | str = False,
+    from_onnx: bool = False,
 ) -> dict:
     """Convert a sklearn tree structure to Mondrian tree format.
 
@@ -594,12 +520,9 @@ def _convert_sklearn_tree_to_mondrian(
         Training data for computing node samples.
     n_features : int
         Number of features.
-    from_onnx : bool or str
-        Encoding of ``tree_info["value"]`` when the structure originates
-        from an ONNX export: ``"probs"`` for per-leaf normalized class
-        probabilities, ``"logits"`` for log-odds columns (converted to
-        pseudo-counts), and any truthy value for the legacy log-prob
-        interpretation. ``False`` treats values as sklearn class counts.
+    from_onnx : bool
+        If True, tree_info contains log-odds (binary) or log-probs (multi-class)
+        instead of class counts. These will be converted to pseudo-counts.
 
     Returns
     -------
@@ -663,21 +586,12 @@ def _convert_sklearn_tree_to_mondrian(
         value = filled_value.copy()
     else:
         # For classification, value stores class counts (sklearn) or
-        # probabilities / log-odds / log-probs (ONNX). Convert as needed.
-        if from_onnx == "probs":
-            # Current exports: per-leaf normalized class probabilities.
-            prob = raw_value.reshape(-1, n_classes).copy().astype(np.float64)
-            total = n_node_samples.reshape(-1, 1)
-            total[total == 0] = 1.0
-            value = (prob * total).ravel()
-            mean = prob.ravel()
-        elif from_onnx:
-            # Legacy ONNX stores log-odds (binary) or log-probs (multi-class)
+        # log-odds/log-probs (ONNX). Convert as needed.
+        if from_onnx:
+            # ONNX stores log-odds (binary) or log-probs (multi-class)
             # Convert to pseudo-counts using n_node_samples
             logit_or_logprob = raw_value.copy().astype(np.float64)
-            if logit_or_logprob.ndim == 1:
-                logit_or_logprob = logit_or_logprob.reshape(-1, 1)
-            if n_classes == 2 and logit_or_logprob.shape[1] == 1:
+            if n_classes == 2:
                 # Binary: logit shape (n_nodes, 1)
                 prob = 1.0 / (1.0 + np.exp(-logit_or_logprob))
                 # Pseudo-counts: [count_0, count_1]
@@ -734,7 +648,7 @@ def _convert_onnx_tree_to_mondrian(
     tree_id : int
         The tree ID in the ONNX model.
     tree_info : dict
-        Extracted tree structure from ONNX (includes an ``encoding`` key).
+        Extracted tree structure from ONNX.
     X : np.ndarray
         Training data for computing node samples.
 
@@ -744,12 +658,7 @@ def _convert_onnx_tree_to_mondrian(
         Mondrian tree data.
     """
     n_features = X.shape[1]
-    encoding = tree_info.get("encoding")
-    if encoding is None:
-        encoding = True
-    return _convert_sklearn_tree_to_mondrian(
-        tree_info, X, n_features, from_onnx=encoding
-    )
+    return _convert_sklearn_tree_to_mondrian(tree_info, X, n_features, from_onnx=True)
 
 
 # ===================================================================
@@ -762,10 +671,48 @@ def _is_onnx_model(model: Any) -> bool:
     return hasattr(model, "graph") and hasattr(model, "producer_name")
 
 
+def _get_base_values(model: ModelProto) -> float | None:
+    """Return the initial-output constant (GradientBoosting), if present."""
+    # Legacy format: base_values attribute on the custom TreeEnsemble node.
+    for node in _find_ensemble_nodes(model, ("TreeEnsemble",)):
+        for attr in node.attribute:
+            if attr.name == "base_values":
+                vals = np.array(attr.floats, dtype=np.float64)
+                if len(vals):
+                    return float(vals[0])
+        break
+    # Standard format: scalar initializer added to the ensemble output.
+    from onnx import numpy_helper
+
+    initializers = {i.name: i for i in model.graph.initializer}
+    ensemble_out = None
+    for node in _find_ensemble_nodes(model, _STANDARD_ENSEMBLE_OPS):
+        ensemble_out = node.output[0]
+        break
+    if ensemble_out is None:
+        return None
+    for node in model.graph.node:
+        if node.op_type != "Add" or ensemble_out not in list(node.input):
+            continue
+        for name in node.input:
+            if name != ensemble_out and name in initializers:
+                arr = numpy_helper.to_array(initializers[name])
+                if arr.size:
+                    return float(np.ravel(arr)[0])
+    return None
+
+
 def _count_trees_in_onnx(onnx_model: ModelProto) -> int:
     """Count the number of trees in an ONNX model."""
-    # Count TreeEnsemble nodes (each node represents one tree)
-    return sum(1 for node in onnx_model.graph.node if node.op_type == "TreeEnsemble")
+    # Legacy format: one custom TreeEnsemble node per tree.
+    legacy = _find_ensemble_nodes(onnx_model, ("TreeEnsemble",))
+    if legacy:
+        return len(legacy)
+    # Standard format: all trees merged into one nodes_treeids-indexed node.
+    total = set()
+    for node in _find_ensemble_nodes(onnx_model, _STANDARD_ENSEMBLE_OPS):
+        total.update(_attrs_by_name(node)["nodes_treeids"].ints)
+    return len(total)
 
 
 def from_model(
@@ -971,29 +918,18 @@ def _from_model_forest(
         base_tree_cls = MondrianTreeRegressor
 
     # Extract tree count and IDs from ONNX model
-    tree_ids = [
-        i for i, node in enumerate(model.graph.node) if node.op_type == "TreeEnsemble"
-    ]
-
-    # Extract base_values from ONNX model if available (for GradientBoosting).
-    # Current exports record them as model metadata; legacy exports carried
-    # a base_values attribute on the node.
-    base_values: np.ndarray | None = None
-    props = _model_props(model)
-    if "shinrin_base_values" in props:
-        base_values = np.array(
-            [float(v) for v in props["shinrin_base_values"].split(",")],
-            dtype=np.float64,
-        )
+    if _find_ensemble_nodes(model, ("TreeEnsemble",)):
+        # Legacy format: node index == tree id.
+        tree_ids = [
+            i
+            for i, node in enumerate(model.graph.node)
+            if node.op_type == "TreeEnsemble"
+        ]
     else:
-        for node in model.graph.node:
-            if node.op_type == "TreeEnsemble":
-                for attr in node.attribute:
-                    if attr.name == "base_values":
-                        base_values = np.array(attr.floats, dtype=np.float64)
-                        break
-                if base_values is not None:
-                    break
+        tree_ids = list(range(_count_trees_in_onnx(model)))
+
+    # Extract base_values from ONNX model if available (for GradientBoosting)
+    base_values = _get_base_values(model)
 
     # Convert each tree in parallel
     def _convert_single_tree(tree_id: int) -> Any:
@@ -1006,18 +942,14 @@ def _from_model_forest(
             tree_data["value"] = tree_data["value"].copy()
             if is_classifier:
                 # For classification, value is raveled (n_nodes * n_classes,)
-                # Reshape to (n_nodes, n_classes), add the per-class base
-                # log-odds, then ravel again.
+                # Reshape to (n_nodes, n_classes), add base_values to first class, ravel again
                 n_classes_val = int(tree_info["n_classes"][0])
                 value_2d = tree_data["value"].reshape(-1, n_classes_val)
-                if base_values.size == 1:
-                    value_2d[:, 0] += base_values[0]
-                else:
-                    value_2d[:, : base_values.size] += base_values
+                value_2d[:, 0] += base_values
                 tree_data["value"] = value_2d.ravel()
             else:
                 # For regression, value is 1D
-                tree_data["value"] = tree_data["value"] + base_values[0]
+                tree_data["value"] += base_values
 
         # Create the native tree (active backend)
         from shinrin._backend import get_backend_module
@@ -1102,6 +1034,6 @@ def _from_model_forest(
     # For GradientBoosting, sum predictions instead of averaging
     # base_values is non-zero only for GradientBoosting (mean of y)
     # For RandomForest, base_values is 0.0
-    if base_values is not None and bool(np.any(base_values != 0.0)):
+    if base_values is not None and base_values != 0.0:
         forest._onnx_sum_predictions = True
     return forest
