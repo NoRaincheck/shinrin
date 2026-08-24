@@ -155,6 +155,21 @@ def _generic_to_onnx(
     )
     n_trees = len(trees)
 
+    # GradientBoosting ensembles sum learning-rate-scaled tree outputs on top
+    # of the initial constant prediction; forests plain-average raw outputs.
+    is_gb = type(estimator).__name__.startswith("GradientBoosting")
+    if is_gb:
+        learning_rate = float(getattr(estimator, "learning_rate", 1.0))
+        if is_classification:
+            raise NotImplementedError(
+                "ONNX export for GradientBoosting classifiers is not supported; "
+                "use GradientBoostingRegressor or a shinrin forest model."
+            )
+        base_value = float(np.ravel(estimator.init_.constant_)[0])
+    else:
+        learning_rate = 1.0
+        base_value = 0.0
+
     builder = _EnsembleBuilder()
     for tid, tree in enumerate(trees):
         builder.add_tree(tid, tree)
@@ -190,12 +205,15 @@ def _generic_to_onnx(
         attrs = {
             **common_attrs,
             "n_targets": 1,
-            "aggregate_function": "AVERAGE" if n_trees > 1 else "SUM",
+            # GB sums lr-scaled trees; single trees emit one SUM entry;
+            # forests average their trees' outputs.
+            "aggregate_function": ("AVERAGE" if n_trees > 1 and not is_gb else "SUM"),
             "post_transform": "NONE",
             "target_treeids": np.array(target_treeids, dtype=np.int64),
             "target_nodeids": np.array(target_nodeids, dtype=np.int64),
             "target_ids": np.zeros(len(target_weights), dtype=np.int64),
-            "target_weights": np.array(target_weights, dtype=np.float32),
+            "target_weights": np.array(target_weights, dtype=np.float32)
+            * np.float32(learning_rate),
         }
         node = helper.make_node(
             "TreeEnsembleRegressor",
@@ -204,14 +222,28 @@ def _generic_to_onnx(
             domain="ai.onnx.ml",
             **attrs,
         )
-        # Flatten ORT's (N, 1) tree-ensemble output to match sklearn's (N,).
-        reshape = helper.make_node("Reshape", ["te_out", "neg1"], ["predictions"])
+        nodes = [node]
+        initializers = [helper.make_tensor("neg1", TensorProto.INT64, [1], [-1])]
+        tail_outputs = [
+            helper.make_tensor_value_info("predictions", TensorProto.FLOAT, [None])
+        ]
+        if base_value != 0.0:
+            initializers.append(
+                helper.make_tensor(
+                    "base_value", TensorProto.FLOAT, [], [np.float32(base_value)]
+                )
+            )
+            nodes.append(helper.make_node("Add", ["te_out", "base_value"], ["te_base"]))
+            reshape = helper.make_node("Reshape", ["te_base", "neg1"], ["predictions"])
+        else:
+            reshape = helper.make_node("Reshape", ["te_out", "neg1"], ["predictions"])
+        nodes.append(reshape)
         graph = helper.make_graph(
-            [node, reshape],
+            nodes,
             f"{name}_graph",
             inputs,
-            [helper.make_tensor_value_info("predictions", TensorProto.FLOAT, [None])],
-            initializer=[helper.make_tensor("neg1", TensorProto.INT64, [1], [-1])],
+            tail_outputs,
+            initializer=initializers,
         )
         model = helper.make_model(
             graph, opset_imports=opset_imports, producer_name=name, ir_version=8
@@ -257,12 +289,41 @@ def _generic_to_onnx(
     node = helper.make_node(
         "TreeEnsembleClassifier",
         inputs=["X"],
-        outputs=["labels", "probabilities"],
+        outputs=["te_labels", "probabilities"],
         domain="ai.onnx.ml",
         **attrs,
     )
+    # ORT derives the ensemble's own label output with the skl2onnx binary
+    # convention (score > 0), which disagrees with argmax over plain
+    # probability weights. Ignore it and derive labels from the exact
+    # averaged probabilities instead.
+    if np.issubdtype(classes.dtype, np.number):
+        _add_i64_init = helper.make_tensor(
+            "classes",
+            TensorProto.INT64,
+            list(classes.shape),
+            classes.astype(np.int64).ravel(),
+        )
+        labels_dtype = TensorProto.INT64
+    else:
+        _add_i64_init = helper.make_tensor(
+            "classes",
+            TensorProto.STRING,
+            list(classes.shape),
+            np.array([str(c) for c in classes], object).ravel(),
+        )
+        labels_dtype = TensorProto.STRING
+    initializers = [_add_i64_init]
+    nodes = [
+        node,
+        helper.make_node("ArgMax", ["probabilities"], ["amax"], axis=1, keepdims=0),
+        helper.make_node("Unsqueeze", ["amax", "cls_ax"], ["amax4g"]),
+        helper.make_node("Gather", ["classes", "amax4g"], ["labels2d"], axis=0),
+        helper.make_node("Squeeze", ["labels2d", "cls_ax"], ["labels"]),
+    ]
+    initializers.append(helper.make_tensor("cls_ax", TensorProto.INT64, [1], [1]))
     graph = helper.make_graph(
-        [node],
+        nodes,
         f"{name}_graph",
         inputs,
         [
@@ -271,6 +332,7 @@ def _generic_to_onnx(
                 "probabilities", TensorProto.FLOAT, [None, n_classes]
             ),
         ],
+        initializer=initializers,
     )
     model = helper.make_model(
         graph, opset_imports=opset_imports, producer_name=name, ir_version=8

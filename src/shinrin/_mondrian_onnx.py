@@ -157,7 +157,12 @@ class _FlatTree:
 def _collect_trees(estimator) -> list[_FlatTree]:
     if hasattr(estimator, "tree_"):
         return [_FlatTree(estimator.tree_)]
-    estimators = estimator.estimators_
+    estimators = getattr(estimator, "estimators_", None)
+    if estimators is None:
+        raise ValueError(
+            f"Estimator of type {type(estimator).__name__} is not a fitted "
+            "tree or forest: expected 'tree_' or 'estimators_'."
+        )
     if getattr(estimators, "ndim", 1) > 1:
         estimators = [e[0] for e in estimators]
     return [_FlatTree(e.tree_) for e in estimators]
