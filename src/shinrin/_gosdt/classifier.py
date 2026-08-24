@@ -3,9 +3,9 @@ Reference Ensembles").
 
 Derived from https://github.com/ubc-systopia/gosdt-guesses (BSD-3-Clause).
 The upstream pybind11 module is replaced by bindings to the vendored C++
-engine compiled into ``shinrin._native`` (with a serial TBB shim and bundled
-mini-gmp, so no system dependencies are required). See LICENSE and NOTICE for
-provenance.
+engine compiled into ``shinrin._native`` (with a lock-based TBB shim and
+bundled mini-gmp, so no system dependencies are required). See LICENSE and
+NOTICE for provenance.
 """
 
 import json
@@ -82,6 +82,11 @@ class GOSDTClassifier(ClassifierMixin, BaseEstimator):
         inspected or ran again in the future. This is intended for debugging the C++ logic and
         is not intended for end-user use.
 
+    worker_limit : int, default=1
+        The maximum number of worker threads used by the search. 1 runs
+        single-threaded; values above 1 enable parallel search workers;
+        0 uses one worker per available core.
+
     Examples
     --------
     A minimal example with the well known Iris dataset.
@@ -153,9 +158,9 @@ class GOSDTClassifier(ClassifierMixin, BaseEstimator):
         self.worker_limit = worker_limit
         if worker_limit < 0:
             raise ValueError("worker_limit must be non-negative")
-        # NOTE: unlike upstream, worker threads above 1 cannot be honoured:
-        # the vendored engine runs on a serial TBB shim and always executes
-        # with worker_limit = 1.
+        # NOTE: worker_limit = 1 (default) runs the engine single-threaded.
+        # Values above 1 spin up that many search workers; 0 uses one worker
+        # per available core.
 
     def fit(self, X, y, y_ref=None, input_features=None, cost_matrix=None, feature_map=None):
         """
@@ -335,6 +340,7 @@ class GOSDTClassifier(ClassifierMixin, BaseEstimator):
             upperbound_guess=float(self.upperbound_guess) if self.upperbound_guess is not None else 0.0,
             time_limit=int(self.time_limit) if self.time_limit is not None else 0,
             model_limit=self.model_limit,
+            worker_limit=self.worker_limit,
             verbose=self.verbose,
             diagnostics=self.diagnostics,
             depth_budget=(self.depth_budget + 1) if self.depth_budget is not None else 0,

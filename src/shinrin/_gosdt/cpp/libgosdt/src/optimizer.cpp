@@ -1,5 +1,6 @@
 #include "optimizer.hpp"
 
+#include <thread>
 #include <utility>
 
 #include "configuration.hpp"
@@ -66,14 +67,18 @@ bool Optimizer::iterate(unsigned int id) {
         update = dispatch(m_local_states[id].inbound_message, id);
         switch (m_local_states[id].inbound_message.code) {
             case Message::exploration_message: {
-                this->explore += 1;
+                this->explore.fetch_add(1, std::memory_order_relaxed);
                 break;
             }
             case Message::exploitation_message: {
-                this->exploit += 1;
+                this->exploit.fetch_add(1, std::memory_order_relaxed);
                 break;
             }
         }
+    } else {
+        // Idle worker: yield so that busy polling does not starve productive
+        // workers contending for the shared locks.
+        std::this_thread::yield();
     }
 
     // Worker 0 is responsible for managing ticks and snapshots
@@ -93,12 +98,13 @@ bool Optimizer::iterate(unsigned int id) {
         if (update || complete() ||
             ((this->ticks) % (this->tick_duration)) == 0) {  // Periodic check for completion for timeout
             // Update the continuation flag for all threads
-            this->active = !complete() && !timeout() && (m_config.worker_limit > 1 || m_queue.size() > 0);
+            this->active.store(!complete() && !timeout() && (m_config.worker_limit > 1 || m_queue.size() > 0),
+                               std::memory_order_relaxed);
             this->print();
             this->profile();
         }
     }
-    return this->active;
+    return this->active.load(std::memory_order_relaxed);
 }
 
 void Optimizer::print(void) const {
@@ -117,11 +123,12 @@ void Optimizer::profile(void) {
         float lowerbound, upperbound;
         objective_boundary(&lowerbound, &upperbound);
         profile_output << this->ticks << "," << time_elapsed() << "," << lowerbound << "," << upperbound << ","
-                       << m_graph.size() << "," << m_queue.size() << "," << this->explore << "," << this->exploit;
+                       << m_graph.size() << "," << m_queue.size() << "," << this->explore.load() << ","
+                       << this->exploit.load();
         profile_output << std::endl;
         profile_output.flush();
-        this->explore = 0;
-        this->exploit = 0;
+        this->explore.store(0, std::memory_order_relaxed);
+        this->exploit.store(0, std::memory_order_relaxed);
     }
 }
 

@@ -13,12 +13,15 @@ implementation is the canonical one for:
 
 Shinrin vendors
 [ubc-systopia/gosdt-guesses](https://github.com/ubc-systopia/gosdt-guesses)
-(BSD-3-Clause) and compiles its C++ engine into `shinrin._native` with serial
-replacements for oneTBB and bundled mini-GMP — no TBB or libgmp system
-dependencies, so wheels are fully self-contained.
+(BSD-3-Clause) and compiles its C++ engine into `shinrin._native` with
+lock-based replacements for oneTBB and bundled mini-GMP — no TBB or libgmp
+system dependencies, so wheels are fully self-contained.
 
-> The engine runs **single-threaded** (`worker_limit` is accepted for API
-> compatibility but values above 1 are not honoured).
+> The search honours `worker_limit`: `1` (default) is single-threaded,
+> values above 1 enable parallel branch-and-bound workers, and `0` uses one
+> worker per available core. Measured scaling on an M1 Max: ~4x at 8 workers
+> on search-heavy workloads (see
+> `scripts/benchmarks/GOSDT_BENCHMARK.md`).
 
 ## End-to-end pipeline
 
@@ -75,7 +78,7 @@ lower-bound machinery automatically.
 | `uncertainty_tolerance` | `float` | `0` | Accepted optimality gap (0 = exact) |
 | `upperbound_guess` | `float \| None` | `None` | External upper bound in (0, 1] used for pruning |
 | `model_limit` | `int` | `1` | Number of optimal models to extract |
-| `worker_limit` | `int` | `1` | Ignored above 1 (serial build) |
+| `worker_limit` | `int` | `1` | `1` = single-threaded; `>1` parallel workers; `0` = one per core |
 | `verbose` / `debug` | `bool` | `False` | Progress printing / dump raw inputs for inspection |
 
 ### fit / predict
@@ -125,8 +128,8 @@ mapping = enc.feature_map()           # original -> binarized column indices
 | Parameter | Default | Description |
 |---|---|---|
 | `learning_rate` | `0.1` | Gradient boosting learning rate |
-| `n_estimators` | `100` | Boosting rounds (use ~20 for the single-threaded build) |
-| `max_depth` | `3` | Boosting tree depth (use ~2 for the single-threaded build) |
+| `n_estimators` | `100` | Boosting rounds (use ~20 to keep the search space tractable) |
+| `max_depth` | `3` | Boosting tree depth (use ~2 to keep the search space tractable) |
 | `random_state` | `0` | Seed |
 | `column_elimination` | `True` | Iteratively drop least-important columns while score holds |
 

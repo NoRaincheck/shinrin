@@ -78,8 +78,6 @@ class GosdtQueue {
     membership_table_type membership;
 
     queue_type queue;  // queue containing pending messages
-
-    std::mutex q_mutex;
 };
 
 #endif

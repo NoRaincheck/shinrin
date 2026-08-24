@@ -25,7 +25,7 @@ Since skope-rules and scikit-garden are no longer actively maintained, this proj
 
 - **Mondrian Trees & Forests** — Full scikit-learn API compatibility
 - **CORELS Optimal Rule Lists** — Certifiably optimal rule lists for binary data (`CorelsClassifier`), vendored from pycorels with bundled mini-GMP (no system dependency)
-- **GOSDT Optimal Sparse Decision Trees** — Globally optimized sparse decision trees with reference-ensemble guesses (`GOSDTClassifier`, `ThresholdGuessBinarizer`), vendored from gosdt-guesses; runs single-threaded with no TBB/GMP system dependencies
+- **GOSDT Optimal Sparse Decision Trees** — Globally optimized sparse decision trees with reference-ensemble guesses (`GOSDTClassifier`, `ThresholdGuessBinarizer`), vendored from gosdt-guesses; optional parallel search workers (`worker_limit`) with no TBB/GMP system dependencies
 - **Tabular Neural Networks** — scikit-learn compatible `MLPClassifier`/`MLPRegressor` and `TabMClassifier`/`TabMRegressor` with optional PLE embeddings, training-aware ternary weight quantization (BitLinear), and Mojo-accelerated training
 - **TabM Neural Networks** — Parameter-efficient ensemble MLPs for tabular data with BatchEnsemble-style multiplicative adapters (ICLR 2025)
 - **TabICL** — Tabular in-context learning foundation model (torch/NumPy/Mojo backends)

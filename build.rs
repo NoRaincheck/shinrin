@@ -1,6 +1,13 @@
 use std::path::PathBuf;
 
 fn main() {
+    // Track the vendored C++ trees (sources AND headers) so edits actually
+    // trigger a rebuild. Note: emitting any rerun-if-* directive switches
+    // cargo to "only rerun when these change" mode, so these two lines are
+    // load-bearing — without them, stale C++ objects silently link against
+    // fresh Rust bindings.
+    println!("cargo:rerun-if-changed=src/shinrin/_corels/cpp");
+    println!("cargo:rerun-if-changed=src/shinrin/_gosdt/cpp");
     println!("cargo:rerun-if-env-changed=SHINRIN_CORELS_NO_GMP");
     // Setting SHINRIN_CORELS_NO_GMP=1 builds CORELS without -DGMP, using
     // its word-array bit-vector fallback (useful for benchmarking the

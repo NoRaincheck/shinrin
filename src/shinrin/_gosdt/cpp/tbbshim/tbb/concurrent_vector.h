@@ -1,7 +1,9 @@
 /*
- * Serial shim for oneTBB's concurrent_vector. The GOSDT engine only uses the
- * sequential subset (push_back, iteration, size); with worker_limit = 1 no
- * concurrent access occurs, so std::vector suffices.
+ * Shim for oneTBB's concurrent_vector. The GOSDT engine only uses the
+ * sequential subset (push_back, iteration, size) and only ever touches these
+ * containers as mapped VALUES of a tbb::concurrent_hash_map (bound lists,
+ * i.e. reachable exclusively through that map's accessors). They are thereby
+ * covered by the shim's global mutex and need no internal locking.
  */
 #ifndef SHINRIN_TBB_SHIM_CONCURRENT_VECTOR_H
 #define SHINRIN_TBB_SHIM_CONCURRENT_VECTOR_H

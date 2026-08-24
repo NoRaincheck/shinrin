@@ -16,11 +16,12 @@ Upstream version: master at vendoring time (BSD-3-Clause, see `LICENSE`).
 - `cpp/libgosdt/` – the C++ engine (headers + sources), vendored as-is.
 - `cpp/nlohmann/` – [nlohmann/json](https://github.com/nlohmann/json)
   v3.11.3 single header (MIT, see `nlohmann/LICENSE.MIT`).
-- `cpp/tbbshim/tbb/` – serial replacements for the oneTBB container types the
-  engine uses (`concurrent_hash_map`, `concurrent_unordered_map`,
+- `cpp/tbbshim/tbb/` – lock-based replacements for the oneTBB container types
+  the engine uses (`concurrent_hash_map`, `concurrent_unordered_map`,
   `concurrent_vector`, `concurrent_priority_queue`, `scalable_allocator`,
-  `tick_count`). The engine is executed with `worker_limit = 1`, so the
-  serial semantics are sufficient; no TBB dependency remains.
+  `tick_count`). Accessors retain a process-global recursive mutex from
+  acquisition to `release()`, reproducing TBB's exclusive-entry semantics
+  with coarse granularity; no TBB dependency remains.
 - `classifier.py`, `threshold_guessing.py`, `binarizer.py`, `tree.py`,
   `status.py` – adapted copies of the upstream Python layer.
 - `LICENSE` – upstream BSD-3-Clause license text.
@@ -30,9 +31,10 @@ Upstream version: master at vendoring time (BSD-3-Clause, see `LICENSE`).
 - Upstream's pybind11 module (`_libgosdt`) is replaced by a C ABI bridge
   (`cpp/bridge_gosdt.cpp`) plus PyO3 bindings in `src/lib.rs`
   (`shinrin._native.gosdt_fit`).
-- The engine **always runs single-threaded** (`worker_limit = 1`). The
-  constructor still accepts `worker_limit` for API compatibility but values
-  greater than 1 are not honoured (upstream itself warns about deadlocks).
+- The engine honours `worker_limit`: 1 (default) runs the search
+  single-threaded, values above 1 spin up parallel branch-and-bound workers,
+  and 0 uses one worker per available core. See
+  `scripts/benchmarks/GOSDT_BENCHMARK.md` for measured scaling.
 - GOSDT's global `class Queue` is renamed to `GosdtQueue` in the vendored
   copy: CORELS (also vendored) defines an unrelated global `Queue`, and the
   identical C++ symbol names caused the linker to silently mix the two

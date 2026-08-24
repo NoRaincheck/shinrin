@@ -19,16 +19,21 @@ Every number is a single fit on a stratified 75/25 train/test split
 optimal for its objective.
 
 To run: `uv run python scripts/benchmarks/bench_gosdt.py [--repeats N]
-[--regularization F] [--depth-budget N]` (or `just bench-gosdt`).
+[--regularization F] [--depth-budget N]` (or `just bench-gosdt`). A
+parallel-scaling sweep over the GOSDT stage is available via
+`--workers 1,2,4,8`.
 
 ## Setup
 
-- GOSDT runs on shinrin's vendored engine, which executes **single-threaded**
-  (serial TBB shim) — upstream's multithreaded oneTBB build would be faster.
+- GOSDT runs on shinrin's vendored engine. The search honours
+  `worker_limit`: 1 (default) is single-threaded, values above 1 spin up
+  parallel branch-and-bound workers, 0 uses one worker per core (see the
+  worker-scaling section below).
 - The binarizer uses smaller settings than upstream defaults (20 estimators x
   depth 2 instead of 100 x depth 3): with 100x3, threshold-column explosion
-  makes both column elimination and the single-threaded search impractical.
-- Machine: Apple Silicon M1 Max (arm64), macOS, CPython 3.14, clang -O3.
+  makes both column elimination and the search impractical.
+- Machine: Apple Silicon M1 Max (arm64, 8P+2E cores), macOS, CPython 3.14,
+  clang -O3.
 
 ## Results
 
@@ -55,6 +60,28 @@ To run: `uv run python scripts/benchmarks/bench_gosdt.py [--repeats N]
 | 0.02 / depth 5 | 204.9s | 0.8164 | 0.0000 |
 | 0.01 / depth 5 | 435.6s | 0.8164 | 0.0000 |
 
+### Worker scaling (`--workers 1,2,4,8`, regularization=0.05)
+
+Fit time of the GOSDT search stage per `worker_limit` value. The certified
+objective triple (model loss + optimality bounds) was **identical across all
+worker counts** on every dataset — parallelism changes scheduling, not the
+optimum.
+
+| Dataset | 1 worker | 2 workers | 4 workers | 8 workers | speedup @8 |
+|---|---:|---:|---:|---:|---:|
+| iris (n=150, d=4) | 0.001s | 1.08x | 0.99x | 0.90x | ~1x (too small to parallelize) |
+| small synthetic (n=2000, d=10) | 0.042s | 1.52x | 2.14x | 2.14x | 2.14x |
+| medium synthetic (n=10000, d=20) | 2.566s | 1.70x | 2.89x | **4.02x** | **4.02x** |
+| compas (real, binary, n=7214, d=27) | 0.010s | 1.20x | 1.37x | 1.31x | ~1.3x |
+
+The same sweep at a search-heavy configuration (medium synthetic,
+regularization=0.02, depth_budget=5):
+
+| Configuration | Fit time | Certified bounds | Speedup |
+|---|---:|---:|---:|
+| worker_limit=1 | 207.1s | [0.258000, 0.258000] | 1.00x |
+| worker_limit=8 | 48.5s | [0.258000, 0.258000] | **4.27x** |
+
 ## Takeaways
 
 - **Speed**: CART is 10–1000x faster to fit, as expected for a greedy
@@ -73,5 +100,8 @@ To run: `uv run python scripts/benchmarks/bench_gosdt.py [--repeats N]
   computational cost (~80x slower from 0.05/d4 to 0.02/d5 for +1.7pp here).
 - **Prediction** costs are comparable across models; GOSDT's tiny trees make
   inference effectively free despite the extra Python-level tree walk.
-- Runtime is dominated by the search's branch-and-bound; the single-threaded
-  vendored build is the main overhead versus upstream's parallel builds.
+- Runtime is dominated by the search's branch-and-bound, which parallelizes
+  well on search-heavy workloads (~4x with 8 workers on M1 Max; scaling is
+  bounded by the coarse graph lock and by Amdahl's law on small searches).
+  Pass `worker_limit=0` (or a concrete count) to `GOSDTClassifier` to opt in;
+  the default remains single-threaded.

@@ -5,8 +5,8 @@
  *
  * Replaces upstream's pybind11 module (_libgosdt):
  *   - matrices are passed as row-major buffers (uint8 for bool, float),
- *   - the engine always runs single-threaded (worker_limit forced to 1)
- *     because TBB is replaced by the serial shim in cpp/tbbshim,
+ *   - TBB is replaced by the lock-based shim in cpp/tbbshim, which supports
+ *     multi-threaded execution (worker_limit >= 1; 0 = one worker per core),
  *   - results are returned through a plain struct with malloc'd strings.
  *
  * Note: unlike CORELS, GOSDT unconditionally includes <gmp.h>, so this
@@ -19,6 +19,7 @@
 #include <new>
 #include <set>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "libgosdt/include/configuration.hpp"
@@ -68,7 +69,7 @@ static char *dup_c_string(char const *s) {
  */
 int shinrin_gosdt_fit(
     float regularization, float upperbound_guess, unsigned int time_limit,
-    unsigned int model_limit, int verbose, int diagnostics, unsigned char depth_budget,
+    unsigned int model_limit, unsigned int worker_limit, int verbose, int diagnostics, unsigned char depth_budget,
     int reference_lb, int look_ahead, int similar_support, int cancellation,
     int feature_transform, int rule_list, int non_binary,
     const char *trace_path, const char *tree_path, const char *profile_path,
@@ -84,8 +85,13 @@ int shinrin_gosdt_fit(
             config.upperbound_guess = upperbound_guess;
         }
         config.time_limit = time_limit;
-        // The serial TBB shim requires single-threaded execution.
-        config.worker_limit = 1;
+        // worker_limit == 0 means "one worker per available core" (matching
+        // upstream's Configuration semantics). The engine's own loop spawns
+        // exactly config.worker_limit threads, so resolve it here.
+        config.worker_limit =
+            worker_limit == 0
+                ? (std::thread::hardware_concurrency() > 0 ? std::thread::hardware_concurrency() : 1u)
+                : worker_limit;
         config.model_limit = model_limit;
         config.verbose = verbose != 0;
         config.diagnostics = diagnostics != 0;

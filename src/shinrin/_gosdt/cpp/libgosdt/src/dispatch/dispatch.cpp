@@ -284,10 +284,11 @@ void Optimizer::signal_exploiters(adjacency_accessor &parents, Task &self, unsig
 }
 
 bool Optimizer::update_root(float lower, float upper) {
-    bool change = lower != this->global_lowerbound || upper != this->global_upperbound;
-    this->global_lowerbound = lower;
-    this->global_upperbound = upper;
-    this->global_lowerbound = std::min(this->global_upperbound, this->global_lowerbound);
-    this->global_boundary = global_upperbound - global_lowerbound;
+    // Callers hold a vertex accessor, so concurrent writers are excluded by
+    // the shim lock; readers elsewhere use atomic loads.
+    bool change = lower != this->global_lowerbound.load() || upper != this->global_upperbound.load();
+    this->global_upperbound.store(upper);
+    this->global_lowerbound.store(std::min(upper, lower));
+    this->global_boundary.store(this->global_upperbound.load() - this->global_lowerbound.load());
     return change;
 }

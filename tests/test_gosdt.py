@@ -85,6 +85,43 @@ def test_reference_ensemble_path():
     assert clf_with_ref.result_.model_loss <= clf_plain.result_.model_loss + 1e-6
 
 
+def test_worker_limit_parity():
+    """Parallel workers must return the same certified optimum as one worker.
+
+    worker_limit > 1 exercises the engine's multi-threaded search path
+    (worker_limit = 0 resolves to one worker per core inside the bridge).
+    The optimal objective and its certified bounds are deterministic
+    regardless of scheduling; individual trees may differ only among ties,
+    so predictions are compared against each fit's own optimum instead of
+    across fits.
+    """
+    X, y = load_iris(return_X_y=True)
+    enc = ThresholdGuessBinarizer(n_estimators=10, max_depth=2, random_state=0)
+    X_bin = enc.fit_transform(X, y)
+
+    baseline = None
+    for worker_limit in (1, 3, 0):
+        clf = GOSDTClassifier(
+            regularization=0.1, depth_budget=2, worker_limit=worker_limit
+        )
+        clf.fit(X_bin, y)
+        result = clf.get_result()
+
+        assert result["status"] == Status.CONVERGED
+        # Same objective => same number of training misclassifications, so a
+        # matching certified triple also pins the training accuracy.
+        certified = (
+            result["model_loss"],
+            result["lower_bound"],
+            result["upper_bound"],
+            clf.score(X_bin, y),
+        )
+        if baseline is None:
+            baseline = certified
+        else:
+            assert certified == pytest.approx(baseline)
+
+
 def test_predict_before_fit_raises():
     clf = GOSDTClassifier()
     with pytest.raises(ValueError):
