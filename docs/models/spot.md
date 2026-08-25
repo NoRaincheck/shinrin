@@ -171,3 +171,7 @@ A parsed optimal tree. Left branches are the *true* side of the split.
 - Requires the `sklearn` optional extra for the binarizers and metrics.
 - Benchmarks vs scikit-learn CART (speed, accuracy, tree sizes, the cost of
   tighter regularization): see [Benchmarking](../features/benchmarking.md#scripts).
+- As a single optimal tree, SPOT is the ideal host for counterfactuals:
+  [Minimal-Flip Feature Tweaking](../features/minimal-flip-tweaking.md)
+  computes exact minimal feature changes that flip its prediction
+  (`scope="reference"`), with guarantees that hold for the entire model.

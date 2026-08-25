@@ -26,6 +26,7 @@ __all__ = [
     "ExtraTreeQuantileRegressor",
     "ExtraTreesQuantileRegressor",
     "ExtraTreesRegressor",
+    "FlipResult",
     "MLPClassifier",
     "MLPRegressor",
     "MondrianForestClassifier",
@@ -36,6 +37,7 @@ __all__ = [
     "OrdtClassifier",
     "RandomForestQuantileRegressor",
     "RandomForestRegressor",
+    "RashomonFlipSearch",
     "Rule",
     "SPOTClassifier",
     "SPOTSETClassifier",
@@ -54,6 +56,7 @@ __all__ = [
     "print_benchmark_report",
     "replace_feature_name",
     "save_onnx",
+    "summarize_flip_results",
     "to_onnx",
 ]
 
@@ -107,6 +110,9 @@ _IMPORT_MAP: dict[str, tuple[str, str]] = {
     "SkopeRules": ("shinrin._skrules.skope_rules", "SkopeRules"),
     "SPOTClassifier": ("shinrin._spot.classifier", "SPOTClassifier"),
     "SPOTSETClassifier": ("shinrin._spotset.classifier", "SPOTSETClassifier"),
+    "FlipResult": ("shinrin.tweaking", "FlipResult"),
+    "RashomonFlipSearch": ("shinrin.tweaking", "RashomonFlipSearch"),
+    "summarize_flip_results": ("shinrin.tweaking", "summarize_flip_results"),
     "TabICLClassifier": ("shinrin.tabicl", "TabICLClassifier"),
     "TabICLRegressor": ("shinrin.tabicl", "TabICLRegressor"),
     "TabMClassifier": ("shinrin.tabm", "TabMClassifier"),

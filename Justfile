@@ -67,6 +67,10 @@ test-tabicl-mojo: build-tabicl-mojo
 bench-gosdt:
     uv run python scripts/benchmarks/bench_gosdt.py
 
+# Benchmark minimal-flip feature tweaking: SPOT/SPOTSET Rashomon sets vs random forests
+bench-rashomon-flip:
+    uv run python scripts/benchmarks/bench_rashomon_flip.py
+
 # Benchmark ORDT: optimal rule-sets from decision trees (skope mining + CORELS selection)
 bench-ordt:
     uv run --extra pandas python scripts/benchmarks/bench_ordt.py
