@@ -83,6 +83,12 @@ class SklearnForestView:
     def n_features(self) -> int:
         return int(self._trees[0].n_features_in_)
 
+    def probability_leaf_values(
+        self, class_index: int
+    ) -> list[list[tuple[Constraint, float]]]:
+        """Per-tree ``P(class | leaf)`` leaf paths for soft-vote tweaking."""
+        return [_leaves_with_probability(t.tree_, class_index) for t in self._trees]
+
     def predict_all(self, X: np.ndarray) -> np.ndarray:
         X = np.atleast_2d(np.asarray(X, dtype=float))
         out = np.empty((len(self._trees), X.shape[0]), dtype=int)
@@ -189,6 +195,28 @@ def _leaves_with_values(tree) -> list[tuple[Constraint, float]]:
     return leaves
 
 
+def _leaves_with_probability(tree, class_index: int) -> list[tuple[Constraint, float]]:
+    """``(constraint, P(class_index | leaf))`` paths of an sklearn classifier tree."""
+    leaves: list[tuple[Constraint, float]] = []
+    stack: list[tuple[int, Constraint]] = [(0, {})]
+    while stack:
+        node, path = stack.pop()
+        if tree.children_left[node] == -1:
+            values = tree.value[node].ravel()
+            proba = float(values[class_index] / values.sum())
+            leaves.append((path, proba))
+            continue
+        feature = int(tree.feature[node])
+        threshold = float(tree.threshold[node])
+        left = merge_constraints(path, {feature: (-INF, _largest_leq(threshold))})
+        right = merge_constraints(path, {feature: (_smallest_gt(threshold), INF)})
+        if left is not None:
+            stack.append((int(tree.children_left[node]), left))
+        if right is not None:
+            stack.append((int(tree.children_right[node]), right))
+    return leaves
+
+
 class HistGradientBoostingView:
     """Stages of a fitted binary ``HistGradientBoostingClassifier``.
 
@@ -222,7 +250,5 @@ class HistGradientBoostingView:
         fmap = np.arange(2, X.shape[1] + 2, dtype=np.uint32)
         out = np.empty((len(self._stages), X.shape[0]), dtype=float)
         for m, pred in enumerate(self._stages):
-            out[m] = pred.predict(
-                np.asfortranarray(X), known_cats, fmap, n_threads=1
-            )
+            out[m] = pred.predict(np.asfortranarray(X), known_cats, fmap, n_threads=1)
         return out

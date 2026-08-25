@@ -207,3 +207,128 @@ def test_sklearn_forest_rashomon_scope(small_forest_data):
             assert rob_res.x_new is not None
             preds = forest.predict(rob_res.x_new.reshape(1, -1))[0]
             assert preds == rob_res.target
+
+
+# ---------------------------------------------------------------------------
+# scope="ensemble": every sklearn tree family via its own aggregation rule
+# ---------------------------------------------------------------------------
+
+
+def test_ensemble_soft_vote_forest_matches_predict(small_forest_data):
+    from sklearn.ensemble import RandomForestClassifier
+
+    X, y = small_forest_data
+    forest = RandomForestClassifier(n_estimators=9, max_depth=4, random_state=0).fit(
+        X, y
+    )
+    results = RashomonFlipSearch(forest).search(X[:20], scope="ensemble", target=1)
+    for res in results:
+        assert res.verified or not res.success
+        if res.success:
+            assert res.x_new is not None
+            assert forest.predict(res.x_new.reshape(1, -1))[0] == 1
+
+
+def test_ensemble_single_tree_equals_reference_minimality(small_forest_data):
+    from sklearn.tree import DecisionTreeClassifier
+
+    X, y = small_forest_data
+    tree = DecisionTreeClassifier(max_depth=3, random_state=0).fit(X, y)
+    search = RashomonFlipSearch(tree)
+    ensemble = search.search(X[:15], scope="ensemble", target=int(y[0]) ^ 1)
+    reference = search.search(X[:15], scope="reference", target=int(y[0]) ^ 1)
+    # for a single soft-voting tree the aggregate rule reduces to the leaf
+    # majority, so both scopes share the same optimum
+    for ens_res, ref_res in zip(ensemble, reference):
+        assert ens_res.success and ref_res.success
+        assert ens_res.l1_distance == pytest.approx(ref_res.l1_distance)
+
+
+def test_ensemble_adaboost_weighted_vote(small_forest_data):
+    from sklearn.ensemble import AdaBoostClassifier
+
+    X, y = small_forest_data
+    ada = AdaBoostClassifier(n_estimators=8, random_state=0).fit(X, y)
+    results = RashomonFlipSearch(ada).search(X[:20], scope="ensemble", target=1)
+    solved = [r for r in results if r.success]
+    assert solved
+    for res in solved:
+        assert res.verified and res.x_new is not None
+        assert ada.predict(res.x_new.reshape(1, -1))[0] == 1
+
+
+def test_gbm_leaf_values_reconstruct_decision_function(small_forest_data):
+    from sklearn.ensemble import GradientBoostingClassifier
+
+    from shinrin._tweaking._sklearn_adapter import GradientBoostingView
+
+    X, y = small_forest_data
+    gbm = GradientBoostingClassifier(n_estimators=8, max_depth=2, random_state=0).fit(
+        X[:200], y[:200]
+    )
+    view = GradientBoostingView(gbm)
+    recon = view.base_score + view.score_matrix(X).sum(axis=0)
+    assert np.allclose(recon, gbm.decision_function(X).ravel())
+
+
+def test_hgbt_leaves_reconstruct_decision_function(small_forest_data):
+    from sklearn.ensemble import HistGradientBoostingClassifier
+
+    from shinrin._tweaking._sklearn_adapter import HistGradientBoostingView
+
+    X, y = small_forest_data
+    hgb = HistGradientBoostingClassifier(max_iter=8, max_depth=2, random_state=0).fit(
+        X, y
+    )
+    view = HistGradientBoostingView(hgb)
+    recon = view.base_score + view.score_matrix(X).sum(axis=0)
+    assert np.allclose(recon, hgb.decision_function(X).ravel())
+
+
+def test_boosted_ensembles_flip_verified(small_forest_data):
+    from sklearn.ensemble import (
+        GradientBoostingClassifier,
+        HistGradientBoostingClassifier,
+    )
+
+    X, y = small_forest_data
+    for make in (
+        lambda: GradientBoostingClassifier(
+            n_estimators=10, max_depth=2, random_state=0
+        ),
+        lambda: HistGradientBoostingClassifier(
+            max_iter=10, max_depth=2, random_state=0
+        ),
+    ):
+        model = make().fit(X, y)
+        results = RashomonFlipSearch(model).search(X[:15], scope="ensemble", target=1)
+        solved = [r for r in results if r.success]
+        assert solved
+        for res in solved:
+            assert res.verified and res.x_new is not None
+            assert model.predict(res.x_new.reshape(1, -1))[0] == 1
+
+
+def test_boosted_multiclass_rejected():
+    from sklearn.datasets import load_iris
+    from sklearn.ensemble import (
+        GradientBoostingClassifier,
+        HistGradientBoostingClassifier,
+    )
+
+    X, y = load_iris(return_X_y=True)
+    with pytest.raises(NotImplementedError):
+        RashomonFlipSearch(GradientBoostingClassifier(n_estimators=5).fit(X, y))
+    with pytest.raises(NotImplementedError):
+        RashomonFlipSearch(HistGradientBoostingClassifier(max_iter=5).fit(X, y))
+
+
+def test_rashomon_scope_on_boosting_rejected(small_forest_data):
+    from sklearn.ensemble import GradientBoostingClassifier
+
+    X, y = small_forest_data
+    gb = GradientBoostingClassifier(n_estimators=5, max_depth=1, random_state=0).fit(
+        X, y
+    )
+    with pytest.raises(ValueError, match="boosted"):
+        RashomonFlipSearch(gb).search(X[:2], scope="rashomon")
