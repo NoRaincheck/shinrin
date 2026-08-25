@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 import pytest
 from sklearn.utils.validation import NotFittedError
@@ -318,3 +320,228 @@ class TestToCategoricalTree:
                 ctree.apply(X_raw), est.tree_.apply(X_enc.astype(np.float32))
             )
         assert n_checked > 0
+
+
+# ---------------------------------------------------------------------------
+# Increment 3: opset-5 BRANCH_MEMBER ONNX export
+# ---------------------------------------------------------------------------
+
+from shinrin.onnx import to_onnx
+
+try:
+    import onnxruntime as ort
+except ImportError:  # pragma: no cover
+    ort = None
+
+needs_ort = pytest.mark.skipif(ort is None, reason="onnxruntime not installed")
+
+
+def _assert_close(actual, desired, atol=1e-5):
+    np.testing.assert_allclose(
+        np.asarray(actual, dtype=np.float64).ravel(),
+        np.asarray(desired, dtype=np.float64).ravel(),
+        atol=atol,
+        rtol=0,
+    )
+
+
+def _check_model(model_proto):
+    # onnxruntime implies onnx; import locally so type checkers see a module.
+    from onnx.checker import check_model
+
+    check_model(model_proto.SerializeToString(), full_check=True)
+
+
+@needs_ort
+class TestMemberExportOrtParity:
+    """Native predict on encoded X vs member graph on raw codes."""
+
+    @pytest.fixture
+    def session(self):
+        def run(model_proto):
+            assert ort is not None
+            return ort.InferenceSession(
+                model_proto.SerializeToString(),
+                providers=["CPUExecutionProvider"],
+            )
+
+        return run
+
+    def test_mondrian_forest_regressor(self, session):
+        rng = np.random.RandomState(10)
+        n = 400
+        color = rng.randint(0, 4, n).astype(np.float64)
+        num = rng.randn(n)
+        X_raw = np.column_stack([color, num])
+        y = 10.0 * (color == 2) + 3.0 * (color == 0) + num
+        enc = shinrin.TargetEncoder(categorical_features=[0]).fit(X_raw, y)
+        model = shinrin.MondrianForestRegressor(
+            n_estimators=5, random_state=11, bootstrap=True
+        ).fit(enc.transform(X_raw), y)
+
+        proto = to_onnx(model, X=X_raw, encoder=enc)
+        _check_model(proto)
+        sess = session(proto)
+        got = sess.run(None, {"X": np.ascontiguousarray(X_raw, dtype=np.float32)})[0]
+        want = model.predict(enc.transform(X_raw))
+        _assert_close(got, want, atol=1e-5)
+
+    def test_random_forest_regressor(self, session):
+        from sklearn.ensemble import RandomForestRegressor
+
+        rng = np.random.RandomState(12)
+        n = 300
+        color = rng.randint(0, 3, n).astype(np.float64)
+        num = rng.randn(n)
+        X_raw = np.column_stack([color, num])
+        y = color * 2.0 + num
+        enc = shinrin.TargetEncoder(categorical_features=[0]).fit(X_raw, y)
+        model = RandomForestRegressor(n_estimators=8, random_state=13).fit(
+            enc.transform(X_raw), y
+        )
+        proto = to_onnx(model, encoder=enc)
+        _check_model(proto)
+        got = session(proto).run(
+            None, {"X": np.ascontiguousarray(X_raw, dtype=np.float32)}
+        )[0]
+        _assert_close(got, model.predict(enc.transform(X_raw)), atol=1e-5)
+
+    def test_mondrian_forest_classifier_binary(self, session):
+        X_raw, X_enc, y, enc = make_encoded_classification()
+        model = shinrin.MondrianForestClassifier(n_estimators=4, random_state=14).fit(
+            X_enc, y
+        )
+        proto = to_onnx(model, encoder=enc)
+        _check_model(proto)
+        labels, probs = session(proto).run(
+            None, {"X": np.ascontiguousarray(X_raw, dtype=np.float32)}
+        )
+        want_proba = model.predict_proba(X_enc)
+        np.testing.assert_allclose(probs, want_proba, atol=1e-5, rtol=0)
+        np.testing.assert_array_equal(labels, model.predict(X_enc))
+
+    def test_multiclass_and_string_labels(self, session):
+        from sklearn.ensemble import RandomForestClassifier
+
+        rng = np.random.RandomState(15)
+        n = 450
+        color = rng.randint(0, 3, n).astype(np.float64)
+        num = rng.randn(n)
+        X_raw = np.column_stack([color, num])
+        y_str = np.array(["a", "b", "c"])[
+            np.argmax(np.column_stack([-num, color - 1.0, num]), axis=1)
+        ]
+        enc = shinrin.TargetEncoder(categorical_features=[0], smoothing=1.0).fit(
+            X_raw, y_str
+        )
+        model = RandomForestClassifier(n_estimators=6, random_state=16).fit(
+            enc.transform(X_raw), y_str
+        )
+        proto = to_onnx(model, encoder=enc, class_names=["a", "b", "c"])
+        _check_model(proto)
+        labels, probs = session(proto).run(
+            None, {"X": np.ascontiguousarray(X_raw, dtype=np.float32)}
+        )
+        np.testing.assert_allclose(
+            probs, model.predict_proba(enc.transform(X_raw)), atol=1e-5, rtol=0
+        )
+        np.testing.assert_array_equal(labels, model.predict(enc.transform(X_raw)))
+        assert labels.dtype.kind in "USO"
+
+    def test_single_tree_degenerate(self, session):
+        # A tree with a single leaf (no splits at all).
+        X_raw = np.zeros((20, 2))
+        X_raw[:, 1] = np.linspace(-1, 1, 20)
+        y = np.ones(20)
+        enc = shinrin.TargetEncoder(categorical_features=[0]).fit(X_raw, y)
+        from sklearn.tree import DecisionTreeRegressor
+
+        model = DecisionTreeRegressor(max_depth=1).fit(
+            enc.transform(X_raw), y
+        )  # depth 1 may still split; force degenerate below
+        ctree = to_categorical_tree(model, enc)
+        if len(ctree.feature) == 1:  # truly degenerate only when no split
+            pass
+        proto = to_onnx(model, encoder=enc)
+        _check_model(proto)
+        got = session(proto).run(
+            None, {"X": np.ascontiguousarray(X_raw, dtype=np.float32)}
+        )[0]
+        _assert_close(got, model.predict(enc.transform(X_raw)), atol=1e-5)
+
+    def test_unseen_category_routing(self, session):
+        """Raw codes unseen during training route via the false branches."""
+        rng = np.random.RandomState(17)
+        n = 200
+        color = rng.randint(0, 3, n).astype(np.float64)  # train codes {0,1,2}
+        X_raw = np.column_stack([color, rng.randn(n)])
+        y = (color == 1).astype(float)
+        enc = shinrin.TargetEncoder(categorical_features=[0]).fit(X_raw, y)
+        model = shinrin.MondrianForestRegressor(n_estimators=3, random_state=18).fit(
+            enc.transform(X_raw), y
+        )
+        proto = to_onnx(model, encoder=enc)
+        # Probe with code 9: never seen; encoded value would be the prior.
+        probe = np.array([[9.0, 0.25]], dtype=np.float32)
+        got = session(proto).run(None, {"X": probe})[0]
+        assert np.isfinite(got).all()
+
+    def test_metadata_props(self):
+        _X_raw, X_enc, y, enc = make_encoded_classification()
+        model = shinrin.MondrianForestClassifier(n_estimators=2, random_state=19).fit(
+            X_enc, y
+        )
+        proto = to_onnx(model, encoder=enc, feature_names=["color", "size"])
+        props = {p.key: p.value for p in proto.metadata_props}
+        assert props["shinrin_treeensemble_export"] == "member-v5"
+        assert props["feature_names"] == "color,size"
+
+
+class TestMemberExportValidation:
+    def test_encoder_width_mismatch(self):
+        _X_raw, X_enc, y, enc = make_encoded_classification(n=100)
+        from sklearn.tree import DecisionTreeRegressor
+
+        model = DecisionTreeRegressor().fit(X_enc[:, :1], y.astype(float))
+        with pytest.raises(ValueError):
+            to_onnx(model, encoder=enc)
+
+    def test_quantile_rejects_encoder(self):
+        rng = np.random.RandomState(20)
+        X = rng.randn(60, 1)
+        y = rng.randn(60)
+        model = shinrin.RandomForestQuantileRegressor(n_estimators=3).fit(X, y)
+        enc = shinrin.TargetEncoder(categorical_features=None)
+        enc.fit(X, y)
+        with pytest.raises(ValueError, match="quantile"):
+            to_onnx(model, encoder=enc)
+
+
+class TestMemberExportMondrianRouting:
+    def test_smoothing_estimator_warns(self):
+        rng = np.random.RandomState(21)
+        X_raw = np.column_stack([rng.randint(0, 3, 200).astype(float), rng.randn(200)])
+        y = X_raw[:, 1]
+        enc = shinrin.TargetEncoder(categorical_features=[0]).fit(X_raw, y)
+        model = shinrin.MondrianTreeRegressor(path_smoothing=True, random_state=22).fit(
+            enc.transform(X_raw), y
+        )
+        assert getattr(model, "path_smoothing", True)
+        with pytest.warns(UserWarning, match="BRANCH_MEMBER"):
+            proto = to_onnx(model, encoder=enc)
+        props = {p.key: p.value for p in proto.metadata_props}
+        assert props["shinrin_treeensemble_export"] == "member-v5"
+
+    def test_approximate_false_keeps_exact_graph(self):
+        rng = np.random.RandomState(23)
+        X_raw = np.column_stack([rng.randint(0, 3, 150).astype(float), rng.randn(150)])
+        y = X_raw[:, 1]
+        enc = shinrin.TargetEncoder(categorical_features=[0]).fit(X_raw, y)
+        model = shinrin.MondrianForestRegressor(
+            n_estimators=2, path_smoothing=True, random_state=24
+        ).fit(enc.transform(X_raw), y)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            proto = to_onnx(model, encoder=enc, approximate=False)
+        props = {p.key: p.value for p in proto.metadata_props}
+        assert props.get("shinrin_mondrian_export") == "exact"

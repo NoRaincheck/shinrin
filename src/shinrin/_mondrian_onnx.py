@@ -220,6 +220,7 @@ def mondrian_to_onnx(
     name="ShinrinMondrianModel",
     target_opset=15,
     approximate: bool | None = None,
+    encoder=None,
 ):
     """Export a fitted Mondrian tree/forest to ONNX.
 
@@ -260,6 +261,14 @@ def mondrian_to_onnx(
         models additionally fall back to the tree-ensemble when the exact
         graph's estimated initializer size exceeds
         ``MONDRIAN_EXACT_MAX_BYTES`` (a :class:`UserWarning` is emitted).
+    encoder : fitted TargetEncoder, optional
+        Target encoder used to encode categorical columns before training.
+        When provided, forces the hard tree-structure encoding and emits an
+        ``ai.onnx.ml`` opset-5 ``TreeEnsemble`` with ``BRANCH_MEMBER``
+        categorical splits consuming raw category codes. Path smoothing
+        cannot be represented, so smoothing estimators export their hard
+        structure (a :class:`UserWarning` is emitted); pass
+        ``approximate=False`` to get the exact smoothing graph instead.
 
     Returns
     -------
@@ -276,6 +285,36 @@ def mondrian_to_onnx(
         )
     trees = _collect_trees(estimator)
     smoothing = bool(getattr(estimator, "path_smoothing", True))
+
+    if encoder is not None and approximate is not False:
+        # Member export always encodes the hard tree structure; warn when
+        # native predict() would smooth along paths because that behaviour
+        # cannot survive a tree-ensemble encoding.
+        if smoothing:
+            warnings.warn(
+                "encoder= exports the hard tree structure with BRANCH_MEMBER "
+                "categorical splits; Mondrian path smoothing cannot be "
+                "represented and predictions will deviate from native "
+                "predict(). Pass approximate=False for the exact smoothing "
+                "graph instead.",
+                UserWarning,
+                stacklevel=2,
+            )
+        from shinrin._treeensemble5_onnx import treeensemble_member_to_onnx
+
+        model = treeensemble_member_to_onnx(
+            estimator,
+            encoder,
+            feature_names=feature_names,
+            class_names=class_names,
+            name=name,
+            target_opset=target_opset,
+        )
+        # set_model_props replaces all entries; merge with the exporter's.
+        props = {p.key: p.value for p in model.metadata_props}
+        props[PROP_EXPORT_MODE] = MODE_TREE_ENSEMBLE
+        helper.set_model_props(model, props)
+        return model
 
     use_approx = approximate
     if not smoothing:
