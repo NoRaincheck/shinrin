@@ -122,3 +122,88 @@ def test_feature_count_mismatch_raises(xor_spotset):
     search = RashomonFlipSearch(clf)
     with pytest.raises(ValueError, match="features"):
         search.search(X[:, :2])
+
+
+# ---------------------------------------------------------------------------
+# scikit-learn forest / tree adapters (continuous features, L1 tweaks)
+# ---------------------------------------------------------------------------
+
+
+def _tree_min_flip_independent(tree, x, target_idx):
+    """Reference minimal L1 flip for one sklearn tree, written independently."""
+    INF = float("inf")
+    best = INF
+    stack = [(0, {})]
+    while stack:
+        node, path = stack.pop()
+        if tree.children_left[node] == -1:
+            if int(np.argmax(tree.value[node])) != target_idx:
+                continue
+            best = min(best, sum(max(0.0, lo - x[f], x[f] - hi) for f, (lo, hi) in path.items()))
+            continue
+        f, t = int(tree.feature[node]), float(tree.threshold[node])
+        plo, phi = path.get(f, (-np.inf, np.inf))
+        lo_path = dict(path)
+        lo_path[f] = (plo, min(phi, t))
+        hi_path = dict(path)
+        hi_path[f] = (max(plo, np.nextafter(t, np.inf)), phi)
+        stack.append((int(tree.children_left[node]), lo_path))
+        stack.append((int(tree.children_right[node]), hi_path))
+    return best
+
+
+@pytest.fixture(scope="module")
+def small_forest_data():
+    from sklearn.datasets import make_classification
+
+    X, y = make_classification(
+        n_samples=300,
+        n_features=4,
+        n_informative=2,
+        n_redundant=0,
+        class_sep=1.0,
+        random_state=0,
+    )
+    return X, y
+
+
+def test_sklearn_single_tree_minimality(small_forest_data):
+    from sklearn.tree import DecisionTreeClassifier
+
+    X, y = small_forest_data
+    tree = DecisionTreeClassifier(max_depth=3, random_state=0).fit(X, y)
+    search = RashomonFlipSearch(tree)
+    results = search.search(X[:25], scope="reference", target=int(y[0]) ^ 1)
+    for i, res in enumerate(results):
+        expected = _tree_min_flip_independent(tree.tree_, X[i], int(res.target))
+        assert res.success and res.verified
+        # adapter boundaries are float32-safe (sklearn casts inputs to
+        # float32), so distances can differ from raw-float64 arithmetic by a
+        # representable-ULP-sized sliver
+        assert res.l1_distance == pytest.approx(expected, abs=1e-5)
+
+
+def test_sklearn_forest_rashomon_scope(small_forest_data):
+    from sklearn.ensemble import RandomForestClassifier
+
+    X, y = small_forest_data
+    forest = RandomForestClassifier(
+        n_estimators=8, max_depth=3, random_state=0
+    ).fit(X, y)
+    search = RashomonFlipSearch(forest)
+
+    reference = search.search(X[:20], scope="reference")
+    assert all(r.success and r.verified and r.n_models_total == 8 for r in reference)
+
+    robust = search.search(X[:20], scope="rashomon", max_nodes=200_000)
+    solved = [r for r in robust if r.success]
+    # whatever the split between solved/infeasible, robust >= reference holds,
+    # every solved tweak flips all 8 trees (verified internally), and the
+    # decorrelated forest is markedly harder than the Rashomon set
+    for ref_res, rob_res in zip(reference, robust):
+        if ref_res.success and rob_res.success:
+            assert rob_res.l1_distance >= ref_res.l1_distance - 1e-12
+        if rob_res.success:
+            assert rob_res.verified
+            preds = forest.predict(rob_res.x_new.reshape(1, -1))[0]
+            assert preds == rob_res.target
