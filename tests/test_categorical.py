@@ -171,3 +171,150 @@ class TestPartitionRecovery:
         enc = TargetEncoder(categorical_features=[0]).fit(X, y)
         with pytest.raises(ValueError, match="not categorical"):
             enc.members(1, 0.5)
+
+
+# ---------------------------------------------------------------------------
+# Increment 2: CategoricalTree recovery layer
+# ---------------------------------------------------------------------------
+
+import shinrin
+from shinrin.categorical import CategoricalTree, to_categorical_tree
+
+
+def make_encoded_classification(n=400, seed=0):
+    """Raw-code X plus its target-encoded twin and the shared encoder."""
+    rng = np.random.RandomState(seed)
+    color = rng.randint(0, 4, size=n).astype(np.float64)
+    size = rng.randn(n)
+    X_raw = np.column_stack([color, size])
+    y = ((color == 1) | (color == 2)).astype(int)
+    enc = shinrin.TargetEncoder(categorical_features=[0]).fit(X_raw, y)
+    return X_raw, enc.transform(X_raw), y, enc
+
+
+class TestToCategoricalTree:
+    def test_members_recovered_on_categorical_splits(self):
+        _, X_enc, y, enc = make_encoded_classification()
+        from sklearn.tree import DecisionTreeClassifier
+
+        model = DecisionTreeClassifier(max_depth=3, random_state=0).fit(X_enc, y)
+        ctree = to_categorical_tree(model, enc)
+
+        assert isinstance(ctree, CategoricalTree)
+        assert ctree.n_features_in == 2
+        # Every split on feature 0 must carry member sets; feature 1 none.
+        for node in range(len(ctree.feature)):
+            if ctree.children_left[node] == -1:
+                continue
+            if ctree.feature[node] == 0:
+                m = ctree.members[node]
+                thr = ctree.threshold[node]
+                np.testing.assert_array_equal(m, enc.members(0, thr))
+            else:
+                assert ctree.members[node] is None
+
+    def test_apply_matches_source_tree_routing(self):
+        X_raw, X_enc, y, enc = make_encoded_classification()
+        from sklearn.tree import DecisionTreeClassifier
+
+        model = DecisionTreeClassifier(max_depth=4, random_state=1).fit(X_enc, y)
+        ctree = to_categorical_tree(model, enc)
+        # Raw-convention routing through member sets must reproduce the
+        # source tree's encoded-space routing.
+        np.testing.assert_array_equal(
+            ctree.apply(X_raw), model.tree_.apply(X_enc.astype(np.float32))
+        )
+
+    def test_round_trip_partitions_preserved(self):
+        X_raw, X_enc, y, enc = make_encoded_classification()
+        from sklearn.ensemble import RandomForestClassifier
+
+        model = RandomForestClassifier(n_estimators=5, random_state=2).fit(X_enc, y)
+        ctrees = to_categorical_tree(model, enc)
+        assert isinstance(ctrees, list) and len(ctrees) == 5
+        for ctree, est in zip(ctrees, model.estimators_):
+            thr = ctree.to_encoded_thresholds(enc)
+            for node, m in enumerate(ctree.members):
+                if m is None:
+                    continue
+                f = int(ctree.feature[node])
+                np.testing.assert_array_equal(enc.members(f, thr[node]), m)
+            # Routing unchanged after round trip (raw vs encoded inputs).
+            np.testing.assert_array_equal(
+                ctree.apply(X_raw), est.tree_.apply(X_enc.astype(np.float32))
+            )
+
+    def test_prediction_equivalence_regressor(self):
+        rng = np.random.RandomState(3)
+        n = 300
+        color = rng.randint(0, 3, n).astype(np.float64)
+        num = rng.randn(n)
+        X_raw = np.column_stack([color, num])
+        y = 10.0 * (color == 2) + num
+        enc = shinrin.TargetEncoder(categorical_features=[0]).fit(X_raw, y)
+        from sklearn.tree import DecisionTreeRegressor
+
+        model = DecisionTreeRegressor(random_state=4).fit(enc.transform(X_raw), y)
+        ctree = to_categorical_tree(model, enc)
+        pred_ct = ctree.value[ctree.apply(X_raw)].ravel()
+        np.testing.assert_allclose(pred_ct, model.predict(enc.transform(X_raw)))
+
+    def test_text_rendering(self):
+        rng = np.random.RandomState(5)
+        n = 150
+        color = rng.randint(0, 3, n).astype(np.float64)
+        size = rng.randn(n)
+        enc = shinrin.TargetEncoder(categorical_features=[0])
+        from sklearn.tree import DecisionTreeClassifier
+
+        cat_model = DecisionTreeClassifier(random_state=6).fit(
+            enc.fit_transform(np.column_stack([color, size]), color == 2),
+            color == 2,
+        )
+        text_cat = to_categorical_tree(cat_model, enc).to_text(["color", "size"])
+        assert "color in {" in text_cat
+
+        num_model = DecisionTreeClassifier(random_state=7).fit(
+            enc.transform(np.column_stack([color, size])), size > 0
+        )
+        text_num = to_categorical_tree(num_model, enc).to_text(["color", "size"])
+        assert "size <=" in text_num
+
+    def test_bad_encoder_rejected(self):
+        _, X_enc, y, _ = make_encoded_classification(n=80)
+        from sklearn.tree import DecisionTreeClassifier
+
+        model = DecisionTreeClassifier(max_depth=2).fit(X_enc, y)
+        with pytest.raises(TypeError, match="lacks fitted attribute"):
+            to_categorical_tree(model, object())
+
+    def test_lazy_exports(self):
+        assert shinrin.CategoricalTree is CategoricalTree
+        assert shinrin.TargetEncoder is not None
+
+    @pytest.mark.parametrize(
+        "model_factory",
+        [
+            lambda: shinrin.MondrianForestRegressor(n_estimators=3, random_state=8),
+            lambda: shinrin.MondrianForestClassifier(n_estimators=3, random_state=9),
+        ],
+        ids=["regressor", "classifier"],
+    )
+    def test_mondrian_forest_recovery(self, model_factory):
+        X_raw, X_enc, y, enc = make_encoded_classification()
+        model = model_factory().fit(X_enc, y)
+        ctrees = to_categorical_tree(model, enc)
+        assert isinstance(ctrees, list) and len(ctrees) == 3
+        n_checked = 0
+        for ctree, est in zip(ctrees, model.estimators_):
+            for node, m in enumerate(ctree.members):
+                if m is None:
+                    continue
+                np.testing.assert_array_equal(
+                    m, enc.members(int(ctree.feature[node]), ctree.threshold[node])
+                )
+                n_checked += 1
+            np.testing.assert_array_equal(
+                ctree.apply(X_raw), est.tree_.apply(X_enc.astype(np.float32))
+            )
+        assert n_checked > 0

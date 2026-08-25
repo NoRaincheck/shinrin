@@ -21,6 +21,7 @@ from typing import Any
 __version__ = "0.2.0"
 
 __all__ = [
+    "CategoricalTree",
     "CorelsClassifier",
     "DecisionTreeQuantileRegressor",
     "ExtraTreeQuantileRegressor",
@@ -40,6 +41,7 @@ __all__ = [
     "SPOTClassifier",
     "SPOTSETClassifier",
     "SkopeRules",
+    "TargetEncoder",
     "ThresholdGuessBinarizer",
     "TreeExplainer",
     "benchmark_model_size",
@@ -51,6 +53,7 @@ __all__ = [
     "replace_feature_name",
     "save_onnx",
     "summarize_flip_results",
+    "to_categorical_tree",
     "to_onnx",
 ]
 
@@ -61,6 +64,7 @@ __all__ = [
 # Mapping of public name → (module_path, attr_name)
 _IMPORT_MAP: dict[str, tuple[str, str]] = {
     "CorelsClassifier": ("shinrin._corels.corels", "CorelsClassifier"),
+    "CategoricalTree": ("shinrin.categorical", "CategoricalTree"),
     "NumericBinarizer": ("shinrin._spot.binarizer", "NumericBinarizer"),
     "OrdtClassifier": ("shinrin._ordt", "OrdtClassifier"),
     "ExtraTreesRegressor": ("shinrin._skgarden.forest", "ExtraTreesRegressor"),
@@ -98,6 +102,7 @@ _IMPORT_MAP: dict[str, tuple[str, str]] = {
         "MondrianTreeRegressor",
     ),
     "Rule": ("shinrin._skrules.rule", "Rule"),
+    "TargetEncoder": ("shinrin._encoding", "TargetEncoder"),
     "replace_feature_name": ("shinrin._skrules.rule", "replace_feature_name"),
     "SkopeRules": ("shinrin._skrules.skope_rules", "SkopeRules"),
     "SPOTClassifier": ("shinrin._spot.classifier", "SPOTClassifier"),
@@ -111,6 +116,7 @@ _IMPORT_MAP: dict[str, tuple[str, str]] = {
     ),
     "TreeExplainer": ("shinrin.shap", "TreeExplainer"),
     "explanation": ("shinrin.shap", "explanation"),
+    "to_categorical_tree": ("shinrin.categorical", "to_categorical_tree"),
     "to_onnx": ("shinrin.onnx", "to_onnx"),
     "save_onnx": ("shinrin.onnx", "save_onnx"),
     "benchmark_training": ("shinrin.benchmark", "benchmark_training"),
