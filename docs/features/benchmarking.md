@@ -73,31 +73,22 @@ Model: shinrin_forest
   Model Size:      148.5 KB
 ```
 
-## BitLinear Ablation (before vs after ternary quantization)
+## Ablation Benchmark (before vs after a feature)
 
-The MLP and TabM estimators support training-aware ternary weight
-quantization ("BitLinear"): latent float32 weights are trained with a
-straight-through estimator while the forward pass uses their
-`{-1, 0, +1} * gamma` absmean approximation. Use
-`ablation_benchmark()` to quantify the before/after cost of switching
-it on — fit time plus held-out quality for the full-precision baseline
-and each quantized variant:
+`ablation_benchmark()` quantifies the before/after cost of toggling a
+feature — fit time plus held-out quality for the baseline and each
+variant. Pass the same estimator type with one option changed:
 
 ```python
-from shinrin import MLPClassifier
+from shinrin import MondrianForestRegressor
 from shinrin.benchmark import ablation_benchmark, print_ablation_report
 
 variants = {
-    "fp (baseline)": MLPClassifier(
-        hidden_layer_sizes=(128, 64), max_iter=100, random_state=0,
+    "small (baseline)": MondrianForestRegressor(
+        n_estimators=10, random_state=0,
     ),
-    "ternary/row": MLPClassifier(
-        hidden_layer_sizes=(128, 64), max_iter=100, random_state=0,
-        quantization="ternary", quantization_granularity="per_row",
-    ),
-    "ternary/tensor": MLPClassifier(
-        hidden_layer_sizes=(128, 64), max_iter=100, random_state=0,
-        quantization="ternary", quantization_granularity="per_tensor",
+    "large": MondrianForestRegressor(
+        n_estimators=40, random_state=0,
     ),
 }
 
@@ -105,8 +96,7 @@ results = ablation_benchmark(variants, X_train, y_train, X_test, y_test)
 print_ablation_report(results)
 ```
 
-Example output (synthetic regression, 4,000 train / 1,000 held-out x 20,
-NumPy backend):
+Example output:
 
 ```
 ========================================================================
@@ -114,20 +104,10 @@ NumPy backend):
 ========================================================================
 variant                     fit      Δfit   test score    Δscore
 ------------------------------------------------------------------------
-fp (baseline)           0.128s     1.00x       0.9945    +0.0000
-ternary/row             0.353s     2.77x       0.9941    -0.0005
-ternary/tensor          0.296s     2.32x       0.9959    +0.0013
+small (baseline)        0.128s     1.00x       0.9945    +0.0000
+large                   0.296s     2.32x       0.9959    +0.0013
 ========================================================================
 ```
-
-The same pattern works for TabM (`quantization="ternary"` on
-`TabMClassifier` / `TabMRegressor`; pass `alpha=0` when quantizing) and
-for any other before/after comparison of estimator variants.
-
-Measured ablations across backends and tasks live in
-[`BITLINEAR_BENCHMARK.md`](https://github.com/NoRaincheck/shinrin/blob/main/scripts/benchmarks/BITLINEAR_BENCHMARK.md);
-headline: ~2–25% QAT overhead at these sizes, regression R² holds at
-parity, rank-based multiclass tasks are more sensitive.
 
 ## Scripts
 
@@ -141,14 +121,9 @@ results documents:
 | `bench_gosdt.py` | GOSDT pipeline vs scikit-learn CART (speed, accuracy, tree size, optimality gap) | `GOSDT_BENCHMARK.md` |
 | `bench_corels.py` | CORELS fit times, mini-GMP vs no-GMP builds | printed |
 | `bench_ordt.py` | ORDT: optimal rule-sets from decision trees — skope-rules mining + CORELS selection vs cart/skope/corels (`just bench-ordt`) | `ORDT_BENCHMARK.md` |
-| `bench_mlp.py` | sklearn vs shinrin MLP backends (NumPy/Mojo/PLE) | `MLP_BENCHMARK.md` |
-| `bench_bitlinear.py` | Ternary (BitLinear) QAT vs full precision, MLP/TabM both backends + TabICL PTQ inference | `BITLINEAR_BENCHMARK.md` |
 | `bench_backends.py` | Rust vs Mojo backends | `BENCHMARK.md` |
-| `bench_tabm.py` | TabM NumPy/Mojo/PyTorch | `TABM_BENCHMARK.md` |
-| `bench_tabicl.py` | TabICL fit/predict across NumPy/torch/Mojo backends with predict throughput, plus optional PTQ ablation (`--quant-ablation`) and `batch_size x kv_cache` sweep (`--cache-sweep`) | `TABICL_BENCHMARK.md` |
 
-Run them with `just bench-gosdt`, `just bench-mlp`, `just bench-backends`, etc.
-`just bench-bitlinear` runs the ternary-quantization ablation benchmark;
+Run them with `just bench-gosdt`, `just bench-backends`, etc.
 `just bench-all` runs `bench_all.py`, which measures every algorithm on every
 dataset in the suite and republishes the results page. `just bench-tabarena`
 runs `bench_tabarena.py`, which measures the same algorithm matrix on a core
@@ -158,16 +133,6 @@ classification — fetched from OpenML on first use. Scores are not comparable
 with the public TabArena leaderboard (single fixed split, untuned budgets);
 the point is comparing shinrin's algorithms against each other on curated
 real-world data.
-
-There is no `just` recipe for the TabICL benchmark; run it directly:
-
-```bash
-uv run python scripts/benchmarks/bench_tabicl.py --backend numpy --quick
-uv run --extra tabicl-bench python scripts/benchmarks/bench_tabicl.py \
-    --backend torch --with-upstream
-uv run python scripts/benchmarks/bench_tabicl.py --backend mojo \
-    --quant-ablation --cache-sweep
-```
 
 The baseline tree-model comparison against LightGBM / scikit-learn lives in
 [`scripts/benchmarks/bench_baselines.py`](https://github.com/NoRaincheck/shinrin/blob/main/scripts/benchmarks/bench_baselines.py)

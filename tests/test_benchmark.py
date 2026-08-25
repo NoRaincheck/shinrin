@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import numpy as np
-from sklearn.linear_model import LogisticRegression
+from sklearn.linear_model import LogisticRegression, RidgeClassifier
 
 from shinrin.benchmark import (
     ablation_benchmark,
@@ -12,7 +12,6 @@ from shinrin.benchmark import (
     print_ablation_report,
     print_benchmark_report,
 )
-from shinrin.mlp import MLPClassifier
 
 
 def _toy_data(n=150, d=4, seed=0):
@@ -39,26 +38,21 @@ def test_ablation_benchmark_metrics():
     X, y = _toy_data()
     n_test = 40
     variants = {
-        "fp": MLPClassifier(hidden_layer_sizes=(8,), max_iter=30, random_state=0),
-        "ternary": MLPClassifier(
-            hidden_layer_sizes=(8,),
-            max_iter=30,
-            random_state=0,
-            quantization="ternary",
-        ),
+        "ridge-c": RidgeClassifier(alpha=1.0),
+        "ridge-strong": RidgeClassifier(alpha=100.0),
     }
     results = ablation_benchmark(
         variants, X[:-n_test], y[:-n_test], X[-n_test:], y[-n_test:]
     )
-    assert set(results) == {"fp", "ternary"}
+    assert set(results) == {"ridge-c", "ridge-strong"}
     for metrics in results.values():
         assert metrics["fit_time"] > 0
         assert metrics["predict_time"] >= 0
         assert 0 <= metrics["train_score"] <= 1
         assert 0 <= metrics["test_score"] <= 1
-    # the quantized variant must not be catastrophically worse on this
-    # linearly separable toy (ablation-style sanity bound)
-    assert results["ternary"]["test_score"] >= results["fp"]["test_score"] - 0.15
+    # both variants must be reasonable on this linearly separable toy
+    assert results["ridge-c"]["test_score"] >= 0.7
+    assert results["ridge-strong"]["test_score"] >= 0.7
 
 
 def test_print_ablation_report(capsys):

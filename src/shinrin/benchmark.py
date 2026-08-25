@@ -310,9 +310,9 @@ def ablation_benchmark(
     """Measure fit time and held-out quality for a set of model variants.
 
     The intended use is *ablation* benchmarks: pass the same estimator
-    with one feature toggled — e.g. an MLP without quantization next to
-    ``quantization='ternary'`` variants (BitLinear) — to quantify the
-    before/after cost of the feature on speed and quality.
+    with one feature toggled — e.g. a forest with and without a preprocessing
+    step — to quantify the before/after cost of the feature on speed and
+    quality.
 
     Parameters
     ----------
@@ -342,21 +342,19 @@ def ablation_benchmark(
 
     Examples
     --------
-    >>> from shinrin import MLPClassifier
+    >>> from shinrin import MondrianForestRegressor
     >>> from shinrin.benchmark import ablation_benchmark
     >>> import numpy as np
     >>> rng = np.random.RandomState(0)
     >>> X = rng.randn(200, 4).astype(np.float32)
-    >>> y = ((X[:, 0] + X[:, 1]) > 0).astype(np.int64)
+    >>> y = X[:, 0] * 2.0 + 1.0
     >>> variants = {
-    ...     "fp": MLPClassifier(hidden_layer_sizes=(8,), max_iter=50),
-    ...     "ternary": MLPClassifier(
-    ...         hidden_layer_sizes=(8,), max_iter=50, quantization="ternary"
-    ...     ),
+    ...     "small": MondrianForestRegressor(n_estimators=5, random_state=0),
+    ...     "large": MondrianForestRegressor(n_estimators=20, random_state=0),
     ... }
     >>> results = ablation_benchmark(variants, X[:150], y[:150], X[150:], y[150:])
     >>> sorted(results)  # doctest: +SKIP
-    ['fp', 'ternary']
+    ['large', 'small']
     """
     results = {}
     for name, model in models.items():

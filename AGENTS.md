@@ -13,12 +13,13 @@ Workflow:
 
 1. **Plan the increments first.** Write down the ordered list of small steps
    before touching code. Each step should be one coherent change (e.g. "move
-   GEMM helpers to a new module", "add affine support to LayerNorm").
+   the ONNX graph helpers to a new module", "add a criterion option to
+   Mondrian trees").
 2. **Prefer verbatim code motion over rewriting.** When splitting or moving
    code between files, copy it exactly; apply behavior changes as separate
    follow-up steps so a broken build is easy to attribute.
 3. **Verify after every step.** The relevant fast check is:
-   - Mojo: `just build-tabicl-mojo` (or `uv run mojo build ...`) must succeed.
+   - Mojo: `just build-mojo` (or `uv run mojo build ...`) must succeed.
    - Python: run the narrowest applicable pytest subset.
    - Rust: `cargo check` / `just lint`.
    Never stack multiple unverified changes.

@@ -10,7 +10,7 @@
       "shinrin": "0.2.0",
       "NumPy": "2.5.2",
       "scikit-learn": "1.9.0",
-      "Backends": "Rust (Mondrian); NumPy reference (MLP, TabM)"
+      "Backends": "Rust (Mondrian)"
     }
   },
   "datasets": {
@@ -184,32 +184,6 @@
       "n_leaves": 10986
     },
     {
-      "dataset": "diabetes",
-      "algorithm": "MLP",
-      "task": "regression",
-      "status": "ok",
-      "note": "",
-      "fit_s": 0.04367079201620072,
-      "fit_mean_s": 0.04421562534601738,
-      "fit_repeats": 3,
-      "predict_ms": 0.14215410919860005,
-      "predict_per_1k_ms": 1.5972371820067421,
-      "score": 0.20642249864693096
-    },
-    {
-      "dataset": "diabetes",
-      "algorithm": "TabM",
-      "task": "regression",
-      "status": "ok",
-      "note": "",
-      "fit_s": 10.048855332977837,
-      "fit_mean_s": 10.059907818998909,
-      "fit_repeats": 3,
-      "predict_ms": 3.846091704326682,
-      "predict_per_1k_ms": 43.214513531760474,
-      "score": 0.3354380066923881
-    },
-    {
       "dataset": "friedman1-2k",
       "algorithm": "MondrianTree",
       "task": "regression",
@@ -298,32 +272,6 @@
       "score": 0.8491340861503535,
       "n_nodes": 100674,
       "n_leaves": 50362
-    },
-    {
-      "dataset": "friedman1-2k",
-      "algorithm": "MLP",
-      "task": "regression",
-      "status": "ok",
-      "note": "",
-      "fit_s": 0.14937125000869855,
-      "fit_mean_s": 0.14978488867442744,
-      "fit_repeats": 3,
-      "predict_ms": 0.198149707284756,
-      "predict_per_1k_ms": 0.49537426821189,
-      "score": 0.8370514785415377
-    },
-    {
-      "dataset": "friedman1-2k",
-      "algorithm": "TabM",
-      "task": "regression",
-      "status": "ok",
-      "note": "",
-      "fit_s": 44.57254229197861,
-      "fit_mean_s": 45.67057873666636,
-      "fit_repeats": 3,
-      "predict_ms": 15.029649998177774,
-      "predict_per_1k_ms": 37.574124995444436,
-      "score": 0.841242293492676
     },
     {
       "dataset": "friedman1-10k",
@@ -416,32 +364,6 @@
       "n_leaves": 252871
     },
     {
-      "dataset": "friedman1-10k",
-      "algorithm": "MLP",
-      "task": "regression",
-      "status": "ok",
-      "note": "",
-      "fit_s": 0.708231333992444,
-      "fit_mean_s": 0.708231333992444,
-      "fit_repeats": 1,
-      "predict_ms": 0.6869583012303337,
-      "predict_per_1k_ms": 0.3434791506151669,
-      "score": 0.9485559880440093
-    },
-    {
-      "dataset": "friedman1-10k",
-      "algorithm": "TabM",
-      "task": "regression",
-      "status": "ok",
-      "note": "",
-      "fit_s": 225.75198804200045,
-      "fit_mean_s": 225.75198804200045,
-      "fit_repeats": 1,
-      "predict_ms": 71.1766333959531,
-      "predict_per_1k_ms": 35.58831669797655,
-      "score": 0.9537179245700153
-    },
-    {
       "dataset": "california-10k",
       "algorithm": "MondrianTree",
       "task": "regression",
@@ -530,32 +452,6 @@
       "score": 0.774734907539877,
       "n_nodes": 494714,
       "n_leaves": 247382
-    },
-    {
-      "dataset": "california-10k",
-      "algorithm": "MLP",
-      "task": "regression",
-      "status": "ok",
-      "note": "",
-      "fit_s": 0.34141833399189636,
-      "fit_mean_s": 0.34141833399189636,
-      "fit_repeats": 1,
-      "predict_ms": 0.662670805468224,
-      "predict_per_1k_ms": 0.331335402734112,
-      "score": -2.6526325892580207
-    },
-    {
-      "dataset": "california-10k",
-      "algorithm": "TabM",
-      "task": "regression",
-      "status": "ok",
-      "note": "",
-      "fit_s": 218.38969970901962,
-      "fit_mean_s": 218.38969970901962,
-      "fit_repeats": 1,
-      "predict_ms": 69.90854150208179,
-      "predict_per_1k_ms": 34.954270751040895,
-      "score": 0.692726632793587
     },
     {
       "dataset": "make-regression-5k",
@@ -648,32 +544,6 @@
       "n_leaves": 126345
     },
     {
-      "dataset": "make-regression-5k",
-      "algorithm": "MLP",
-      "task": "regression",
-      "status": "ok",
-      "note": "",
-      "fit_s": 0.36310849999426864,
-      "fit_mean_s": 0.3642025416678128,
-      "fit_repeats": 3,
-      "predict_ms": 0.38965420390013605,
-      "predict_per_1k_ms": 0.38965420390013605,
-      "score": 0.9971325446787879
-    },
-    {
-      "dataset": "make-regression-5k",
-      "algorithm": "TabM",
-      "task": "regression",
-      "status": "ok",
-      "note": "",
-      "fit_s": 140.15453679201892,
-      "fit_mean_s": 140.4256639306744,
-      "fit_repeats": 3,
-      "predict_ms": 43.94999150244985,
-      "predict_per_1k_ms": 43.94999150244985,
-      "score": 0.9962424922565011
-    },
-    {
       "dataset": "breast-cancer",
       "algorithm": "MondrianTree",
       "task": "classification",
@@ -702,32 +572,6 @@
       "score": 0.9122807017543859,
       "n_nodes": 3482,
       "n_leaves": 1751
-    },
-    {
-      "dataset": "breast-cancer",
-      "algorithm": "MLP",
-      "task": "classification",
-      "status": "ok",
-      "note": "",
-      "fit_s": 0.033454749995144084,
-      "fit_mean_s": 0.03379652766549649,
-      "fit_repeats": 3,
-      "predict_ms": 0.1811207999708131,
-      "predict_per_1k_ms": 1.5887789471123956,
-      "score": 0.8947368421052632
-    },
-    {
-      "dataset": "breast-cancer",
-      "algorithm": "TabM",
-      "task": "classification",
-      "status": "ok",
-      "note": "",
-      "fit_s": 16.761964042001637,
-      "fit_mean_s": 16.777029847338174,
-      "fit_repeats": 3,
-      "predict_ms": 5.466408404754475,
-      "predict_per_1k_ms": 47.9509509188989,
-      "score": 0.9473684210526315
     },
     {
       "dataset": "breast-cancer",
@@ -787,32 +631,6 @@
     },
     {
       "dataset": "wine",
-      "algorithm": "MLP",
-      "task": "classification",
-      "status": "ok",
-      "note": "",
-      "fit_s": 0.026397874986287206,
-      "fit_mean_s": 0.026514110999414697,
-      "fit_repeats": 3,
-      "predict_ms": 0.16191649774555117,
-      "predict_per_1k_ms": 3.5981443943455815,
-      "score": 0.8222222222222222
-    },
-    {
-      "dataset": "wine",
-      "algorithm": "TabM",
-      "task": "classification",
-      "status": "ok",
-      "note": "",
-      "fit_s": 5.232478165999055,
-      "fit_mean_s": 5.233521194333055,
-      "fit_repeats": 3,
-      "predict_ms": 4.710441696806811,
-      "predict_per_1k_ms": 104.67648215126246,
-      "score": 0.7111111111111111
-    },
-    {
-      "dataset": "wine",
       "algorithm": "GOSDT",
       "task": "classification",
       "status": "skipped",
@@ -859,32 +677,6 @@
     },
     {
       "dataset": "digits",
-      "algorithm": "MLP",
-      "task": "classification",
-      "status": "ok",
-      "note": "",
-      "fit_s": 0.22524487500777468,
-      "fit_mean_s": 0.22989069466711953,
-      "fit_repeats": 3,
-      "predict_ms": 2.954850098467432,
-      "predict_per_1k_ms": 8.20791694018731,
-      "score": 0.9166666666666666
-    },
-    {
-      "dataset": "digits",
-      "algorithm": "TabM",
-      "task": "classification",
-      "status": "ok",
-      "note": "",
-      "fit_s": 121.17238216701662,
-      "fit_mean_s": 121.21559112534548,
-      "fit_repeats": 3,
-      "predict_ms": 46.22109160118271,
-      "predict_per_1k_ms": 128.3919211143964,
-      "score": 0.9583333333333334
-    },
-    {
-      "dataset": "digits",
       "algorithm": "GOSDT",
       "task": "classification",
       "status": "skipped",
@@ -928,32 +720,6 @@
       "score": 0.864,
       "n_nodes": 21028,
       "n_leaves": 10524
-    },
-    {
-      "dataset": "synthetic-binary-5k",
-      "algorithm": "MLP",
-      "task": "classification",
-      "status": "ok",
-      "note": "",
-      "fit_s": 0.38841654200223275,
-      "fit_mean_s": 0.3902304446673952,
-      "fit_repeats": 3,
-      "predict_ms": 0.46709179878234863,
-      "predict_per_1k_ms": 0.46709179878234863,
-      "score": 0.969
-    },
-    {
-      "dataset": "synthetic-binary-5k",
-      "algorithm": "TabM",
-      "task": "classification",
-      "status": "ok",
-      "note": "",
-      "fit_s": 130.7399422500166,
-      "fit_mean_s": 130.82085649999985,
-      "fit_repeats": 3,
-      "predict_ms": 39.9830874055624,
-      "predict_per_1k_ms": 39.9830874055624,
-      "score": 0.956
     },
     {
       "dataset": "synthetic-binary-5k",
@@ -1013,27 +779,6 @@
     },
     {
       "dataset": "synthetic-binary-20k",
-      "algorithm": "MLP",
-      "task": "classification",
-      "status": "ok",
-      "note": "",
-      "fit_s": 1.69528741700924,
-      "fit_mean_s": 1.69528741700924,
-      "fit_repeats": 1,
-      "predict_ms": 1.6878873982932419,
-      "predict_per_1k_ms": 0.42197184957331046,
-      "score": 0.97875
-    },
-    {
-      "dataset": "synthetic-binary-20k",
-      "algorithm": "TabM",
-      "task": "classification",
-      "status": "skipped",
-      "note": "row cap 12,000",
-      "fit_repeats": 0
-    },
-    {
-      "dataset": "synthetic-binary-20k",
       "algorithm": "GOSDT",
       "task": "classification",
       "status": "skipped",
@@ -1077,32 +822,6 @@
       "score": 0.65,
       "n_nodes": 26758,
       "n_leaves": 13389
-    },
-    {
-      "dataset": "synthetic-multiclass-5k",
-      "algorithm": "MLP",
-      "task": "classification",
-      "status": "ok",
-      "note": "",
-      "fit_s": 0.3711948749842122,
-      "fit_mean_s": 0.37212965298870887,
-      "fit_repeats": 3,
-      "predict_ms": 0.5310292035574093,
-      "predict_per_1k_ms": 0.5310292035574093,
-      "score": 0.837
-    },
-    {
-      "dataset": "synthetic-multiclass-5k",
-      "algorithm": "TabM",
-      "task": "classification",
-      "status": "ok",
-      "note": "",
-      "fit_s": 171.49633287498727,
-      "fit_mean_s": 171.58200247232648,
-      "fit_repeats": 3,
-      "predict_ms": 89.5409082993865,
-      "predict_per_1k_ms": 89.5409082993865,
-      "score": 0.845
     },
     {
       "dataset": "synthetic-multiclass-5k",

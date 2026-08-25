@@ -31,38 +31,6 @@ build-mojo:
 test-mojo: build-mojo
     SHINRIN_BACKEND=mojo uv run pytest tests/
 
-# Build the TabM Mojo trainer extension (shinrin._native_tabm)
-build-tabm-mojo:
-    uv run mojo build src/shinrin/_tabm_kernels.mojo --emit shared-lib -o src/shinrin/_native_tabm.so
-
-# Run TabM tests against the Mojo backend
-test-tabm-mojo: build-tabm-mojo
-    SHINRIN_TABM_BACKEND=mojo uv run pytest tests/test_tabm_parity.py tests/test_tabm.py
-
-# Build the MLP Mojo trainer extension (shinrin._native_mlp)
-build-mlp-mojo:
-    uv run mojo build src/shinrin/_mlp_kernels.mojo --emit shared-lib -o src/shinrin/_native_mlp.so
-
-# Run MLP tests against the Mojo backend
-test-mlp-mojo: build-mlp-mojo
-    SHINRIN_MLP_BACKEND=mojo uv run pytest tests/test_mlp_parity.py tests/test_mlp.py
-
-# Benchmark sklearn vs shinrin MLP backends
-bench-mlp:
-    uv run python scripts/benchmarks/bench_mlp.py
-
-# Benchmark ternary (BitLinear) quantization vs full precision
-bench-bitlinear:
-    uv run python scripts/benchmarks/bench_bitlinear.py
-
-# Build the TabICL Mojo native extension (shinrin._native_tabicl)
-build-tabicl-mojo:
-    uv run mojo build src/shinrin/_tabicl_kernels.mojo --emit shared-lib -I src -o src/shinrin/_native_tabicl.so
-
-# Run TabICL tests against the Mojo backend
-test-tabicl-mojo: build-tabicl-mojo
-    SHINRIN_TABICL_BACKEND=mojo uv run pytest tests/test_tabicl_parity.py tests/test_tabicl.py
-
 # Benchmark GOSDT vs scikit-learn CART
 bench-gosdt:
     uv run python scripts/benchmarks/bench_gosdt.py
