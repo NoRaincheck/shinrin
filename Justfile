@@ -83,6 +83,10 @@ bench-backends: build-mojo
 bench-all:
     uv run python scripts/benchmarks/bench_all.py
 
+# Benchmark all shinrin algorithms on the TabArena-v0.1 core subset (~40 min; --smoke for a quick pass)
+bench-tabarena:
+    uv run --extra pandas python scripts/benchmarks/bench_tabarena.py
+
 # ---------- Test ----------
 
 # Run Python and Rust tests
