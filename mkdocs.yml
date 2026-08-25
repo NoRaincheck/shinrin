@@ -37,6 +37,7 @@ nav:
       - TreeSHAP Explanations: features/treeshap-explanations.md
       - Minimal-Flip Feature Tweaking: features/minimal-flip-tweaking.md
       - ONNX Export: features/onnx-export.md
+      - Categorical Features & Target Encoding: features/target-encoding.md
       - Benchmarking: features/benchmarking.md
       - Benchmark Results: features/benchmark-results.md
   - API Reference: api-reference.md
