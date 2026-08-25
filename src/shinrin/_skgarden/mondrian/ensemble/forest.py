@@ -11,6 +11,8 @@ from shinrin._compat.sklearn_utils_validation import check_is_fitted
 from shinrin._compat.sklearn_utils_validation import check_X_y
 from joblib import delayed, Parallel
 
+from shinrin._categorical import TargetStatisticsEncoder, resolve_categorical_mask
+
 from warnings import warn
 
 
@@ -47,6 +49,59 @@ def _single_tree_pfit(tree, X, y, classes=None):
     return tree
 
 class BaseMondrian(object):
+    def _make_estimator(self, append=True, random_state=None):
+        """Create a tree estimator with forest-level categorical handling.
+
+        Categorical columns are detected and target-encoded once at the
+        forest level; individual trees only ever see already-encoded
+        numeric features, so their own auto-detection must stay off.
+        """
+        est = super()._make_estimator(append=append, random_state=random_state)
+        est.categorical_features = None
+        return est
+
+    def _resolve_and_encode_fit(self, X, y):
+        """Detect categorical columns on (X, y) and fit the shared encoder.
+
+        Returns the (possibly) encoded feature matrix for training.
+        """
+        if isinstance(self, ClassifierMixin):
+            _, y_stats = np.unique(y, return_inverse=True)
+        else:
+            y_stats = np.asarray(y, dtype=np.float64).ravel()
+        mask = resolve_categorical_mask(
+            X, self.categorical_features, self.max_categories)
+        self.categorical_features_ = mask
+        encoder = None
+        if mask is not None and mask.any():
+            encoder = TargetStatisticsEncoder().fit(X, y_stats, mask)
+        self._cat_encoder_ = (
+            encoder if encoder is not None and encoder.active_ else None)
+        if self._cat_encoder_ is not None:
+            X = self._cat_encoder_.transform(X)
+        return X
+
+    def _validate_X_predict(self, X):
+        """Validate input features and apply categorical encoding."""
+        X = super()._validate_X_predict(X)
+        encoder = getattr(self, "_cat_encoder_", None)
+        if encoder is not None:
+            X = encoder.transform(X)
+        return X
+
+    def transform_categoricals(self, X):
+        """Encode integer-coded categorical columns of ``X`` for this model.
+
+        Applies the fitted CatBoost-style target-statistic mapping to the
+        columns selected by ``categorical_features`` during ``fit``.
+        Columns without categorical handling pass through unchanged.
+        Values unseen at fit time map to the global prior.
+        """
+        encoder = getattr(self, "_cat_encoder_", None)
+        if encoder is None:
+            return np.asarray(X, dtype=np.float32)
+        return encoder.transform(X)
+
     def pred_contribs(self, X, path_smoothing=None):
         """Return TreeSHAP values including the base value.
 
@@ -147,7 +202,11 @@ class BaseMondrian(object):
             Anomaly scores for each sample. Higher values indicate more
             anomalous samples.
         """
-        X = self._validate_X_predict(X)
+        return self._pred_anomaly_from_validated(
+            self._validate_X_predict(X), n_train=n_train)
+
+    def _pred_anomaly_from_validated(self, X, n_train=None):
+        """Anomaly scores for already-validated (encoded) features."""
         total_anomaly = np.zeros(X.shape[0])
         for est in self.estimators_:
             total_anomaly += est._compute_anomaly(X)
@@ -294,6 +353,25 @@ class BaseMondrian(object):
                 tree = self._make_estimator(append=False, random_state=random_state)
                 self.estimators_.append(tree)
 
+        # Fit the categorical encoder once on the first batch; later batches
+        # map through the frozen statistics.
+        if first_call:
+            if isinstance(self, ClassifierMixin):
+                y_stats = np.searchsorted(self.classes_, y).astype(np.float64)
+            else:
+                y_stats = np.asarray(y, dtype=np.float64).ravel()
+            mask = resolve_categorical_mask(
+                X, self.categorical_features, self.max_categories)
+            self.categorical_features_ = mask
+            encoder = None
+            if mask is not None and mask.any():
+                encoder = TargetStatisticsEncoder().fit(X, y_stats, mask)
+            self._cat_encoder_ = (
+                encoder if encoder is not None and encoder.active_ else None)
+
+        if getattr(self, "_cat_encoder_", None) is not None:
+            X = self._cat_encoder_.transform(X)
+
         # XXX: Switch to threading backend when GIL is released.
         # Disable parallelism for ONNX-converted forests (PyTree is unsendable)
         effective_n_jobs = 1 if hasattr(self, '_onnx_converted') else self.n_jobs
@@ -307,7 +385,7 @@ class BaseMondrian(object):
         return self
 
 
-class MondrianForestRegressor(ForestRegressor, BaseMondrian):
+class MondrianForestRegressor(BaseMondrian, ForestRegressor):
     """
     A MondrianForestRegressor is an ensemble of MondrianTreeRegressors.
 
@@ -348,6 +426,19 @@ class MondrianForestRegressor(ForestRegressor, BaseMondrian):
         decision path (see ``MondrianTreeRegressor``). SHAP contributions
         and anomaly scores always use the Mondrian node weights regardless
         of this setting.
+
+    categorical_features : "auto", None, bool or array-like, optional (default="auto")
+        Automatic categorical-feature awareness. Columns whose values are
+        purely integral with at most ``max_categories`` unique values are
+        treated as categorical and replaced by CatBoost-style smoothed
+        target statistics before growing the forest, so split-point
+        geometry depends on target structure rather than arbitrary integer
+        codes. ``"auto"`` applies the detection heuristic; a boolean mask
+        or integer index array selects columns explicitly; ``None``
+        disables categorical handling entirely.
+
+    max_categories : int, optional (default=32)
+        Cardinality cap used by the ``"auto"`` heuristic.
     """
     def __init__(self,
                  n_estimators=10,
@@ -357,7 +448,9 @@ class MondrianForestRegressor(ForestRegressor, BaseMondrian):
                  n_jobs=1,
                  random_state=None,
                  verbose=0,
-                 path_smoothing=False):
+                 path_smoothing=False,
+                 categorical_features="auto",
+                 max_categories=32):
         super(MondrianForestRegressor, self).__init__(
             base_estimator=MondrianTreeRegressor(),
             n_estimators=n_estimators,
@@ -371,6 +464,8 @@ class MondrianForestRegressor(ForestRegressor, BaseMondrian):
         self.max_depth = max_depth
         self.min_samples_split = min_samples_split
         self.path_smoothing = path_smoothing
+        self.categorical_features = categorical_features
+        self.max_categories = max_categories
 
     def _resolve_path_smoothing(self, path_smoothing):
         """Resolve the effective prediction mode for a predict-time call."""
@@ -464,6 +559,7 @@ class MondrianForestRegressor(ForestRegressor, BaseMondrian):
             Returns self.
         """
         X, y = check_X_y(X, y, dtype=np.float32, multi_output=False)
+        X = self._resolve_and_encode_fit(X, y)
         return super(MondrianForestRegressor, self).fit(X, y)
 
     def predict(self, X, return_std=False, return_anomaly=False,
@@ -518,9 +614,9 @@ class MondrianForestRegressor(ForestRegressor, BaseMondrian):
             Override the forest's ``path_smoothing`` setting for this call.
             ``None`` (default) uses the value chosen at construction time.
         """
-        X = check_array(X)
-        if not hasattr(self, "estimators_"):
-            raise NotFittedError("The model has to be fit before prediction.")
+        # Validates shape/dtype, raises NotFittedError when unfitted and
+        # applies the forest's categorical encoding exactly once.
+        X = self._validate_X_predict(X)
         smoothing = self._resolve_path_smoothing(path_smoothing)
         ensemble_mean = np.zeros(X.shape[0])
         exp_y_sq = np.zeros_like(ensemble_mean)
@@ -611,7 +707,7 @@ class MondrianForestRegressor(ForestRegressor, BaseMondrian):
         return super(MondrianForestRegressor, self).partial_fit(X, y)
 
 
-class MondrianForestClassifier(ForestClassifier, BaseMondrian):
+class MondrianForestClassifier(BaseMondrian, ForestClassifier):
     """
     A MondrianForestClassifier is an ensemble of MondrianTreeClassifiers.
 
@@ -649,6 +745,19 @@ class MondrianForestClassifier(ForestClassifier, BaseMondrian):
         *opinionated default* that deviates from the "pure" Mondrian-process
         prediction; with ``True``, each tree weights every node on its
         decision path (see ``MondrianTreeClassifier``).
+
+    categorical_features : "auto", None, bool or array-like, optional (default="auto")
+        Automatic categorical-feature awareness. Columns whose values are
+        purely integral with at most ``max_categories`` unique values are
+        treated as categorical and replaced by CatBoost-style smoothed
+        target statistics before growing the forest, so split-point
+        geometry depends on target structure rather than arbitrary integer
+        codes. ``"auto"`` applies the detection heuristic; a boolean mask
+        or integer index array selects columns explicitly; ``None``
+        disables categorical handling entirely.
+
+    max_categories : int, optional (default=32)
+        Cardinality cap used by the ``"auto"`` heuristic.
     """
     def __init__(self,
                  n_estimators=10,
@@ -658,7 +767,9 @@ class MondrianForestClassifier(ForestClassifier, BaseMondrian):
                  n_jobs=1,
                  random_state=None,
                  verbose=0,
-                 path_smoothing=False):
+                 path_smoothing=False,
+                 categorical_features="auto",
+                 max_categories=32):
         super(MondrianForestClassifier, self).__init__(
             base_estimator=MondrianTreeClassifier(),
             n_estimators=n_estimators,
@@ -672,6 +783,8 @@ class MondrianForestClassifier(ForestClassifier, BaseMondrian):
         self.max_depth = max_depth
         self.min_samples_split = min_samples_split
         self.path_smoothing = path_smoothing
+        self.categorical_features = categorical_features
+        self.max_categories = max_categories
 
     def _resolve_path_smoothing(self, path_smoothing):
         """Resolve the effective prediction mode for a predict-time call."""
@@ -765,6 +878,7 @@ class MondrianForestClassifier(ForestClassifier, BaseMondrian):
             Returns self.
         """
         X, y = check_X_y(X, y, dtype=np.float32, multi_output=False)
+        X = self._resolve_and_encode_fit(X, y)
         return super(MondrianForestClassifier, self).fit(X, y)
 
     def predict(self, X, return_anomaly=False, return_shap=False,
@@ -806,13 +920,19 @@ class MondrianForestClassifier(ForestClassifier, BaseMondrian):
             TreeSHAP values averaged across all trees. Returned if
             ``return_shap=True``.
         """
-        proba = self.predict_proba(X, path_smoothing=path_smoothing)
+        # Validates shape/dtype, raises NotFittedError when unfitted and
+        # applies the forest's categorical encoding exactly once; every
+        # downstream consumer below works in that encoded space.
+        X = self._validate_X_predict(X)
+
+        proba = self._predict_proba_from_validated(
+            X, path_smoothing=path_smoothing)
         predictions = self.classes_.take(np.argmax(proba, axis=1), axis=0)
 
         results = [predictions]
 
         if return_anomaly:
-            results.append(self.pred_anomaly(X))
+            results.append(self._pred_anomaly_from_validated(X))
 
         if return_shap:
             n_classes = self.n_classes_
@@ -873,11 +993,15 @@ class MondrianForestClassifier(ForestClassifier, BaseMondrian):
         p : array of shape = (n_samples, n_classes)
             The class probabilities of the input samples.
         """
-        smoothing = self._resolve_path_smoothing(path_smoothing)
-
         check_is_fitted(self)
         # Check data
         X = self._validate_X_predict(X)
+        return self._predict_proba_from_validated(
+            X, path_smoothing=path_smoothing)
+
+    def _predict_proba_from_validated(self, X, path_smoothing=None):
+        """Class probabilities for already-validated (encoded) features."""
+        smoothing = self._resolve_path_smoothing(path_smoothing)
 
         # Assign chunk of trees to jobs
         n_jobs, _, _ = _partition_estimators(self.n_estimators, self.n_jobs)
