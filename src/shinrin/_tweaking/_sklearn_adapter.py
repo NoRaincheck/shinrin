@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from ._core import Constraint, INF, merge_constraints
+from ._core import INF, Constraint, merge_constraints
 
 
 def _largest_leq(threshold: float) -> float:
@@ -39,7 +39,7 @@ def leaves_from_sklearn_tree(tree) -> list[tuple[Constraint, int]]:
     stack: list[tuple[int, Constraint]] = [(0, {})]
     while stack:
         node, path = stack.pop()
-        if tree.children_left[node] == -1:  # noqa: PLR2004 (leaf sentinel)
+        if tree.children_left[node] == -1:
             label = int(np.argmax(tree.value[node]))
             leaves.append((path, label))
             continue

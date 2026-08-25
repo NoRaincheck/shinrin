@@ -291,7 +291,9 @@ def reference_minimal_flip(
             best_cost, best_leaf = cost, leaf
     elapsed = time.monotonic() - start
     if best_leaf is None:
-        return FlipOutcome(False, None, (), INF, len(model_target_leaves), True, elapsed)
+        return FlipOutcome(
+            False, None, (), INF, len(model_target_leaves), True, elapsed
+        )
     return FlipOutcome(
         success=True,
         x_new=project(x, best_leaf),

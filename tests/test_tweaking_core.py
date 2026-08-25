@@ -10,13 +10,13 @@ import pytest
 
 from shinrin._tweaking._core import (
     INF,
+    brute_force_min_flips,
     constraint_cost,
     merge_constraints,
     project,
+    reference_minimal_flip,
     robust_minimal_flip,
     satisfies,
-    reference_minimal_flip,
-    brute_force_min_flips,
 )
 
 
@@ -78,9 +78,7 @@ def test_robust_flip_matches_brute_force_on_random_instances():
         models, x = _random_instance(rng)
 
         def flips_all(xc, models=models):
-            return all(
-                any(satisfies(leaf, xc) for leaf in model) for model in models
-            )
+            return all(any(satisfies(leaf, xc) for leaf in model) for model in models)
 
         outcome = robust_minimal_flip(models, x)
         expected = brute_force_min_flips(list(range(x.size)), flips_all, x, max_size=4)
