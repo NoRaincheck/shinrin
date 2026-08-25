@@ -86,25 +86,52 @@ below and in the LICENSE files kept alongside the vendored code.
 
    Copyright 1991-2023 Free Software Foundation, Inc.
 
-8. gosdt-guesses (BSD-3-Clause)
+8. gosdt-guesses (BSD-3-Clause) — renamed SPOT
    https://github.com/ubc-systopia/gosdt-guesses
 
-   Vendored into `src/shinrin/_gosdt/`: the GOSDT C++ engine
+    Vendored into `src/shinrin/_spot/` and renamed **SPOT** (SParse OpTimal;
+    formerly exported as `GOSDTClassifier`, now `SPOTClassifier`): the GOSDT
+   C++ engine
    ("Fast Sparse Decision Tree Optimization via Reference Ensembles",
    AAAI 2022; "Generalized and Scalable Optimal Sparse Decision Trees",
    ICML 2020) and its Python layer. Upstream's pybind11 module is replaced
    by PyO3 bindings in `src/lib.rs`; oneTBB container types are replaced by
-   serial shims written for shinrin (`cpp/tbbshim/`, no TBB code) and the
-   engine runs single-threaded; GOSDT's global `Queue` class is renamed
-   `GosdtQueue` to avoid a linker symbol collision with CORELS' `Queue`.
+   lock-based shims written for shinrin (`cpp/tbbshim/`, no TBB code) and
+   the engine's global `Queue` class is renamed `GosdtQueue` to avoid a
+   linker symbol collision with CORELS' `Queue`.
 
    Copyright (c) 2020-2024, UBC Systopia Lab.
-   License: BSD-3-Clause (see src/shinrin/_gosdt/LICENSE)
+   License: BSD-3-Clause (see src/shinrin/_spot/LICENSE)
 
-9. nlohmann/json (MIT)
-   https://github.com/nlohmann/json
+9. treeFARMS (BSD-3-Clause) — renamed SPOTSET
+   https://github.com/ubc-systopia/treeFarms
 
-   Vendored single header v3.11.3 at `src/shinrin/_gosdt/cpp/nlohmann/`.
+   Vendored into `src/shinrin/_spotset/` and renamed **SPOTSET** (Sparse
+   Optimal Rashomon Trees): the Rashomon-set enumeration engine
+   ("Exploring the Whole Rashomon Set of Sparse Decision Trees", NeurIPS
+   2022). treeFARMS is built on the same gosdt-guesses lineage as item 8,
+   so its engine is wrapped in `namespace spotset` and co-linked with SPOT
+   in one extension. Upstream's pybind11 module is replaced by PyO3
+   bindings in `src/lib.rs`; the timbertrek visualization dependency and
+   the pure-Python imbalance/OSDT variant are intentionally not ported.
 
-   Copyright (c) 2013-2022 Niels Lohmann.
-   License: MIT (see src/shinrin/_gosdt/cpp/nlohmann/LICENSE.MIT)
+   Copyright (c) 2022, UBC Systopia Lab.
+   License: BSD-3-Clause (see src/shinrin/_spotset/LICENSE)
+
+10. nlohmann/json (MIT)
+    https://github.com/nlohmann/json
+
+    Vendored single header v3.11.3 at `src/shinrin/_spot/cpp/nlohmann/`,
+    shared by the SPOT and SPOTSET engines.
+
+    Copyright (c) 2013-2022 Niels Lohmann.
+    License: MIT (see src/shinrin/_spot/cpp/nlohmann/LICENSE.MIT)
+
+11. csv-parser / Ben Strasser csv.h (BSD-3-Clause)
+    https://github.com/ben-strasser/fast-cpp-csv-parser
+
+    Vendored single header at `src/shinrin/_spotset/cpp/csv/csv.h`,
+    required by the SPOTSET engine's dataset encoder.
+
+    Copyright (2012-2015) Ben Strasser.
+    License: BSD-3 (see the header notice in csv.h)

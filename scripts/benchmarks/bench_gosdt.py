@@ -2,7 +2,7 @@
 """Benchmark the vendored GOSDT classifier against scikit-learn's CART.
 
 Compares the optimal sparse decision tree pipeline (ThresholdGuessBinarizer +
-GOSDTClassifier) against a typical decision tree classifier
+SPOTClassifier) against a typical decision tree classifier
 (sklearn.tree.DecisionTreeClassifier) on:
 
 - ``cart``        : DecisionTreeClassifier on raw features (unlimited depth)
@@ -43,7 +43,7 @@ from sklearn.metrics import accuracy_score
 from sklearn.model_selection import train_test_split
 from sklearn.tree import DecisionTreeClassifier
 
-from shinrin import GOSDTClassifier, ThresholdGuessBinarizer
+from shinrin import SPOTClassifier, ThresholdGuessBinarizer
 
 
 def compas_data() -> tuple[np.ndarray, np.ndarray]:
@@ -63,7 +63,7 @@ def compas_data() -> tuple[np.ndarray, np.ndarray]:
     return np.asarray(X), np.asarray(y)
 
 
-def gosdt_tree_stats(clf: GOSDTClassifier) -> tuple[int, int]:
+def gosdt_tree_stats(clf: SPOTClassifier) -> tuple[int, int]:
     """Return (leaves, total nodes) of the first extracted GOSDT model."""
     model = json.loads(clf.result_.model)[0]
 
@@ -130,7 +130,7 @@ def bench_dataset(
     Xb_train = np.asarray(Xb_train_raw) > 0.5
     Xb_test = np.asarray(Xb_test_raw) > 0.5
 
-    clf = GOSDTClassifier(regularization=regularization, depth_budget=depth_budget)
+    clf = SPOTClassifier(regularization=regularization, depth_budget=depth_budget)
     t0 = time.perf_counter()
     clf.fit(np.asarray(Xb_train) > 0.5, y_train)
     fit_s = time.perf_counter() - t0
@@ -205,7 +205,7 @@ def bench_worker_scaling(
 
     rows: list[dict[str, Any]] = []
     for worker_limit in workers:
-        clf = GOSDTClassifier(
+        clf = SPOTClassifier(
             regularization=regularization,
             depth_budget=depth_budget,
             worker_limit=worker_limit,

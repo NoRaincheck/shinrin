@@ -47,8 +47,8 @@ uv sync --all-extras
 
 ## Optimal Trees & Rules
 
-CORELS (`CorelsClassifier`) and GOSDT (`GOSDTClassifier`) work out of the box
+CORELS (`CorelsClassifier`) and SPOT (`SPOTClassifier`) work out of the box
 — their C++ engines are compiled into the package with bundled mini-GMP and
 no TBB, so no system libraries are needed in any configuration. Install the
-`[sklearn]` extra for GOSDT's binarizers and metrics; pandas is optional for
+`[sklearn]` extra for SPOT's binarizers and metrics; pandas is optional for
 named-column output.

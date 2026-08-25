@@ -216,9 +216,9 @@ def _corels():
 
 
 def _gosdt():
-    from shinrin import GOSDTClassifier
+    from shinrin import SPOTClassifier
 
-    return GOSDTClassifier(
+    return SPOTClassifier(
         regularization=0.05,
         depth_budget=4,
         time_limit=GOSDT_TIME_LIMIT_S,

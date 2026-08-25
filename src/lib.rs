@@ -2809,19 +2809,19 @@ fn corels_predict_wrap<'py>(
 }
 
 // =============================================================================
-// GOSDT (vendored gosdt-guesses) bindings
+// SPOT (SParse OpTimal, vendored gosdt-guesses) bindings
 //
-// The vendored C++ engine lives in `src/shinrin/_gosdt/cpp` and is compiled
+// The vendored C++ engine lives in `src/shinrin/_spot/cpp` and is compiled
 // into this extension by `build.rs` together with a lock-based TBB shim and
 // the bundled mini-gmp. This replaces upstream's pybind11 module (_libgosdt).
 // =============================================================================
 
-mod gosdt_bridge {
+mod spot_bridge {
     use std::ffi::c_void;
     use std::os::raw::{c_char, c_int, c_uchar};
 
     #[repr(C)]
-    pub struct GosdtResult {
+    pub struct SpotResult {
         pub model: *mut c_char,
         pub graph_size: usize,
         pub n_iterations: usize,
@@ -2833,7 +2833,7 @@ mod gosdt_bridge {
     }
 
     extern "C" {
-        pub fn shinrin_gosdt_fit(
+        pub fn shinrin_spot_fit(
             regularization: f32,
             upperbound_guess: f32,
             time_limit: u32,
@@ -2862,16 +2862,16 @@ mod gosdt_bridge {
             map_indices: *const usize,
             reference: *const u8,
             reference_cols: usize,
-            out: *mut GosdtResult,
+            out: *mut SpotResult,
             error_message: *mut *mut c_char,
         ) -> c_int;
 
-        pub fn shinrin_gosdt_free(p: *mut c_void);
+        pub fn shinrin_spot_free(p: *mut c_void);
     }
 }
 
-/// Fit an optimal sparse decision tree using the vendored GOSDT engine.
-/// Returns a dict mirroring upstream's `GOSDTResult` attributes.
+/// Fit an optimal sparse decision tree using the vendored SPOT engine.
+/// Returns a dict mirroring upstream's `SpotResult` attributes.
 #[pyfunction]
 #[pyo3(signature = (regularization, upperbound_guess, time_limit, model_limit,
                     worker_limit, verbose, diagnostics, depth_budget, reference_lb,
@@ -2880,7 +2880,7 @@ mod gosdt_bridge {
                     costs, feature_map, reference))]
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::type_complexity)]
-fn gosdt_fit<'py>(
+fn spot_fit<'py>(
     py: Python<'py>,
     regularization: f32,
     upperbound_guess: f32,
@@ -2965,7 +2965,7 @@ fn gosdt_fit<'py>(
         reference_ptr = std::ptr::null();
     }
 
-    let mut result = gosdt_bridge::GosdtResult {
+    let mut result = spot_bridge::SpotResult {
         model: std::ptr::null_mut(),
         graph_size: 0,
         n_iterations: 0,
@@ -2978,7 +2978,7 @@ fn gosdt_fit<'py>(
     let mut error_message: *mut std::os::raw::c_char = std::ptr::null_mut();
 
     let rc = unsafe {
-        gosdt_bridge::shinrin_gosdt_fit(
+        spot_bridge::shinrin_spot_fit(
             regularization,
             upperbound_guess,
             time_limit,
@@ -3016,7 +3016,7 @@ fn gosdt_fit<'py>(
     struct ModelGuard(*mut std::os::raw::c_char);
     impl Drop for ModelGuard {
         fn drop(&mut self) {
-            unsafe { gosdt_bridge::shinrin_gosdt_free(self.0.cast()) };
+            unsafe { spot_bridge::shinrin_spot_free(self.0.cast()) };
         }
     }
     let error_guard = ModelGuard(error_message);
@@ -3026,7 +3026,7 @@ fn gosdt_fit<'py>(
         0 => {}
         1 => {
             let message = if error_message.is_null() {
-                "GOSDT optimization failed".to_string()
+                "SPOT optimization failed".to_string()
             } else {
                 unsafe { std::ffi::CStr::from_ptr(error_message) }
                     .to_string_lossy()
@@ -3034,7 +3034,7 @@ fn gosdt_fit<'py>(
             };
             return Err(PyRuntimeError::new_err(message));
         }
-        _ => return Err(PyMemoryError::new_err("gosdt: out of memory")),
+        _ => return Err(PyMemoryError::new_err("spot: out of memory")),
     }
 
     let model_guard = ModelGuard(result.model);
@@ -3052,6 +3052,140 @@ fn gosdt_fit<'py>(
     dict.set_item("upperbound", result.upper_bound)?;
     dict.set_item("model_loss", result.model_loss)?;
     dict.set_item("time", result.time_elapsed)?;
+    dict.set_item("status", result.status)?;
+    drop(model_guard);
+    Ok(dict)
+}
+
+// =============================================================================
+// SPOTSET (SParse Optimal Rashomon Tree SET, vendored treeFARMS) bindings
+//
+// The vendored C++ engine lives in `src/shinrin/_spotset/cpp` (wrapped in
+// namespace spotset so it coexists with the SPOT engine) and is compiled into
+// this extension by `build.rs`. This replaces upstream's pybind11 module
+// (`libgosdt`): configuration arrives as a JSON string, training data as a
+// CSV string whose last column is the label — the engine's own Encoder
+// binarizes the features. Returns a JSON array describing every tree in the
+// extracted Rashomon set.
+// =============================================================================
+
+mod spotset_bridge {
+    use std::ffi::c_void;
+    use std::os::raw::{c_char, c_int};
+
+    #[repr(C)]
+    pub struct SpotsetResult {
+        pub model_json: *mut c_char,
+        pub time_elapsed: f32,
+        pub graph_size: u32,
+        pub n_iterations: u32,
+        pub status: c_int,
+    }
+
+    extern "C" {
+        pub fn shinrin_spotset_configure(
+            config_json: *const c_char,
+            error_message: *mut *mut c_char,
+        ) -> c_int;
+        pub fn shinrin_spotset_fit(
+            dataset_csv: *const c_char,
+            out: *mut SpotsetResult,
+            error_message: *mut *mut c_char,
+        ) -> c_int;
+
+        pub fn shinrin_spotset_free(p: *mut c_void);
+    }
+}
+
+/// Owns a malloc'd C string returned by the SPOTSET bridge until scope exit.
+struct SpotsetMessageGuard(*mut std::os::raw::c_char);
+impl Drop for SpotsetMessageGuard {
+    fn drop(&mut self) {
+        unsafe { spotset_bridge::shinrin_spotset_free(self.0.cast()) };
+    }
+}
+
+/// Owns the malloc'd model JSON returned by `shinrin_spotset_fit`.
+struct SpotsetModelGuard(*mut std::os::raw::c_char);
+impl Drop for SpotsetModelGuard {
+    fn drop(&mut self) {
+        unsafe { spotset_bridge::shinrin_spotset_free(self.0.cast()) };
+    }
+}
+
+/// Configure the SPOTSET engine from a JSON string.
+#[pyfunction]
+fn spotset_configure(_py: Python<'_>, config_json: &str) -> PyResult<()> {
+    let c_config = std::ffi::CString::new(config_json)
+        .map_err(|_| PyValueError::new_err("config contains interior NUL byte"))?;
+    let mut error_message: *mut std::os::raw::c_char = std::ptr::null_mut();
+
+    let rc =
+        unsafe { spotset_bridge::shinrin_spotset_configure(c_config.as_ptr(), &mut error_message) };
+    let error_guard = SpotsetMessageGuard(error_message);
+    let _ = error_guard; // freed on scope exit
+
+    match rc {
+        0 => Ok(()),
+        1 => Err(PyRuntimeError::new_err(if error_message.is_null() {
+            "SPOTSET configuration failed".to_string()
+        } else {
+            unsafe { std::ffi::CStr::from_ptr(error_message) }
+                .to_string_lossy()
+                .into_owned()
+        })),
+        _ => Err(PyMemoryError::new_err("spotset: out of memory")),
+    }
+}
+
+/// Fit a Rashomon set of sparse decision trees using the vendored SPOTSET engine.
+/// Takes the training data as CSV (last column is the label); returns a dict
+/// with the JSON array of extracted trees plus engine statistics.
+#[pyfunction]
+fn spotset_fit<'py>(py: Python<'py>, dataset_csv: &str) -> PyResult<Bound<'py, PyDict>> {
+    let c_dataset = std::ffi::CString::new(dataset_csv)
+        .map_err(|_| PyValueError::new_err("dataset contains interior NUL byte"))?;
+    let mut result = spotset_bridge::SpotsetResult {
+        model_json: std::ptr::null_mut(),
+        time_elapsed: 0.0,
+        graph_size: 0,
+        n_iterations: 0,
+        status: -1,
+    };
+    let mut error_message: *mut std::os::raw::c_char = std::ptr::null_mut();
+
+    let rc = unsafe {
+        spotset_bridge::shinrin_spotset_fit(c_dataset.as_ptr(), &mut result, &mut error_message)
+    };
+    let error_guard = SpotsetMessageGuard(error_message);
+    let _ = error_guard; // freed on scope exit
+
+    match rc {
+        0 => {}
+        1 => {
+            return Err(PyRuntimeError::new_err(if error_message.is_null() {
+                "SPOTSET optimization failed".to_string()
+            } else {
+                unsafe { std::ffi::CStr::from_ptr(error_message) }
+                    .to_string_lossy()
+                    .into_owned()
+            }));
+        }
+        _ => return Err(PyMemoryError::new_err("spotset: out of memory")),
+    }
+
+    let model_guard = SpotsetModelGuard(result.model_json);
+
+    let dict = PyDict::new(py);
+    dict.set_item(
+        "model",
+        unsafe { std::ffi::CStr::from_ptr(result.model_json) }
+            .to_string_lossy()
+            .as_ref(),
+    )?;
+    dict.set_item("time", result.time_elapsed)?;
+    dict.set_item("graph_size", result.graph_size)?;
+    dict.set_item("n_iterations", result.n_iterations)?;
     dict.set_item("status", result.status)?;
     drop(model_guard);
     Ok(dict)
@@ -3077,7 +3211,9 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(corels_gmp_enabled, m)?)?;
     m.add_function(wrap_pyfunction!(corels_fit_wrap_end, m)?)?;
     m.add_function(wrap_pyfunction!(corels_predict_wrap, m)?)?;
-    m.add_function(wrap_pyfunction!(gosdt_fit, m)?)?;
+    m.add_function(wrap_pyfunction!(spot_fit, m)?)?;
+    m.add_function(wrap_pyfunction!(spotset_configure, m)?)?;
+    m.add_function(wrap_pyfunction!(spotset_fit, m)?)?;
     m.add("DTYPE", numpy::dtype::<f32>(m.py()))?;
     m.add("DOUBLE", numpy::dtype::<f64>(m.py()))?;
     Ok(())

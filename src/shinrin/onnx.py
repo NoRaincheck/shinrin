@@ -11,7 +11,7 @@ model proto. Supported model families and their export strategies:
   export time (see :func:`to_onnx`); training targets are embedded in the
   graph so weighted-percentile parity is preserved (forests).
 - **Rule-based models** (SkopeRules, CorelsClassifier, OrdtClassifier,
-  GOSDTClassifier): rules/trees are compiled to standard-domain boolean ops
+  SPOTClassifier): rules/trees are compiled to standard-domain boolean ops
   or tree ensembles.
 - **MLP**: self-contained standard-domain graph with preprocessing baked in
   (mirrors the TabM exporter).
@@ -540,9 +540,9 @@ def to_onnx(
         pass
 
     try:
-        from shinrin._gosdt.classifier import GOSDTClassifier
+        from shinrin._spot.classifier import SPOTClassifier
 
-        if isinstance(estimator, GOSDTClassifier):
+        if isinstance(estimator, SPOTClassifier):
             from shinrin._rules_onnx import gosdt_to_onnx
 
             return gosdt_to_onnx(

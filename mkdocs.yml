@@ -31,7 +31,8 @@ nav:
       - Mondrian Trees: models/mondrian-trees.md
       - Mondrian Forests: models/mondrian-forests.md
       - CORELS Rule Lists: models/corels.md
-      - GOSDT Optimal Trees: models/gosdt.md
+      - SPOT Optimal Trees: models/spot.md
+      - SPOTSET Rashomon Sets: models/spotset.md
       - TabM: models/tabm.md
       - MLP: models/mlp.md
       - TabICL: models/tabicl.md

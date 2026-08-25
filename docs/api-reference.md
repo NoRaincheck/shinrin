@@ -45,16 +45,28 @@ See [Mondrian Forests](models/mondrian-forests.md)
 
 See [CORELS Rule Lists](models/corels.md)
 
-### GOSDT Optimal Sparse Trees
+### SPOT Optimal Sparse Trees (formerly GOSDT)
 
-- `GOSDTClassifier` — Globally optimal sparse decision trees with
+- `SPOTClassifier` — Globally optimal sparse decision trees with
   reference-ensemble guesses
 - `ThresholdGuessBinarizer` — Gradient-boosting threshold binarization
 - `NumericBinarizer` — Lossless midpoint binarization
-- `Tree` — Parsed optimal tree (via `shinrin._gosdt`)
-- `Status` — Result status enum (via `shinrin._gosdt`)
+- `Tree` — Parsed optimal tree (via `shinrin._spot`)
+- `Status` — Result status enum (via `shinrin._spot`)
 
-See [GOSDT Optimal Trees](models/gosdt.md)
+See [SPOT Optimal Trees](models/spot.md)
+
+### SPOTSET Rashomon Sets (formerly treeFARMS)
+
+- `SPOTSETClassifier` — Enumerates the Rashomon set of near-optimal sparse
+  decision trees; access individual trees via `clf[i]`, the whole set via
+  `clf.model_set_`
+- `ModelSetContainer` — Lazy container over the extracted set (via
+  `shinrin._spotset`)
+- `TreeClassifier` — One decoded tree of the set with `predict`/`score`/
+  `leaves`/`maximum_depth` helpers
+
+See [SPOTSET Rashomon Sets](models/spotset.md)
 
 ### Tabular Neural Networks
 

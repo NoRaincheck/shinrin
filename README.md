@@ -15,7 +15,7 @@ Shinrin (森林, "forest" in Japanese) is a scikit-learn-compatible library for 
 
 Since skope-rules and scikit-garden are no longer actively maintained, this project brings them together under one hardened, production-focused umbrella. The goal is to **harden and speed up production training code while keeping the dependency footprint minimal** — dropping large/expensive dependencies like `shap` and `torch`.
 
-- **Tree ensemble library with extensions** — decision rules (`SkopeRules`), optimal decision trees (CORELS, GOSDT), and Mondrian forests, with built-in TreeSHAP explanations that do *not* rely on the `shap` library, accelerated by Rust and Mojo kernels. Better together: the `OrdtClassifier` variant routes skope-rules' mined candidates through CORELS' certified selection, outperforming both methods stand-alone
+- **Tree ensemble library with extensions** — decision rules (`SkopeRules`), optimal decision trees (CORELS, SPOT), and Mondrian forests, with built-in TreeSHAP explanations that do *not* rely on the `shap` library, accelerated by Rust and Mojo kernels. Better together: the `OrdtClassifier` variant routes skope-rules' mined candidates through CORELS' certified selection, outperforming both methods stand-alone
 - **Tabular neural networks without torch** — MLPs and TabM train entirely on NumPy or Mojo kernels; no PyTorch required
 - **Export to standard inference runtimes** — first-class ONNX export for trees, forests, and TabM
 
@@ -25,7 +25,8 @@ Since skope-rules and scikit-garden are no longer actively maintained, this proj
 
 - **Mondrian Trees & Forests** — Full scikit-learn API compatibility
 - **CORELS Optimal Rule Lists** — Certifiably optimal rule lists for binary data (`CorelsClassifier`), vendored from pycorels with bundled mini-GMP (no system dependency)
-- **GOSDT Optimal Sparse Decision Trees** — Globally optimized sparse decision trees with reference-ensemble guesses (`GOSDTClassifier`, `ThresholdGuessBinarizer`), vendored from gosdt-guesses; optional parallel search workers (`worker_limit`) with no TBB/GMP system dependencies
+- **SPOT Optimal Sparse Decision Trees** (formerly GOSDT) — SParse OpTimal: globally optimized sparse decision trees with reference-ensemble guesses (`SPOTClassifier`, `ThresholdGuessBinarizer`), vendored from gosdt-guesses; optional parallel search workers (`worker_limit`) with no TBB/GMP system dependencies
+- **SPOTSET Rashomon Sets of Sparse Trees** (formerly treeFARMS) — Sparse Optimal Rashomon Trees: enumerate *all* near-optimal trees within a bound of the optimum (`SPOTSETClassifier`), co-engineered with SPOT in the same native extension
 - **Tabular Neural Networks** — scikit-learn compatible `MLPClassifier`/`MLPRegressor` and `TabMClassifier`/`TabMRegressor` with optional PLE embeddings, training-aware ternary weight quantization (BitLinear), and Mojo-accelerated training
 - **TabM Neural Networks** — Parameter-efficient ensemble MLPs for tabular data with BatchEnsemble-style multiplicative adapters (ICLR 2025)
 - **TabICL** — Tabular in-context learning foundation model (torch/NumPy/Mojo backends)
@@ -86,19 +87,37 @@ print(clf.rl())          # human-readable optimal rule list
 predictions = clf.predict(X)
 ```
 
-### GOSDT Optimal Sparse Decision Trees
+### SPOT Optimal Sparse Decision Trees (formerly GOSDT)
 
 ```python
-from shinrin import GOSDTClassifier, ThresholdGuessBinarizer
+from shinrin import SPOTClassifier, ThresholdGuessBinarizer
 
 # Binarize continuous features via gradient-boosting threshold guesses
 X_bin = ThresholdGuessBinarizer().fit_transform(X, y)
 
 # Optionally guide the search with a blackbox reference ensemble
-clf = GOSDTClassifier(regularization=0.05, depth_budget=4)
+clf = SPOTClassifier(regularization=0.05, depth_budget=4)
 clf.fit(X_bin, y)                      # or: clf.fit(X_bin, y, y_ref=y_ref)
 print(str(clf.trees_[0]))              # globally optimal tree
 accuracy = clf.score(X_bin, y)
+```
+
+### SPOTSET Rashomon Sets of Sparse Trees (formerly treeFARMS)
+
+```python
+from shinrin import SPOTSETClassifier, ThresholdGuessBinarizer
+
+# Binarize continuous features via gradient-boosting threshold guesses
+X_bin = ThresholdGuessBinarizer().fit_transform(X, y)
+
+# Enumerate all trees within 5% of the optimal regularized objective
+clf = SPOTSETClassifier(regularization=0.01, rashomon_bound_multiplier=0.05)
+clf.fit(X_bin, y)
+
+print(clf.n_trees_)                    # size of the Rashomon set
+tree = clf[1]                          # the second tree of the set
+print(tree.leaves(), tree.maximum_depth())
+trie = clf.get_decision_paths()        # shared decision paths of the whole set
 ```
 
 ### Native Backends
@@ -127,7 +146,7 @@ See [scripts/benchmarks/BITLINEAR_BENCHMARK.md](scripts/benchmarks/BITLINEAR_BEN
 
 See [scripts/benchmarks/ALL_MODELS_BENCHMARK.md](scripts/benchmarks/ALL_MODELS_BENCHMARK.md) for the full all-algorithms benchmark suite, republished at [docs/features/benchmark-results.md](docs/features/benchmark-results.md) (`just bench-all`).
 
-See [scripts/benchmarks/GOSDT_BENCHMARK.md](scripts/benchmarks/GOSDT_BENCHMARK.md) for GOSDT vs scikit-learn CART comparisons (`just bench-gosdt`).
+See [scripts/benchmarks/GOSDT_BENCHMARK.md](scripts/benchmarks/GOSDT_BENCHMARK.md) for SPOT (formerly GOSDT) vs scikit-learn CART comparisons (`just bench-gosdt`).
 
 See [scripts/benchmarks/ORDT_BENCHMARK.md](scripts/benchmarks/ORDT_BENCHMARK.md) for ORDT — optimal rule-sets from decision trees, combining skope-rules mining with CORELS' certified-optimal selection (ships as `OrdtClassifier`; `just bench-ordt`). Vendoring both pays off: swapping skope-rules' heuristic vote for CORELS' optimal ordering wins on **every dataset tested** (up to +2.6pp test accuracy) while shrinking models to 2–5-clause rule lists.
 
@@ -194,8 +213,9 @@ Both backends produce identical trees for identical random states (verified by
 | `SkopeRules` | Rule extraction from tree ensembles |
 | `OrdtClassifier` | Optimal rule-sets: skope-rules mining + CORELS certified selection |
 | `CorelsClassifier` | Certifiably optimal rule lists for binary data |
-| `GOSDTClassifier` | Globally optimal sparse decision trees |
-| `ThresholdGuessBinarizer` / `NumericBinarizer` | Feature binarizers for GOSDT |
+| `SPOTClassifier` | Globally optimal sparse decision trees (formerly GOSDTClassifier) |
+| `SPOTSETClassifier` | Rashomon sets of near-optimal sparse trees (formerly treeFARMS' TREEFARMS) |
+| `ThresholdGuessBinarizer` / `NumericBinarizer` | Feature binarizers for SPOT / SPOTSET |
 
 #### Tabular Neural Networks
 

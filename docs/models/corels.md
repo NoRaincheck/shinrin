@@ -121,7 +121,7 @@ replace fixed quantile bins.
 ## Notes and constraints
 
 - Features must already be binary; binarize continuous data yourself (or use
-  [`ThresholdGuessBinarizer`](gosdt.md#thresholdguessbinarizer) from the GOSDT
+  [`ThresholdGuessBinarizer`](spot.md#thresholdguessbinarizer) from the SPOT
   stack).
 - Binary classification only.
 - Fitting uses module-global state in the native engine, matching upstream;

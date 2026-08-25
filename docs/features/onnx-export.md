@@ -91,7 +91,7 @@ predictions = session.run(None, {input_name: X_test})[0]
 | `RandomForestRegressor` / `ExtraTreesRegressor` | ✅ Supported (`ai.onnx.ml`) |
 | `*QuantileRegressor` trees & forests | ✅ Supported (quantile baked in at export) |
 | `MLPRegressor` / `MLPClassifier` | ✅ Supported (preprocessing baked in) |
-| `CorelsClassifier`, `GOSDTClassifier`, `OrdtClassifier`, `SkopeRules` | ✅ Supported |
+| `CorelsClassifier`, `SPOTClassifier`, `OrdtClassifier`, `SkopeRules` | ✅ Supported |
 | `TabMRegressor` / `TabMClassifier` | ✅ Supported |
 | TabICL | ❌ Not supported |
 

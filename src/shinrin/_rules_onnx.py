@@ -11,7 +11,7 @@ Four models share this module:
 - :class:`shinrin.OrdtClassifier` — skope-mined rule pool selected and
   ordered by CORELS; identical first-match semantics applied to boolean
   capture-matrix columns evaluated from raw features.
-- :class:`shinrin.GOSDTClassifier` — optimal boolean decision tree
+- :class:`shinrin.SPOTClassifier` — optimal boolean decision tree
   (left child = feature true, right child = feature false); leaves carry a
   class index into ``classes_``.
 
@@ -414,7 +414,7 @@ def gosdt_to_onnx(
     name="ShinrinGosdt",
     target_opset=DEFAULT_OPSET,
 ):
-    """Export a fitted GOSDTClassifier (model 0).
+    """Export a fitted SPOTClassifier (model 0).
 
     Outputs: ``labels`` with ``classes_`` dtype and ``probabilities``
     float ``(batch, n_classes)`` one-hot, mirroring ``predict`` /
@@ -434,7 +434,7 @@ def gosdt_to_onnx(
     nodes.append(helper.make_node("Cast", ["X"], ["b"], to=TensorProto.BOOL))
 
     def emit(node, prefix: str) -> str:
-        from shinrin._gosdt.tree import Leaf, Node
+        from shinrin._spot.tree import Leaf, Node
 
         if isinstance(node, Leaf):
             _add_init(inits, f"{prefix}v", np.array(node.prediction), TensorProto.INT64)
