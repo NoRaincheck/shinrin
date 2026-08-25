@@ -13,10 +13,6 @@ model proto. Supported model families and their export strategies:
 - **Rule-based models** (SkopeRules, CorelsClassifier, OrdtClassifier,
   SPOTClassifier): rules/trees are compiled to standard-domain boolean ops
   or tree ensembles.
-- **MLP**: self-contained standard-domain graph with preprocessing baked in
-  (mirrors the TabM exporter).
-- **TabM**: dedicated exporter :mod:`shinrin._tabm_onnx`.
-- **TabICL**: not supported (explicit error).
 
 All exports use dynamic batch size and expect a float32 ``X`` input tensor.
 """
@@ -348,15 +344,6 @@ def _generic_to_onnx(
 # ---------------------------------------------------------------------------
 
 
-def _is_tabm_estimator(estimator) -> bool:
-    """Return True when ``estimator`` is a fitted-capable TabM model."""
-    try:
-        from shinrin.tabm import TabMClassifier, TabMRegressor
-    except ImportError:  # pragma: no cover - sklearn missing
-        return False
-    return isinstance(estimator, (TabMClassifier, TabMRegressor))
-
-
 def to_onnx(
     estimator,
     X=None,
@@ -396,8 +383,6 @@ def to_onnx(
     ------
     ValueError
         If the estimator is not fitted or is not a supported model.
-    NotImplementedError
-        For models without an ONNX representation (TabICL).
     ImportError
         If the onnx package is not installed.
 
@@ -428,31 +413,6 @@ def to_onnx(
         target_opset = 15
 
     # --- family routing -------------------------------------------------------
-    if _is_tabm_estimator(estimator):
-        from shinrin._tabm_onnx import tabm_to_onnx
-
-        return tabm_to_onnx(
-            estimator,
-            X=X,
-            feature_names=feature_names,
-            class_names=class_names,
-            name=name,
-            target_opset=target_opset,
-        )
-
-    try:
-        from shinrin.tabicl import TabICLClassifier, TabICLRegressor
-
-        if isinstance(estimator, (TabICLClassifier, TabICLRegressor)):
-            raise NotImplementedError(
-                "ONNX export is not supported for TabICL models. TabICL "
-                "performs in-context learning with a pretrained transformer, "
-                "an ensemble generator and KV caching; there is no faithful "
-                "static-graph representation yet."
-            )
-    except ImportError:
-        pass
-
     try:
         from shinrin.mondrian import (
             MondrianForestClassifier,
@@ -505,23 +465,6 @@ def to_onnx(
             name=name,
             target_opset=target_opset,
         )
-
-    try:
-        from shinrin.mlp import MLPClassifier, MLPRegressor
-
-        if isinstance(estimator, (MLPClassifier, MLPRegressor)):
-            from shinrin._mlp_onnx import mlp_to_onnx
-
-            return mlp_to_onnx(
-                estimator,
-                X=X,
-                feature_names=feature_names,
-                class_names=class_names,
-                name=name,
-                target_opset=target_opset,
-            )
-    except ImportError:  # pragma: no cover - sklearn missing
-        pass
 
     try:
         from shinrin._corels.corels import CorelsClassifier

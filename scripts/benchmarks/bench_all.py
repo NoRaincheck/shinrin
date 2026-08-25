@@ -10,13 +10,11 @@ size for all shinrin estimators whose dependencies are available:
 - Mondrian trees & forests (regression + classification, Rust backend)
 - Random Forest / Extra Trees regressors (sklearn engine)
 - Random Forest / Extra Trees quantile regressors
-- MLP regressor & classifier (NumPy reference backend)
-- TabM regressor & classifier (NumPy reference backend)
 - GOSDT optimal sparse trees (threshold-guessing pipeline)
 - CORELS optimal rule lists (one-hot binarized pipeline)
 
 Skipped automatically when their optional dependencies are missing:
-SkopeRules (pandas), TabICL (torch + checkpoint download).
+SkopeRules (pandas).
 
 Outputs:
 - scripts/benchmarks/ALL_MODELS_BENCHMARK.md   committed results document
@@ -40,9 +38,6 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-
-os.environ.setdefault("SHINRIN_MLP_BACKEND", "numpy")
-os.environ.setdefault("SHINRIN_TABM_BACKEND", "numpy")
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
@@ -351,22 +346,6 @@ def _et_quantile():
     return ExtraTreesQuantileRegressor(n_estimators=50, random_state=0, n_jobs=1)
 
 
-def _mlp(task: str):
-    from shinrin import MLPClassifier, MLPRegressor
-
-    if task == "regression":
-        return MLPRegressor(hidden_layer_sizes=(128, 64), max_iter=100, random_state=0)
-    return MLPClassifier(hidden_layer_sizes=(128, 64), max_iter=100, random_state=0)
-
-
-def _tabm(task: str):
-    from shinrin import TabMClassifier, TabMRegressor
-
-    if task == "regression":
-        return TabMRegressor(hidden_layer_sizes=(256, 256), max_iter=60, random_state=0)
-    return TabMClassifier(hidden_layer_sizes=(256, 256), max_iter=60, random_state=0)
-
-
 def _gosdt():
     from shinrin import SPOTClassifier
 
@@ -390,13 +369,6 @@ try:
 except ImportError:
     PANDAS_AVAILABLE = False
 
-try:
-    import torch  # noqa: F401  # ty: ignore[unresolved-import]
-
-    TORCH_AVAILABLE = True
-except ImportError:
-    TORCH_AVAILABLE = False
-
 
 ALGOS: list[AlgoSpec] = [
     AlgoSpec("MondrianTree", ("regression", "classification"), _mondrian_tree),
@@ -405,8 +377,6 @@ ALGOS: list[AlgoSpec] = [
     AlgoSpec("ExtraTrees", ("regression",), lambda t: _et()),
     AlgoSpec("RF-Quantile", ("regression",), lambda t: _rf_quantile()),
     AlgoSpec("ET-Quantile", ("regression",), lambda t: _et_quantile()),
-    AlgoSpec("MLP", ("regression", "classification"), _mlp),
-    AlgoSpec("TabM", ("regression", "classification"), _tabm, max_rows=12_000),
     AlgoSpec(
         "GOSDT",
         ("classification",),
@@ -597,13 +567,11 @@ def build_markdown(meta: dict, datasets: dict, records: list, docs_page: bool) -
             "- Predict time: mean over 10 predictions of the held-out test set; also normalized per 1,000 samples.",
             "- Score: R^2 on the test set for regression, accuracy for classification.",
             "- All algorithms run single-threaded on identical train/test splits (`random_state=0`, 80/20).",
-            "- MLP and TabM use their pure-NumPy reference backends; Mondrian models use the Rust backend.",
-            "- Model configurations: MondrianTree depth 16; MondrianForest 20 trees, depth 16; RandomForest / ExtraTrees 100 trees; quantile forests 50 trees; MLP (128, 64) hidden units, 100 Adam epochs; TabM (256, 256) hidden units, 60 Adam epochs.",
-            "- Scores reflect these fixed budgets, not tuned optima: MLP trains for only 100 epochs and can underperform on unscaled targets (see california-10k).",
+            "- Mondrian models use the Rust backend.",
+            "- Model configurations: MondrianTree depth 16; MondrianForest 20 trees, depth 16; RandomForest / ExtraTrees 100 trees; quantile forests 50 trees.",
             "- GOSDT runs behind the threshold-guessing binarization pipeline (`depth_budget=4`, 60 s search limit), capped at 6,000 training rows.",
             "- CORELS runs on quantile one-hot binarized features (`max_card=1`), capped at 6,000 training rows.",
-            "- TabM capped at 12,000 training rows (NumPy reference trainer cost).",
-            "- Not included: SkopeRules (requires optional `pandas`), TabICL (requires torch plus a downloaded checkpoint). See the other benchmark documents for those comparisons.",
+            "- Not included: SkopeRules (requires optional `pandas`).",
             "",
             "Times are seconds unless stated otherwise; predict columns are",
             "milliseconds per full test-set call / per 1,000 samples.",
@@ -685,7 +653,7 @@ def collect_meta() -> dict[str, Any]:
             "shinrin": shinrin.__version__,
             "NumPy": np.__version__,
             "scikit-learn": sklearn.__version__,
-            "Backends": "Rust (Mondrian); NumPy reference (MLP, TabM)",
+            "Backends": "Rust (Mondrian)",
         },
     }
 

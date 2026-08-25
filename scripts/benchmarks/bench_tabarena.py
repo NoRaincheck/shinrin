@@ -43,9 +43,6 @@ import warnings
 from pathlib import Path
 from typing import Any
 
-os.environ.setdefault("SHINRIN_MLP_BACKEND", "numpy")
-os.environ.setdefault("SHINRIN_TABM_BACKEND", "numpy")
-
 import numpy as np
 
 # The benchmark engine (CellResult/AlgoSpec/DatasetSpec, ALGOS matrix,
@@ -270,11 +267,11 @@ def build_markdown(meta: dict, datasets: dict, records: list) -> str:
         "- Fit time: best of 3 fits (all core-subset datasets are below the 5,000-row best-of-N threshold).",
         "- Predict time: mean over 10 predictions of the held-out test set; also normalized per 1,000 samples.",
         "- Score: R^2 on the test set for regression, accuracy for classification.",
-        "- All algorithms run single-threaded on identical splits. MLP and TabM use their pure-NumPy reference backends; Mondrian models use the Rust backend.",
-        "- Model configurations match `bench_all.py`: MondrianTree depth 16; MondrianForest 20 trees, depth 16; RandomForest / ExtraTrees 100 trees; quantile forests 50 trees; MLP (128, 64) hidden units, 100 Adam epochs; TabM (256, 256) hidden units, 60 Adam epochs.",
+        "- All algorithms run single-threaded on identical splits. Mondrian models use the Rust backend.",
+        "- Model configurations match `bench_all.py`: MondrianTree depth 16; MondrianForest 20 trees, depth 16; RandomForest / ExtraTrees 100 trees; quantile forests 50 trees.",
         "- Scores reflect these fixed budgets, not tuned optima.",
         "- GOSDT runs behind the threshold-guessing binarization pipeline (`depth_budget=4`, 60 s search limit); CORELS on quantile one-hot binarized features (`max_card=1`); both binary-classification only.",
-        "- Not included: SkopeRules (requires optional `pandas` at fit time), TabICL (requires torch plus a downloaded checkpoint).",
+        "- Not included: SkopeRules (requires optional `pandas` at fit time).",
         "",
         "Times are seconds unless stated otherwise; predict columns are",
         "milliseconds per full test-set call / per 1,000 samples.",

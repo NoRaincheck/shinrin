@@ -33,9 +33,6 @@ nav:
       - CORELS Rule Lists: models/corels.md
       - SPOT Optimal Trees: models/spot.md
       - SPOTSET Rashomon Sets: models/spotset.md
-      - TabM: models/tabm.md
-      - MLP: models/mlp.md
-      - TabICL: models/tabicl.md
   - Features:
       - TreeSHAP Explanations: features/treeshap-explanations.md
       - Minimal-Flip Feature Tweaking: features/minimal-flip-tweaking.md

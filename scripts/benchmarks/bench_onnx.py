@@ -18,8 +18,8 @@ and writes JSON plus Markdown reports next to this script.
 
 Exportable models covered here (regression + classification where
 applicable): MondrianTree, MondrianForest, RandomForest, ExtraTrees,
-RF-Quantile (median baked into the graph), MLP, TabM, Corels and GOSDT
-(the latter two on binarized features). SkopeRules / Ordt / TabICL are
+RF-Quantile (median baked into the graph), Corels and GOSDT
+(the latter two on binarized features). SkopeRules / Ordt are
 omitted to keep runtime bounded; all exported graphs are float32.
 
 Outputs:
@@ -41,8 +41,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-os.environ.setdefault("SHINRIN_MLP_BACKEND", "numpy")
-os.environ.setdefault("SHINRIN_TABM_BACKEND", "numpy")
 # Single-threaded on every side so native timings are comparable with the
 # pinned one-thread onnxruntime session.
 os.environ.setdefault("OMP_NUM_THREADS", "1")
@@ -270,22 +268,6 @@ def _rf_quantile():
     return RandomForestQuantileRegressor(n_estimators=50, random_state=0, n_jobs=1)
 
 
-def _mlp(task):
-    from shinrin import MLPClassifier, MLPRegressor
-
-    if task == "regression":
-        return MLPRegressor(hidden_layer_sizes=(128, 64), max_iter=100, random_state=0)
-    return MLPClassifier(hidden_layer_sizes=(128, 64), max_iter=100, random_state=0)
-
-
-def _tabm(task):
-    from shinrin import TabMClassifier, TabMRegressor
-
-    if task == "regression":
-        return TabMRegressor(hidden_layer_sizes=(128, 128), max_iter=50, random_state=0)
-    return TabMClassifier(hidden_layer_sizes=(128, 128), max_iter=50, random_state=0)
-
-
 def _pre_corels(X_train, y_train, X_test):
     from sklearn.preprocessing import KBinsDiscretizer
 
@@ -316,8 +298,6 @@ ALGOS = [
         predict_kwargs={"quantile": 50},
         export_kwargs={"quantile": 50},
     ),
-    AlgoSpec("MLP", ("regression", "classification"), _mlp),
-    AlgoSpec("TabM", ("regression", "classification"), _tabm),
     AlgoSpec(
         "Corels",
         ("classification",),
@@ -591,8 +571,6 @@ def build_markdown(meta: dict, records: list[dict]) -> str:
         "- Models: MondrianTree (depth 16), MondrianForest (20 trees, depth 16),",
         "  RandomForest / ExtraTrees (100 trees, vendored sklearn engine),",
         "  RF-Quantile (50 trees, median baked into the graph),",
-        "  MLP ((128, 64) hidden units, 100 Adam epochs),",
-        "  TabM ((128, 128) hidden units, 50 Adam epochs; NumPy reference backend),",
         "  Corels and GOSDT (binary-only, on binarized features).",
         "- Datasets: synthetic regression (`make_regression`, 4k x 20), binary and",
         "  5-class classification (`make_classification`, 4k x 20); 80/20 split.",
@@ -612,7 +590,7 @@ def build_markdown(meta: dict, records: list[dict]) -> str:
         "- Speed reports the mean wall-clock per full test-set call after 3 warmup",
         "  calls (timed until >= 0.4 s total or 100 calls). NumPy/BLAS and",
         "  onnxruntime are pinned to one thread on both sides.",
-        "- SkopeRules / Ordt / TabICL are omitted to keep runtime bounded.",
+        "- SkopeRules / Ordt are omitted to keep runtime bounded.",
         "",
     ]
 
@@ -731,9 +709,7 @@ def build_markdown(meta: dict, records: list[dict]) -> str:
                 "- f32-trained vs f64-trained native predictions disagree by"
                 " (max abs): " + ", ".join(parts) + ". Forests differ most"
                 " because rounding features/targets before fit changes which"
-                " splits are chosen (targets here are unnormalized); TabM is"
-                " exactly 0 because its NumPy backend casts inputs to float64"
-                " internally."
+                " splits are chosen (targets here are unnormalized)."
             )
         L.append(
             f"- ONNX Runtime is >5% faster in {len(faster)} cells and >5% slower"

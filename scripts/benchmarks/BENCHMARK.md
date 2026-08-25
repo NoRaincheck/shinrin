@@ -1,10 +1,9 @@
 # Benchmarks
 
-Three benchmark scripts live here:
+Two benchmark scripts live here:
 
 - **`bench_baselines.py`** — compares Shinrin against LightGBM and SGD baselines (results below).
 - **`bench_backends.py`** — compares the Rust and Mojo native backends against each other (`just bench-backends`).
-- **`bench_tabm.py`** — compares the TabM NumPy and Mojo trainer backends (see [TABM_BENCHMARK.md](TABM_BENCHMARK.md)).
 
 ## Baselines: LightGBM / SGD
 

@@ -10,7 +10,7 @@
       "shinrin": "0.2.0",
       "NumPy": "2.5.2",
       "scikit-learn": "1.9.0",
-      "Backends": "Rust (Mondrian); NumPy reference (MLP, TabM)"
+      "Backends": "Rust (Mondrian)"
     }
   },
   "datasets": {
@@ -219,32 +219,6 @@
       "n_leaves": 21083
     },
     {
-      "dataset": "fish-toxicity",
-      "algorithm": "MLP",
-      "task": "regression",
-      "status": "ok",
-      "note": "",
-      "fit_s": 0.07637658400926739,
-      "fit_mean_s": 0.07689831966611867,
-      "fit_repeats": 3,
-      "predict_ms": 0.17405409016646445,
-      "predict_per_1k_ms": 0.9563411547607937,
-      "score": 0.5058592517855367
-    },
-    {
-      "dataset": "fish-toxicity",
-      "algorithm": "TabM",
-      "task": "regression",
-      "status": "ok",
-      "note": "",
-      "fit_s": 18.70196787500754,
-      "fit_mean_s": 18.723368180682883,
-      "fit_repeats": 3,
-      "predict_ms": 5.921541905263439,
-      "predict_per_1k_ms": 32.5359445344145,
-      "score": 0.5133862155677584
-    },
-    {
       "dataset": "concrete-strength",
       "algorithm": "MondrianTree",
       "task": "regression",
@@ -333,32 +307,6 @@
       "score": 0.9090279694435481,
       "n_nodes": 50954,
       "n_leaves": 25502
-    },
-    {
-      "dataset": "concrete-strength",
-      "algorithm": "MLP",
-      "task": "regression",
-      "status": "ok",
-      "note": "",
-      "fit_s": 0.09180733299581334,
-      "fit_mean_s": 0.09392466665788864,
-      "fit_repeats": 3,
-      "predict_ms": 0.18904171301983297,
-      "predict_per_1k_ms": 0.9176782185428785,
-      "score": 0.3573307301693276
-    },
-    {
-      "dataset": "concrete-strength",
-      "algorithm": "TabM",
-      "task": "regression",
-      "status": "ok",
-      "note": "",
-      "fit_s": 22.533053749997634,
-      "fit_mean_s": 22.55815977801103,
-      "fit_repeats": 3,
-      "predict_ms": 7.514458405785263,
-      "predict_per_1k_ms": 36.47795342614205,
-      "score": 0.3688489361725198
     },
     {
       "dataset": "insurance-expenses",
@@ -451,32 +399,6 @@
       "n_leaves": 33632
     },
     {
-      "dataset": "insurance-expenses",
-      "algorithm": "MLP",
-      "task": "regression",
-      "status": "ok",
-      "note": "",
-      "fit_s": 0.10939920897362754,
-      "fit_mean_s": 0.10977884731255472,
-      "fit_repeats": 3,
-      "predict_ms": 0.30205820221453905,
-      "predict_per_1k_ms": 1.127082844084101,
-      "score": 0.15702825015232225
-    },
-    {
-      "dataset": "insurance-expenses",
-      "algorithm": "TabM",
-      "task": "regression",
-      "status": "ok",
-      "note": "",
-      "fit_s": 27.11979683302343,
-      "fit_mean_s": 27.180678777668316,
-      "fit_repeats": 3,
-      "predict_ms": 8.770820702193305,
-      "predict_per_1k_ms": 32.726942918631735,
-      "score": 0.15265072126789747
-    },
-    {
       "dataset": "airfoil-noise",
       "algorithm": "MondrianTree",
       "task": "regression",
@@ -565,32 +487,6 @@
       "score": 0.9456508206262313,
       "n_nodes": 75496,
       "n_leaves": 37773
-    },
-    {
-      "dataset": "airfoil-noise",
-      "algorithm": "MLP",
-      "task": "regression",
-      "status": "ok",
-      "note": "",
-      "fit_s": 0.13535900000715628,
-      "fit_mean_s": 0.13719811100357523,
-      "fit_repeats": 3,
-      "predict_ms": 0.33147918875329196,
-      "predict_per_1k_ms": 1.1012597632999734,
-      "score": 0.6299248482327585
-    },
-    {
-      "dataset": "airfoil-noise",
-      "algorithm": "TabM",
-      "task": "regression",
-      "status": "ok",
-      "note": "",
-      "fit_s": 32.634545791952405,
-      "fit_mean_s": 32.784625694330316,
-      "fit_repeats": 3,
-      "predict_ms": 10.30672910856083,
-      "predict_per_1k_ms": 34.241624945384814,
-      "score": 0.23924516671441365
     },
     {
       "dataset": "fiat-500",
@@ -683,32 +579,6 @@
       "n_leaves": 33690
     },
     {
-      "dataset": "fiat-500",
-      "algorithm": "MLP",
-      "task": "regression",
-      "status": "ok",
-      "note": "",
-      "fit_s": 0.12497250002343208,
-      "fit_mean_s": 0.12577877800989276,
-      "fit_repeats": 3,
-      "predict_ms": 0.3004875034093857,
-      "predict_per_1k_ms": 0.9756087773032003,
-      "score": -5.3629766483469
-    },
-    {
-      "dataset": "fiat-500",
-      "algorithm": "TabM",
-      "task": "regression",
-      "status": "ok",
-      "note": "",
-      "fit_s": 32.176458917034324,
-      "fit_mean_s": 32.20013580533365,
-      "fit_repeats": 3,
-      "predict_ms": 10.352720995433629,
-      "predict_per_1k_ms": 33.612730504654635,
-      "score": 0.6191159905655451
-    },
-    {
       "dataset": "blood-transfusion",
       "algorithm": "MondrianTree",
       "task": "classification",
@@ -737,32 +607,6 @@
       "score": 0.68,
       "n_nodes": 9682,
       "n_leaves": 4851
-    },
-    {
-      "dataset": "blood-transfusion",
-      "algorithm": "MLP",
-      "task": "classification",
-      "status": "ok",
-      "note": "",
-      "fit_s": 0.07853162504034117,
-      "fit_mean_s": 0.08299734736404692,
-      "fit_repeats": 3,
-      "predict_ms": 0.3017917973920703,
-      "predict_per_1k_ms": 2.0119453159471354,
-      "score": 0.7466666666666667
-    },
-    {
-      "dataset": "blood-transfusion",
-      "algorithm": "TabM",
-      "task": "classification",
-      "status": "ok",
-      "note": "",
-      "fit_s": 16.8732782920124,
-      "fit_mean_s": 16.909670347347856,
-      "fit_repeats": 3,
-      "predict_ms": 5.329671001527458,
-      "predict_per_1k_ms": 35.53114001018306,
-      "score": 0.7533333333333333
     },
     {
       "dataset": "blood-transfusion",
@@ -822,32 +666,6 @@
     },
     {
       "dataset": "pima-diabetes",
-      "algorithm": "MLP",
-      "task": "classification",
-      "status": "ok",
-      "note": "",
-      "fit_s": 0.05171999998856336,
-      "fit_mean_s": 0.05212026401810969,
-      "fit_repeats": 3,
-      "predict_ms": 0.23530430626124144,
-      "predict_per_1k_ms": 1.5279500406574118,
-      "score": 0.6428571428571429
-    },
-    {
-      "dataset": "pima-diabetes",
-      "algorithm": "TabM",
-      "task": "classification",
-      "status": "ok",
-      "note": "",
-      "fit_s": 16.963882291980553,
-      "fit_mean_s": 16.974498985975515,
-      "fit_repeats": 3,
-      "predict_ms": 5.518766911700368,
-      "predict_per_1k_ms": 35.83614877727512,
-      "score": 0.7337662337662337
-    },
-    {
-      "dataset": "pima-diabetes",
       "algorithm": "GOSDT",
       "task": "classification",
       "status": "ok",
@@ -901,32 +719,6 @@
       "score": 0.675,
       "n_nodes": 18412,
       "n_leaves": 9216
-    },
-    {
-      "dataset": "credit-g",
-      "algorithm": "MLP",
-      "task": "classification",
-      "status": "ok",
-      "note": "",
-      "fit_s": 0.10467454098397866,
-      "fit_mean_s": 0.10536687466083094,
-      "fit_repeats": 3,
-      "predict_ms": 0.6710916117299348,
-      "predict_per_1k_ms": 3.355458058649674,
-      "score": 0.7
-    },
-    {
-      "dataset": "credit-g",
-      "algorithm": "TabM",
-      "task": "classification",
-      "status": "ok",
-      "note": "",
-      "fit_s": 23.240157291991636,
-      "fit_mean_s": 23.270549555988207,
-      "fit_repeats": 3,
-      "predict_ms": 7.452808291418478,
-      "predict_per_1k_ms": 37.26404145709239,
-      "score": 0.71
     },
     {
       "dataset": "credit-g",
@@ -986,32 +778,6 @@
     },
     {
       "dataset": "qsar-biodeg",
-      "algorithm": "MLP",
-      "task": "classification",
-      "status": "ok",
-      "note": "",
-      "fit_s": 0.15047804196365178,
-      "fit_mean_s": 0.1518255416303873,
-      "fit_repeats": 3,
-      "predict_ms": 0.8631541859358549,
-      "predict_per_1k_ms": 4.090778132397417,
-      "score": 0.8483412322274881
-    },
-    {
-      "dataset": "qsar-biodeg",
-      "algorithm": "TabM",
-      "task": "classification",
-      "status": "ok",
-      "note": "",
-      "fit_s": 38.36225150001701,
-      "fit_mean_s": 38.423625083329775,
-      "fit_repeats": 3,
-      "predict_ms": 11.418874794617295,
-      "predict_per_1k_ms": 54.117890021882914,
-      "score": 0.8388625592417062
-    },
-    {
-      "dataset": "qsar-biodeg",
       "algorithm": "GOSDT",
       "task": "classification",
       "status": "ok",
@@ -1065,32 +831,6 @@
       "score": 0.9206963249516441,
       "n_nodes": 11200,
       "n_leaves": 5610
-    },
-    {
-      "dataset": "seismic-bumps",
-      "algorithm": "MLP",
-      "task": "classification",
-      "status": "ok",
-      "note": "",
-      "fit_s": 0.2517506249714643,
-      "fit_mean_s": 0.253101291328979,
-      "fit_repeats": 3,
-      "predict_ms": 0.967712391866371,
-      "predict_per_1k_ms": 1.8717841235326325,
-      "score": 0.9342359767891683
-    },
-    {
-      "dataset": "seismic-bumps",
-      "algorithm": "TabM",
-      "task": "classification",
-      "status": "ok",
-      "note": "",
-      "fit_s": 59.34437120798975,
-      "fit_mean_s": 59.65696502767969,
-      "fit_repeats": 3,
-      "predict_ms": 20.968795893713832,
-      "predict_per_1k_ms": 40.55859940757028,
-      "score": 0.9342359767891683
     },
     {
       "dataset": "seismic-bumps",
@@ -1150,32 +890,6 @@
     },
     {
       "dataset": "churn",
-      "algorithm": "MLP",
-      "task": "classification",
-      "status": "ok",
-      "note": "",
-      "fit_s": 0.376154542027507,
-      "fit_mean_s": 0.37884829166190076,
-      "fit_repeats": 3,
-      "predict_ms": 0.9983750001993029,
-      "predict_per_1k_ms": 0.9983750001993029,
-      "score": 0.877
-    },
-    {
-      "dataset": "churn",
-      "algorithm": "TabM",
-      "task": "classification",
-      "status": "ok",
-      "note": "",
-      "fit_s": 137.15598287497414,
-      "fit_mean_s": 139.5443033473372,
-      "fit_repeats": 3,
-      "predict_ms": 44.388312491355464,
-      "predict_per_1k_ms": 44.388312491355464,
-      "score": 0.904
-    },
-    {
-      "dataset": "churn",
       "algorithm": "GOSDT",
       "task": "classification",
       "status": "ok",
@@ -1232,32 +946,6 @@
     },
     {
       "dataset": "anneal",
-      "algorithm": "MLP",
-      "task": "classification",
-      "status": "ok",
-      "note": "",
-      "fit_s": 0.07215791702037677,
-      "fit_mean_s": 0.0724815833188283,
-      "fit_repeats": 3,
-      "predict_ms": 0.9626000071875751,
-      "predict_per_1k_ms": 5.34777781770875,
-      "score": 0.8555555555555555
-    },
-    {
-      "dataset": "anneal",
-      "algorithm": "TabM",
-      "task": "classification",
-      "status": "ok",
-      "note": "",
-      "fit_s": 31.765285291010514,
-      "fit_mean_s": 31.911349708000973,
-      "fit_repeats": 3,
-      "predict_ms": 16.279254003893584,
-      "predict_per_1k_ms": 90.44030002163102,
-      "score": 0.9222222222222223
-    },
-    {
-      "dataset": "anneal",
       "algorithm": "GOSDT",
       "task": "classification",
       "status": "skipped",
@@ -1304,32 +992,6 @@
     },
     {
       "dataset": "maternal-health",
-      "algorithm": "MLP",
-      "task": "classification",
-      "status": "ok",
-      "note": "",
-      "fit_s": 0.11237874999642372,
-      "fit_mean_s": 0.11326081934385002,
-      "fit_repeats": 3,
-      "predict_ms": 0.3623749013058841,
-      "predict_per_1k_ms": 1.785098035989577,
-      "score": 0.7586206896551724
-    },
-    {
-      "dataset": "maternal-health",
-      "algorithm": "TabM",
-      "task": "classification",
-      "status": "ok",
-      "note": "",
-      "fit_s": 32.45388799998909,
-      "fit_mean_s": 32.53327393066138,
-      "fit_repeats": 3,
-      "predict_ms": 20.593954098876566,
-      "predict_per_1k_ms": 101.44804974816041,
-      "score": 0.7438423645320197
-    },
-    {
-      "dataset": "maternal-health",
       "algorithm": "GOSDT",
       "task": "classification",
       "status": "skipped",
@@ -1373,32 +1035,6 @@
       "score": 0.8745387453874539,
       "n_nodes": 13152,
       "n_leaves": 6586
-    },
-    {
-      "dataset": "website-phishing",
-      "algorithm": "MLP",
-      "task": "classification",
-      "status": "ok",
-      "note": "",
-      "fit_s": 0.12018954200902954,
-      "fit_mean_s": 0.12238959766303499,
-      "fit_repeats": 3,
-      "predict_ms": 0.5552792921662331,
-      "predict_per_1k_ms": 2.049001078104181,
-      "score": 0.8819188191881919
-    },
-    {
-      "dataset": "website-phishing",
-      "algorithm": "TabM",
-      "task": "classification",
-      "status": "ok",
-      "note": "",
-      "fit_s": 39.32890754198888,
-      "fit_mean_s": 39.934541875321884,
-      "fit_repeats": 3,
-      "predict_ms": 25.917353999102488,
-      "predict_per_1k_ms": 95.63599261661435,
-      "score": 0.8634686346863468
     },
     {
       "dataset": "website-phishing",

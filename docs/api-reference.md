@@ -68,23 +68,6 @@ See [SPOT Optimal Trees](models/spot.md)
 
 See [SPOTSET Rashomon Sets](models/spotset.md)
 
-### Tabular Neural Networks
-
-- `MLPClassifier` — scikit-learn-compatible MLP classifier (NumPy / Mojo backends)
-- `MLPRegressor` — scikit-learn-compatible MLP regressor (NumPy / Mojo backends)
-
-See [MLP](models/mlp.md)
-
-- `TabMClassifier` — TabM ensemble classifier (BatchEnsemble-style adapters, NumPy / Mojo backends)
-- `TabMRegressor` — TabM ensemble regressor
-
-See [TabM](models/tabm.md)
-
-### TabICL
-
-- `TabICLClassifier` — Tabular in-context learning classifier (TabICLv2)
-- `TabICLRegressor` — Tabular in-context learning regressor (quantile decoder)
-
 ## Explanations
 
 - `TreeExplainer` — SHAP explainer for tree models
@@ -121,5 +104,5 @@ See [ONNX Export](features/onnx-export.md#importing-models-with-from_model)
 - `benchmark_model_size()` — Measure model size
 - `full_benchmark()` — Run all benchmarks
 - `print_benchmark_report()` — Print formatted results
-- `ablation_benchmark()` — Fit time and held-out quality per model variant (e.g. with vs without ternary quantization)
+- `ablation_benchmark()` — Fit time and held-out quality per model variant (e.g. two configurations of the same estimator)
 - `print_ablation_report()` — Print an ablation table with deltas against the baseline variant

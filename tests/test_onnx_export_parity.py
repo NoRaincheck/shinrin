@@ -1,6 +1,6 @@
 """Runtime-parity tests for shinrin ONNX exports.
 
-These tests load every exported tree/forest/TabM graph into onnxruntime
+These tests load every exported tree/forest graph into onnxruntime
 and pin native-vs-ORT agreement, complementing the structural checks in
 ``test_onnx_benchmark.py`` and the round-trip import tests in
 ``test_onnx_import.py``.
@@ -53,7 +53,6 @@ def _assert_close(actual, desired, atol):
 # the graph, keeping agreement near 1e-6 for these scales.
 F64_TOL = 1e-5
 F32_TOL = 1e-5
-TABM_TOL = 1e-3
 
 
 @pytest.mark.skipif(not ORT_INSTALLED, reason="onnxruntime not installed")
@@ -163,58 +162,6 @@ class TestTreeForestOrtParity:
         model.fit(X, y)
         with pytest.raises(NotImplementedError, match="GradientBoosting classifiers"):
             to_onnx(model, X[:5])
-
-
-@pytest.mark.skipif(not ORT_INSTALLED, reason="onnxruntime not installed")
-class TestMlpOrtParity:
-    """Native vs ONNX-runtime agreement for MLP (float32 graphs)."""
-
-    def test_binary_labels_match_probabilities_and_native(self):
-        # Guards the binary label tail: deriving labels from a threshold on
-        # the raw sigmoid column used to emit (n, 1) labels inconsistent
-        # with the reported probabilities.
-        try:
-            from shinrin import MLPClassifier
-        except ImportError:  # pragma: no cover
-            pytest.skip("mlp dependencies missing")
-
-        rng = np.random.RandomState(7)
-        X = rng.randn(600, 8)
-        y = (X[:, 0] + X[:, 1] > 0).astype(int)
-        model = MLPClassifier(hidden_layer_sizes=(16,), max_iter=40, random_state=0)
-        model.fit(X.astype(np.float32), y)
-
-        labels, proba = _ort_predict(to_onnx(model, X[:5]), X)
-        assert labels.ndim == 1
-        assert (labels == proba.argmax(axis=1)).all()
-        assert (labels == model.predict(X)).all()
-        _assert_close(proba, model.predict_proba(X), TABM_TOL)
-
-
-@pytest.mark.skipif(not ORT_INSTALLED, reason="onnxruntime not installed")
-class TestTabmOrtParity:
-    """Native vs ONNX-runtime agreement for TabM (float32 graphs)."""
-
-    def test_regressor_and_classifier(self):
-        try:
-            from shinrin import TabMClassifier, TabMRegressor
-        except ImportError:
-            pytest.skip("tabm dependencies missing")
-
-        rng = np.random.RandomState(1)
-        X = rng.randn(300, 8)
-        y = X[:, 0] * 2.0 + rng.randn(300) * 0.01
-        c = (X[:, 1] > 0).astype(int)
-
-        reg = TabMRegressor(hidden_layer_sizes=(16,), max_iter=20, random_state=0)
-        reg.fit(X, y)
-        got = _ort_predict(to_onnx(reg, X[:5]), X)[0]
-        _assert_close(got, reg.predict(X), TABM_TOL)
-
-        clf = TabMClassifier(hidden_layer_sizes=(16,), max_iter=20, random_state=0)
-        clf.fit(X, c)
-        proba = _ort_predict(to_onnx(clf, X[:5]), X)[0]
-        _assert_close(proba, clf.predict_proba(X), TABM_TOL)
 
 
 def test_exports_are_valid_protos():
