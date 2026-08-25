@@ -23,7 +23,11 @@ fn main() {
     // system libgmp.
     let mut cxx = cc::Build::new();
     cxx.cpp(true)
-        .std("c++11");
+        .std("c++11")
+        // windows.h defines min/max function-like macros that break
+        // std::numeric_limits<...>::max() in vendored headers; NOMINMAX
+        // suppresses them (no-op on other platforms).
+        .define("NOMINMAX", None);
     if !no_gmp {
         cxx.define("GMP", None);
     }
@@ -63,6 +67,7 @@ fn main() {
     gosdt.cpp(true)
         .std("c++20")
         .define("GMP", None)
+        .define("NOMINMAX", None)
         .include(corels_cpp_dir.join("gmpshim"))
         .include(gosdt_dir.join("tbbshim"))
         .include(&gosdt_dir)
@@ -107,6 +112,7 @@ fn main() {
     spotset.cpp(true)
         .std("c++20")
         .define("GMP", None)
+        .define("NOMINMAX", None)
         .include(corels_cpp_dir.join("gmpshim"))
         .include(gosdt_dir.join("tbbshim"))
         .include(spotset_dir.clone())
