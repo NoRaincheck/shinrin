@@ -10,14 +10,148 @@ import pytest
 
 from shinrin._tweaking._core import (
     INF,
+    Choice,
+    aggregate_minimal_flip,
     brute_force_min_flips,
     constraint_cost,
     merge_constraints,
     project,
-    reference_minimal_flip,
     robust_minimal_flip,
     satisfies,
+    reference_minimal_flip,
 )
+
+
+def _vote_brute(models, weights, x, threshold):
+    """Min-cost subset of flipping-models whose weights cross threshold."""
+    import itertools
+
+    best = INF
+    n = len(models)
+    for size in range(n + 1):
+        for subset in itertools.combinations(range(n), size):
+            total = sum(weights[m] for m in subset)
+            if not total > threshold:
+                continue
+            leaf_lists = [models[m] for m in subset]
+            for combo in itertools.product(*leaf_lists) if leaf_lists else [()]:
+                merged = {}
+                ok = True
+                for leaf in combo:
+                    merged = merge_constraints(merged, leaf)
+                    if merged is None:
+                        ok = False
+                        break
+                if ok:
+                    best = min(best, constraint_cost(merged, x))
+        if best != INF:
+            return best
+    return INF
+
+
+def test_vote_scope_matches_brute_force():
+    rng = np.random.default_rng(5)
+    for _ in range(40):
+        n_features = int(rng.integers(4, 7))
+        n_models = int(rng.integers(2, 4))
+        weights = rng.uniform(0.5, 2.0, size=n_models)
+        models = []
+        for _ in range(n_models):
+            leaves = []
+            for _ in range(int(rng.integers(1, 3))):
+                size = int(rng.integers(1, 3))
+                feats = rng.choice(n_features, size=size, replace=False)
+                leaves.append(
+                    {int(f): (float(rng.integers(0, 2)),) * 2 for f in feats}
+                )
+            models.append(leaves)
+        x = rng.integers(0, 2, size=n_features).astype(float)
+        total_w = float(weights.sum())
+        threshold = total_w / 2
+
+        choices = [
+            [Choice(leaf, float(weights[m])) for leaf in models[m]]
+            + [Choice({}, 0.0)]
+            for m in range(n_models)
+        ]
+        outcome = aggregate_minimal_flip(choices, x, threshold=threshold, strict=True)
+        expected = _vote_brute(models, weights, x, threshold)
+
+        if expected == INF:
+            assert not outcome.success and outcome.optimal
+        else:
+            assert outcome.success and outcome.optimal
+            assert outcome.l1_distance == pytest.approx(expected)
+
+
+def _additive_brute(model_leaves, contributions, x, base):
+    import itertools
+
+    best = INF
+    for combo in itertools.product(*[range(len(l)) for l in model_leaves]):
+        merged = {}
+        ok = True
+        score = base
+        for m, idx in enumerate(combo):
+            score += contributions[m][idx]
+            merged = merge_constraints(merged, model_leaves[m][idx])
+            if merged is None:
+                ok = False
+                break
+        if ok and score > 0:
+            best = min(best, constraint_cost(merged, x))
+    return best
+
+
+def test_additive_scope_matches_brute_force():
+    rng = np.random.default_rng(9)
+    for _ in range(40):
+        n_features = int(rng.integers(4, 7))
+        n_models = int(rng.integers(2, 4))
+        model_leaves, contributions = [], []
+        for _ in range(n_models):
+            leaves, contribs = [], []
+            for _ in range(int(rng.integers(1, 4))):
+                size = int(rng.integers(1, 3))
+                feats = rng.choice(n_features, size=size, replace=False)
+                leaves.append(
+                    {int(f): (float(rng.integers(0, 2)),) * 2 for f in feats}
+                )
+                contribs.append(float(rng.uniform(-1.5, 1.5)))
+            model_leaves.append(leaves)
+            contributions.append(contribs)
+        x = rng.integers(0, 2, size=n_features).astype(float)
+        base = float(rng.uniform(-0.8, 0.8))
+
+        choices = [
+            [Choice(leaf, c) for leaf, c in zip(model_leaves[m], contributions[m])]
+            for m in range(n_models)
+        ]
+        # skip degenerate instances where some model has an empty list
+        if any(not ch for ch in choices):
+            continue
+        outcome = aggregate_minimal_flip(choices, x, base=base, strict=True)
+        expected = _additive_brute(model_leaves, contributions, x, base)
+
+        if expected == INF:
+            assert not outcome.success and outcome.optimal
+        else:
+            assert outcome.success and outcome.optimal
+            assert outcome.l1_distance == pytest.approx(expected)
+
+
+def test_aggregate_budget_exhaustion_not_optimal():
+    rng = np.random.default_rng(4)
+    x = np.array([0.0, 0.0, 0.0])
+    choices = [
+        [Choice({0: (1.0, 1.0)}, 1.0), Choice({}, 0.0)],
+        [Choice({1: (1.0, 1.0)}, 1.0), Choice({}, 0.0)],
+        [Choice({2: (1.0, 1.0)}, 1.0), Choice({}, 0.0)],
+    ]
+    outcome = aggregate_minimal_flip(
+        choices, x, threshold=1.5, strict=True, max_nodes=1
+    )
+    assert not outcome.optimal
 
 
 def test_merge_intersects_and_detects_conflicts():

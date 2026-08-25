@@ -39,6 +39,19 @@ Constraint = dict[int, Interval]
 INF = float("inf")
 
 
+@dataclass(frozen=True)
+class Choice:
+    """One candidate decision for a model in the aggregate search.
+
+    ``constraint`` is the leaf's literal set; ``contribution`` is what the
+    model adds to the aggregate when this choice is taken — a vote weight
+    (0 for a free "not flipped" choice) or an additive score term.
+    """
+
+    constraint: Constraint
+    contribution: float
+
+
 def merge_constraints(a: Constraint, b: Constraint) -> Constraint | None:
     """Intersect two literal sets; return None if they conflict on a feature."""
     out = dict(a)
@@ -217,6 +230,173 @@ class _RobustFlipSearcher:
             optimal=not exhausted,
             time_s=elapsed,
         )
+
+
+class _AggregateFlipSearcher:
+    """Uniform-cost search over per-model choices with an aggregate goal.
+
+    Minimizes the L1 cost of the merged literal sets subject to
+    ``base + sum(contributions) >/>= threshold`` at completion. Used for
+    weighted-majority committees (contributions are vote weights, free
+    "not flipped" choices carry 0) and boosted score ensembles (every tree
+    contributes its leaf value; no free choice). Exact: states expand in
+    cost order and Pareto-dominance dedup never discards a cheaper or
+    higher-aggregate alternative.
+    """
+
+    def __init__(
+        self,
+        model_choices: list[list[Choice]],
+        x: np.ndarray,
+        base: float,
+        threshold: float,
+        strict: bool,
+        max_nodes: int,
+        time_limit: float | None,
+    ):
+        self.choices = model_choices
+        self.x = x
+        self.n_models = len(model_choices)
+        self.base = base
+        self.threshold = threshold
+        self.strict = strict
+        self.max_nodes = max_nodes
+        self.deadline = None if time_limit is None else time.monotonic() + time_limit
+        self.nodes_expanded = 0
+
+        self.constraints: list[Constraint] = [{}]
+        # Suffix upper bounds on achievable aggregate gain, for pruning.
+        self.suffix_gain = [0.0] * (self.n_models + 1)
+        for i in range(self.n_models - 1, -1, -1):
+            best = max((c.contribution for c in self.choices[i]), default=-INF)
+            rest = self.suffix_gain[i + 1]
+            self.suffix_gain[i] = (
+                INF if (rest == INF or best == -INF) else rest + max(best, 0.0)
+            )
+        self._can_reach: Callable[[float, int], bool] = (
+            self._reach_strict if strict else self._reach_nonstrict
+        )
+
+    def _reach_strict(self, agg: float, i: int) -> bool:
+        bound = self.suffix_gain[i]
+        return bound != INF and agg + bound > self.threshold
+
+    def _reach_nonstrict(self, agg: float, i: int) -> bool:
+        bound = self.suffix_gain[i]
+        return bound != INF and agg + bound >= self.threshold
+
+    def run(self) -> FlipOutcome:
+        start = time.monotonic()
+        counter = itertools.count()
+        heap: list[_Entry] = [_Entry(0.0, next(counter), 0, 0)]
+        # Pareto frontier of (cost, aggregate) per canonical state.
+        frontier: dict[tuple[int, frozenset], list[tuple[float, float]]] = {
+            (0, frozenset()): [(0.0, self.base)]
+        }
+        solution: tuple[float, Constraint] | None = None
+        exhausted = False
+
+        while heap:
+            if self.deadline is not None and time.monotonic() > self.deadline:
+                exhausted = True
+                break
+            entry = heapq.heappop(heap)
+            i, ci = entry.model_idx, entry.constraint_idx
+            merged = self.constraints[ci]
+            canon = (i, frozenset(merged.items()))
+            g_here = constraint_cost(merged, self.x)
+            live = [
+                (g, agg)
+                for g, agg in frontier[canon]
+                if g <= g_here + 1e-15
+            ]
+            if not live:
+                continue
+            # Highest aggregate among cheapest-known entries.
+            agg_here = max(agg for _, agg in live)
+
+            if i == self.n_models:
+                if self._can_reach(agg_here, i):
+                    solution = (g_here, merged)
+                    break
+                continue
+            self.nodes_expanded += 1
+            if self.nodes_expanded > self.max_nodes:
+                exhausted = True
+                break
+
+            for choice in self.choices[i]:
+                new_c = merge_constraints(merged, choice.constraint)
+                if new_c is None or not self._can_reach(
+                    agg_here + choice.contribution, i + 1
+                ):
+                    continue
+                new_g = constraint_cost(new_c, self.x)
+                new_canon = (i + 1, frozenset(new_c.items()))
+                entries = frontier.setdefault(new_canon, [])
+                if any(
+                    g <= new_g + 1e-15 and agg >= agg_here + choice.contribution
+                    for g, agg in entries
+                ):
+                    continue
+                entries[:] = [
+                    (g, agg)
+                    for g, agg in entries
+                    if not (
+                        new_g <= g + 1e-15
+                        and agg_here + choice.contribution >= agg
+                    )
+                ]
+                entries.append((new_g, agg_here + choice.contribution))
+                idx = len(self.constraints)
+                self.constraints.append(new_c)
+                heapq.heappush(
+                    heap, _Entry(new_g, next(counter), i + 1, idx)
+                )
+
+        elapsed = time.monotonic() - start
+        if solution is not None:
+            g, merged = solution
+            return FlipOutcome(
+                success=True,
+                x_new=project(self.x, merged),
+                delta_features=changed_features(merged, self.x),
+                l1_distance=g,
+                nodes_expanded=self.nodes_expanded,
+                optimal=not exhausted,
+                time_s=elapsed,
+            )
+        return FlipOutcome(
+            success=False,
+            x_new=None,
+            delta_features=(),
+            l1_distance=INF,
+            nodes_expanded=self.nodes_expanded,
+            optimal=not exhausted,
+            time_s=elapsed,
+        )
+
+
+def aggregate_minimal_flip(
+    model_choices: list[list[Choice]],
+    x: np.ndarray,
+    *,
+    base: float = 0.0,
+    threshold: float = 0.0,
+    strict: bool = True,
+    max_nodes: int = 100_000,
+    time_limit: float | None = None,
+) -> FlipOutcome:
+    """Minimal L1 tweak whose per-model contributions cross a threshold.
+
+    Each model must take exactly one :class:`Choice`; the search finds the
+    cheapest combination of compatible leaf constraints whose aggregated
+    contribution satisfies ``base + total >/>= threshold``.
+    """
+    searcher = _AggregateFlipSearcher(
+        model_choices, x, base, threshold, strict, max_nodes, time_limit
+    )
+    return searcher.run()
 
 
 def build_models_target_leaves(
