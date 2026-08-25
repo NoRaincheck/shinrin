@@ -90,6 +90,22 @@ See [TabM](models/tabm.md)
 - `TreeExplainer` — SHAP explainer for tree models
 - `explanation()` — Convenience function for SHAP visualization
 
+### Minimal-Flip Feature Tweaking
+
+- `RashomonFlipSearch(estimator)` — Minimal feature tweaks that flip
+  predictions for SPOT, SPOTSET and scikit-learn tree/forest/committee/booster
+  classifiers; scopes: `"reference"` (single optimal tree), `"rashomon"`
+  (every member of the set), `"ensemble"` (the estimator's own aggregated
+  prediction)
+  - `.search(X, target=None, scope="rashomon", max_nodes=100_000, time_limit=None)`
+    — per-sample minimal-flip search returning `FlipResult` records
+- `FlipResult` — Per-sample outcome (`x_new`, `changed_features`,
+  `l1_distance`, `success` / `optimal` / `verified`, agreement counts, solver effort)
+- `summarize_flip_results(results)` — Batch statistics (success/infeasibility
+  rates, distances, solver effort)
+
+See [Minimal-Flip Feature Tweaking](features/minimal-flip-tweaking.md)
+
 ## ONNX Export
 
 - `to_onnx()` — Convert model to ONNX format (`shinrin.onnx`)

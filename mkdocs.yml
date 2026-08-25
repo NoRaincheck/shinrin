@@ -38,6 +38,7 @@ nav:
       - TabICL: models/tabicl.md
   - Features:
       - TreeSHAP Explanations: features/treeshap-explanations.md
+      - Minimal-Flip Feature Tweaking: features/minimal-flip-tweaking.md
       - ONNX Export: features/onnx-export.md
       - Benchmarking: features/benchmarking.md
       - Benchmark Results: features/benchmark-results.md

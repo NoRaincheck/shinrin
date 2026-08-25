@@ -65,6 +65,10 @@ Notes:
 - Every tree's objective is guaranteed within
   `(1 + rashomon_bound_multiplier)` times the optimum — verified against
   SPOT in `tests/test_spotset.py`.
+- The whole set is also a host for counterfactuals:
+  [Minimal-Flip Feature Tweaking](../features/minimal-flip-tweaking.md) can
+  search for the smallest feature change that flips *every* tree in the set
+  at once (`scope="rashomon"`), not just the first one.
 
 ## SPOTSETClassifier
 
