@@ -5,6 +5,13 @@ Ensembles via Actionable Feature Tweaking* (KDD 2017, arXiv:1706.06691),
 adapted to shinrin's SPOT (optimal sparse tree) and SPOTSET (Rashomon set of
 sparse optimal trees) estimators.
 
+Tweaking applies to any tree-like object: any fitted classifier whose
+prediction decomposes into root-to-leaf paths of per-feature tests.
+Supported out of the box are :class:`shinrin.SPOTClassifier`,
+:class:`shinrin.SPOTSETClassifier`, scikit-learn decision trees and any
+forest exposing ``estimators_``; other families only need to supply leaf
+literal sets plus batch prediction (see ``shinrin._tweaking._adapters``).
+
 Two search scopes are supported:
 
 - ``scope="reference"``: flip only the reference model (the first/optimal
@@ -15,6 +22,15 @@ Two search scopes are supported:
   this robust tweak is typically found at little extra cost over the
   reference one; the same query posed to a decorrelated random forest is
   routinely infeasible (the search proves it or exhausts its budget).
+
+Guarantee semantics: minimality and the verified flip hold on a **single
+tree** basis. On an ensemble, a reference-scope tweak flips one member and
+says nothing about the aggregated vote of the rest — single-tree tweaking
+is not robust in ensembles. It is therefore ideal when the whole model is
+exactly one tree, i.e. SPOT: an exact minimal counterfactual for a globally
+optimal sparse tree. Robustness across many models exists only through
+``scope="rashomon"``, which is exact for the given finite model set but is
+a property of that enumerated set, not a general ensemble guarantee.
 """
 
 from __future__ import annotations
@@ -55,7 +71,29 @@ class FlipResult:
 
 
 class RashomonFlipSearch:
-    """Minimal-flip feature tweaking over SPOT / SPOTSET / forest models.
+    """Minimal-flip feature tweaking over any tree-like model or model set.
+
+    Tweaking is generic: it works on any fitted classifier whose decisions
+    decompose into root-to-leaf per-feature tests. Supported out of the box:
+
+    - :class:`shinrin.SPOTClassifier` — a single globally optimal sparse tree;
+    - :class:`shinrin.SPOTSETClassifier` — the full Rashomon set;
+    - scikit-learn decision trees and forests (anything exposing ``tree_``
+      or ``estimators_``, e.g. ``RandomForestClassifier``).
+
+    Other tree families can be plugged in by providing leaf literal sets and
+    batch prediction (see ``shinrin._tweaking._adapters``).
+
+    Guarantee semantics: results are exact and verified **per individual
+    tree**. With ``scope="reference"`` on an ensemble, only one member is
+    flipped — there is no guarantee about the aggregated vote of the other
+    members, so single-tree tweaking is *not* robust in ensembles. That makes
+    it ideal for SPOT, where the deployed model is exactly one (globally
+    optimal, sparse) tree and the counterfactual is minimal and verified with
+    respect to the entire model. Ensemble-level robustness is available only
+    through ``scope="rashomon"``, which is exact for a given finite model set;
+    it is cheap on SPOTSETs but typically infeasible on decorrelated random
+    forests.
 
     Parameters
     ----------
@@ -109,7 +147,9 @@ class RashomonFlipSearch:
             requires binary problems.
         scope :
             ``"rashomon"`` flips every model in the set; ``"reference"``
-            flips only the first (optimal) tree.
+            flips only the first (optimal) tree. Guarantees are per
+            individual tree: a reference-scope tweak of an ensemble member
+            carries no robustness for the ensemble's aggregated vote.
         """
         if scope not in ("rashomon", "reference"):
             raise ValueError(f"Unknown scope {scope!r}")
