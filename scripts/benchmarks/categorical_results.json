@@ -1,0 +1,194 @@
+[
+  {
+    "dataset": "pure-categorical",
+    "model": "mondrian",
+    "mode": "auto",
+    "accuracy": 1.0,
+    "seconds": 0.03,
+    "derived_columns": 4
+  },
+  {
+    "dataset": "pure-categorical",
+    "model": "mondrian",
+    "mode": "none",
+    "accuracy": 0.92,
+    "seconds": 0.08,
+    "derived_columns": 4
+  },
+  {
+    "dataset": "pure-categorical",
+    "model": "spot",
+    "mode": "auto",
+    "accuracy": 0.956,
+    "seconds": 0.65,
+    "derived_columns": 4
+  },
+  {
+    "dataset": "pure-categorical",
+    "model": "spot",
+    "mode": "none",
+    "accuracy": 0.632,
+    "seconds": 1.12,
+    "derived_columns": 4
+  },
+  {
+    "dataset": "pure-categorical",
+    "model": "spot",
+    "mode": "onehot",
+    "accuracy": 0.632,
+    "seconds": 1.12,
+    "derived_columns": 4
+  },
+  {
+    "dataset": "pure-categorical",
+    "model": "spotset",
+    "mode": "auto",
+    "accuracy": 0.956,
+    "seconds": 0.2,
+    "derived_columns": 2
+  },
+  {
+    "dataset": "pure-categorical",
+    "model": "spotset",
+    "mode": "none",
+    "accuracy": 0.632,
+    "seconds": 0.33,
+    "derived_columns": 9
+  },
+  {
+    "dataset": "pure-categorical",
+    "model": "spotset",
+    "mode": "onehot",
+    "accuracy": 0.632,
+    "seconds": 0.32,
+    "derived_columns": 9
+  },
+  {
+    "dataset": "mixed",
+    "model": "mondrian",
+    "mode": "auto",
+    "accuracy": 0.924,
+    "seconds": 0.09,
+    "derived_columns": 6
+  },
+  {
+    "dataset": "mixed",
+    "model": "mondrian",
+    "mode": "none",
+    "accuracy": 0.868,
+    "seconds": 0.1,
+    "derived_columns": 6
+  },
+  {
+    "dataset": "mixed",
+    "model": "spot",
+    "mode": "auto",
+    "accuracy": 0.917,
+    "seconds": 35.36,
+    "derived_columns": 6
+  },
+  {
+    "dataset": "mixed",
+    "model": "spot",
+    "mode": "none",
+    "accuracy": 0.782,
+    "seconds": 38.13,
+    "derived_columns": 6
+  },
+  {
+    "dataset": "mixed",
+    "model": "spot",
+    "mode": "onehot",
+    "accuracy": 0.782,
+    "seconds": 38.1,
+    "derived_columns": 6
+  },
+  {
+    "dataset": "mixed",
+    "model": "spotset",
+    "mode": "auto",
+    "accuracy": 0.91,
+    "seconds": 0.46,
+    "derived_columns": 28
+  },
+  {
+    "dataset": "mixed",
+    "model": "spotset",
+    "mode": "none",
+    "accuracy": 0.766,
+    "seconds": 1.12,
+    "derived_columns": 34
+  },
+  {
+    "dataset": "mixed",
+    "model": "spotset",
+    "mode": "onehot",
+    "accuracy": 0.766,
+    "seconds": 1.09,
+    "derived_columns": 34
+  },
+  {
+    "dataset": "compas",
+    "model": "mondrian",
+    "mode": "auto",
+    "accuracy": 0.6486,
+    "seconds": 0.22,
+    "derived_columns": 27
+  },
+  {
+    "dataset": "compas",
+    "model": "mondrian",
+    "mode": "none",
+    "accuracy": 0.6447,
+    "seconds": 0.21,
+    "derived_columns": 27
+  },
+  {
+    "dataset": "compas",
+    "model": "spot",
+    "mode": "auto",
+    "accuracy": 0.6325,
+    "seconds": 1.11,
+    "derived_columns": 27
+  },
+  {
+    "dataset": "compas",
+    "model": "spot",
+    "mode": "none",
+    "accuracy": 0.6325,
+    "seconds": 1.07,
+    "derived_columns": 27
+  },
+  {
+    "dataset": "compas",
+    "model": "spot",
+    "mode": "onehot",
+    "accuracy": 0.6325,
+    "seconds": 1.09,
+    "derived_columns": 27
+  },
+  {
+    "dataset": "compas",
+    "model": "spotset",
+    "mode": "auto",
+    "accuracy": 0.648,
+    "seconds": 0.33,
+    "derived_columns": 15
+  },
+  {
+    "dataset": "compas",
+    "model": "spotset",
+    "mode": "none",
+    "accuracy": 0.648,
+    "seconds": 0.29,
+    "derived_columns": 15
+  },
+  {
+    "dataset": "compas",
+    "model": "spotset",
+    "mode": "onehot",
+    "accuracy": 0.648,
+    "seconds": 0.29,
+    "derived_columns": 15
+  }
+]
