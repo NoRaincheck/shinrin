@@ -137,6 +137,7 @@ results documents:
 | Script | Comparison | Results doc (`scripts/benchmarks/`) |
 |---|---|---|
 | `bench_all.py` | All algorithms across a suite of synthetic + real datasets (fit/predict/score) | `ALL_MODELS_BENCHMARK.md`, published at [Benchmark Results](benchmark-results.md) |
+| `bench_tabarena.py` | All algorithms on a core subset of the TabArena-v0.1 benchmark — 13 curated OpenML datasets spanning regression, binary and multiclass classification (`just bench-tabarena`) | `TABARENA_BENCHMARK.md` |
 | `bench_gosdt.py` | GOSDT pipeline vs scikit-learn CART (speed, accuracy, tree size, optimality gap) | `GOSDT_BENCHMARK.md` |
 | `bench_corels.py` | CORELS fit times, mini-GMP vs no-GMP builds | printed |
 | `bench_ordt.py` | ORDT: optimal rule-sets from decision trees — skope-rules mining + CORELS selection vs cart/skope/corels (`just bench-ordt`) | `ORDT_BENCHMARK.md` |
@@ -149,7 +150,14 @@ results documents:
 Run them with `just bench-gosdt`, `just bench-mlp`, `just bench-backends`, etc.
 `just bench-bitlinear` runs the ternary-quantization ablation benchmark;
 `just bench-all` runs `bench_all.py`, which measures every algorithm on every
-dataset in the suite and republishes the results page.
+dataset in the suite and republishes the results page. `just bench-tabarena`
+runs `bench_tabarena.py`, which measures the same algorithm matrix on a core
+subset of [TabArena](https://arxiv.org/abs/2506.16791)-v0.1 (OpenML suite 457):
+13 curated real-world datasets — 5 regression, 6 binary and 3 multiclass
+classification — fetched from OpenML on first use. Scores are not comparable
+with the public TabArena leaderboard (single fixed split, untuned budgets);
+the point is comparing shinrin's algorithms against each other on curated
+real-world data.
 
 There is no `just` recipe for the TabICL benchmark; run it directly:
 

@@ -146,13 +146,15 @@ See [scripts/benchmarks/BITLINEAR_BENCHMARK.md](scripts/benchmarks/BITLINEAR_BEN
 
 See [scripts/benchmarks/ALL_MODELS_BENCHMARK.md](scripts/benchmarks/ALL_MODELS_BENCHMARK.md) for the full all-algorithms benchmark suite, republished at [docs/features/benchmark-results.md](docs/features/benchmark-results.md) (`just bench-all`).
 
+See [scripts/benchmarks/TABARENA_BENCHMARK.md](scripts/benchmarks/TABARENA_BENCHMARK.md) for the same all-algorithms matrix on a core subset of [TabArena](https://arxiv.org/abs/2506.16791)-v0.1 — 13 curated real-world OpenML datasets spanning regression and binary/multiclass classification (`just bench-tabarena`).
+
 See [scripts/benchmarks/GOSDT_BENCHMARK.md](scripts/benchmarks/GOSDT_BENCHMARK.md) for SPOT (formerly GOSDT) vs scikit-learn CART comparisons (`just bench-gosdt`).
 
 See [scripts/benchmarks/ORDT_BENCHMARK.md](scripts/benchmarks/ORDT_BENCHMARK.md) for ORDT — optimal rule-sets from decision trees, combining skope-rules mining with CORELS' certified-optimal selection (ships as `OrdtClassifier`; `just bench-ordt`). Vendoring both pays off: swapping skope-rules' heuristic vote for CORELS' optimal ordering wins on **every dataset tested** (up to +2.6pp test accuracy) while shrinking models to 2–5-clause rule lists.
 
 See [scripts/benchmarks/TABICL_BENCHMARK.md](scripts/benchmarks/TABICL_BENCHMARK.md) for TabICL inference benchmarks across the NumPy/torch/Mojo backends, including predict throughput, ternary PTQ ablation and batch-size/KV-cache sweeps (`python scripts/benchmarks/bench_tabicl.py --backend mojo --quant-ablation --cache-sweep`).
 
-To run benchmarks yourself: `python scripts/benchmarks/bench_baselines.py`, or use the `just` recipes (`just bench-backends` for Rust vs Mojo tree backends, `just bench-mlp`, `just bench-bitlinear`, `just bench-all`). TabM and TabICL backend comparisons have no recipe: `python scripts/benchmarks/bench_tabm.py` and `python scripts/benchmarks/bench_tabicl.py`.
+To run benchmarks yourself: `python scripts/benchmarks/bench_baselines.py`, or use the `just` recipes (`just bench-backends` for Rust vs Mojo tree backends, `just bench-mlp`, `just bench-bitlinear`, `just bench-all`, `just bench-tabarena`). TabM and TabICL backend comparisons have no recipe: `python scripts/benchmarks/bench_tabm.py` and `python scripts/benchmarks/bench_tabicl.py`.
 
 ## Installation
 
