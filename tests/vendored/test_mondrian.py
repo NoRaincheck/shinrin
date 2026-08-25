@@ -25,9 +25,11 @@ from numpy.testing import assert_equal
 from shinrin.mondrian import MondrianTreeClassifier
 from shinrin.mondrian import MondrianTreeRegressor
 
+# Pinned numeric-path regression tests: disable automatic categorical
+# handling so split geometry matches the historical expected values.
 estimators = [
-    MondrianTreeRegressor(random_state=0),
-    MondrianTreeClassifier(random_state=0),
+    MondrianTreeRegressor(random_state=0, categorical_features=None),
+    MondrianTreeClassifier(random_state=0, categorical_features=None),
 ]
 
 
