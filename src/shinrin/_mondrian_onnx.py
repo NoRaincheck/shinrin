@@ -51,7 +51,6 @@ followed by division by the tree count yields averaged predictions.
 
 from __future__ import annotations
 
-import warnings
 from typing import Any
 
 import numpy as np
@@ -273,6 +272,18 @@ def mondrian_to_onnx(
     if helper is None or TensorProto is None:
         raise ImportError(
             "onnx is required for ONNX export. Install it with: pip install onnx"
+        )
+    encoder = getattr(estimator, "_cat_encoder_", None)
+    if encoder is not None and getattr(encoder, "active_", False):
+        import warnings
+
+        warnings.warn(
+            "This estimator has categorical_features active: the exported "
+            "ONNX graph operates in the internally ENCODED feature space. "
+            "Feed it X transformed via estimator.transform_categoricals(X) "
+            "(or disable categorical handling before fitting).",
+            UserWarning,
+            stacklevel=2,
         )
     trees = _collect_trees(estimator)
     smoothing = bool(getattr(estimator, "path_smoothing", True))

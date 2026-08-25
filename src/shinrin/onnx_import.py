@@ -875,6 +875,9 @@ def _from_model_single_tree(
         mondrian_tree.random_state = None
         mondrian_tree.classes_ = None
         mondrian_tree.first_ = True  # Mark as converted (not fresh fit)
+        # Converted models operate in the ORIGINAL feature space; disable
+        # auto categorical detection so predictions match the exported graph.
+        mondrian_tree.categorical_features = None
         mondrian_tree._onnx_converted = True
         return mondrian_tree
     else:
@@ -894,6 +897,9 @@ def _from_model_single_tree(
             else np.array([f"class_{i}" for i in range(int(n_classes[0]))])
         )
         mondrian_tree.first_ = True
+        # Converted models operate in the ORIGINAL feature space; disable
+        # auto categorical detection so predictions match the exported graph.
+        mondrian_tree.categorical_features = None
         mondrian_tree._onnx_converted = True
         return mondrian_tree
 
@@ -985,6 +991,9 @@ def _from_model_forest(
             [f"class_{i}" for i in range(int(n_classes[0]))]
         )
         tree_wrapper.first_ = True
+        # Converted models operate in the ORIGINAL feature space; disable
+        # auto categorical detection so predictions match the exported graph.
+        tree_wrapper.categorical_features = None
         tree_wrapper._onnx_converted = True
         return tree_wrapper
 
@@ -1030,6 +1039,9 @@ def _from_model_forest(
         forest.verbose = 0
 
     forest.first_ = True  # Mark as converted
+    # Converted forests operate in the ORIGINAL feature space; disable auto
+    # categorical detection so predictions match the imported graph.
+    forest.categorical_features = None
     forest._onnx_converted = True  # Mark as ONNX/sklearn converted
     # For GradientBoosting, sum predictions instead of averaging
     # base_values is non-zero only for GradientBoosting (mean of y)
