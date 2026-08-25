@@ -11,14 +11,15 @@ import pytest
 from shinrin._tweaking._core import (
     INF,
     Choice,
+    Constraint,
     aggregate_minimal_flip,
     brute_force_min_flips,
     constraint_cost,
     merge_constraints,
     project,
+    reference_minimal_flip,
     robust_minimal_flip,
     satisfies,
-    reference_minimal_flip,
 )
 
 
@@ -35,15 +36,16 @@ def _vote_brute(models, weights, x, threshold):
                 continue
             leaf_lists = [models[m] for m in subset]
             for combo in itertools.product(*leaf_lists) if leaf_lists else [()]:
-                merged = {}
+                acc: Constraint = {}
                 ok = True
                 for leaf in combo:
-                    merged = merge_constraints(merged, leaf)
-                    if merged is None:
+                    step = merge_constraints(acc, leaf)
+                    if step is None:
                         ok = False
                         break
+                    acc = step
                 if ok:
-                    best = min(best, constraint_cost(merged, x))
+                    best = min(best, constraint_cost(acc, x))
         if best != INF:
             return best
     return INF
@@ -61,17 +63,15 @@ def test_vote_scope_matches_brute_force():
             for _ in range(int(rng.integers(1, 3))):
                 size = int(rng.integers(1, 3))
                 feats = rng.choice(n_features, size=size, replace=False)
-                leaves.append(
-                    {int(f): (float(rng.integers(0, 2)),) * 2 for f in feats}
-                )
+                value = float(rng.integers(0, 2))
+                leaves.append({int(f): (value, value) for f in feats})
             models.append(leaves)
         x = rng.integers(0, 2, size=n_features).astype(float)
         total_w = float(weights.sum())
         threshold = total_w / 2
 
         choices = [
-            [Choice(leaf, float(weights[m])) for leaf in models[m]]
-            + [Choice({}, 0.0)]
+            [Choice(leaf, float(weights[m])) for leaf in models[m]] + [Choice({}, 0.0)]
             for m in range(n_models)
         ]
         outcome = aggregate_minimal_flip(choices, x, threshold=threshold, strict=True)
@@ -89,17 +89,18 @@ def _additive_brute(model_leaves, contributions, x, base):
 
     best = INF
     for combo in itertools.product(*[range(len(l)) for l in model_leaves]):
-        merged = {}
+        acc: Constraint = {}
         ok = True
         score = base
         for m, idx in enumerate(combo):
             score += contributions[m][idx]
-            merged = merge_constraints(merged, model_leaves[m][idx])
-            if merged is None:
+            step = merge_constraints(acc, model_leaves[m][idx])
+            if step is None:
                 ok = False
                 break
+            acc = step
         if ok and score > 0:
-            best = min(best, constraint_cost(merged, x))
+            best = min(best, constraint_cost(acc, x))
     return best
 
 
@@ -114,9 +115,8 @@ def test_additive_scope_matches_brute_force():
             for _ in range(int(rng.integers(1, 4))):
                 size = int(rng.integers(1, 3))
                 feats = rng.choice(n_features, size=size, replace=False)
-                leaves.append(
-                    {int(f): (float(rng.integers(0, 2)),) * 2 for f in feats}
-                )
+                value = float(rng.integers(0, 2))
+                leaves.append({int(f): (value, value) for f in feats})
                 contribs.append(float(rng.uniform(-1.5, 1.5)))
             model_leaves.append(leaves)
             contributions.append(contribs)
@@ -141,7 +141,6 @@ def test_additive_scope_matches_brute_force():
 
 
 def test_aggregate_budget_exhaustion_not_optimal():
-    rng = np.random.default_rng(4)
     x = np.array([0.0, 0.0, 0.0])
     choices = [
         [Choice({0: (1.0, 1.0)}, 1.0), Choice({}, 0.0)],
@@ -191,7 +190,7 @@ def test_reference_flip_single_model():
     assert closer.l1_distance == 2.0
 
 
-def _random_instance(rng):
+def _random_instance(rng) -> tuple[list[list[Constraint]], np.ndarray]:
     n_features = int(rng.integers(4, 8))
     n_models = int(rng.integers(2, 5))
     models = []
@@ -200,7 +199,8 @@ def _random_instance(rng):
         for _ in range(int(rng.integers(1, 4))):
             size = int(rng.integers(1, min(4, n_features) + 1))
             feats = rng.choice(n_features, size=size, replace=False)
-            leaves.append({int(f): (float(rng.integers(0, 2)),) * 2 for f in feats})
+            value = float(rng.integers(0, 2))
+            leaves.append({int(f): (value, value) for f in feats})
         models.append(leaves)
     x = rng.integers(0, 2, size=n_features).astype(float)
     return models, x

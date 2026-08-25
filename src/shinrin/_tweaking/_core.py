@@ -14,13 +14,17 @@ choosing one target leaf per model and intersecting the chosen literal sets;
 the L1 distance from ``x`` to the intersection is the tweak cost, and the
 minimum over choices is the minimal flip.
 
-The exact search is best-first (A*) over partial leaf combinations with an
-admissible suffix lower bound. Because the marginal cost of adding a leaf to
-an existing intersection can drop below that leaf's standalone cost, the
-heuristic is not consistent; states are therefore reopened when a cheaper
-path is found, preserving optimality. Node/time budgets degrade gracefully
-to "best found, optimality unproven", which is how deliberately hard or
-unsolvable ensembles (e.g. large random forests) are handled.
+The exact search is best-first over partial leaf combinations, ordered by
+accumulated cost (uniform-cost / Dijkstra). Edge costs are *marginal*
+constraint costs — adding a leaf to an existing intersection can cost less
+than the leaf standalone — so any heuristic summing standalone leaf costs
+could overestimate; plain g-ordering keeps the search exact. Canonical
+state dedup with lazy stale-entry skipping bounds the state space. For
+aggregate goals (weighted votes, boosted scores) the same machinery runs
+with per-choice contributions and a threshold predicate. Node/time budgets
+degrade gracefully to "best found, optimality unproven", which is how
+deliberately hard or unsolvable ensembles (e.g. large random forests) are
+handled.
 """
 
 from __future__ import annotations
@@ -137,26 +141,20 @@ class _RobustFlipSearcher:
         # Registry of constructed intersections; index 0 is the empty set.
         self.constraints: list[Constraint] = [{}]
 
-        # Admissible suffix bound: any tweak flipping model i costs at least
-        # its cheapest single-model flip. Note a model that already predicts
-        # the target still contributes its satisfied leaf (cost 0 here) — the
-        # joint tweak must be prevented from knocking it off that leaf.
-        self.suffix_min = [0.0] * (self.n_models + 1)
-        for i in range(self.n_models - 1, -1, -1):
-            rest = self.suffix_min[i + 1]
-            if self.leaves[i]:
-                own = min(constraint_cost(c, x) for c in self.leaves[i])
-            else:
-                own = INF
-            self.suffix_min[i] = INF if own == INF or rest == INF else rest + own
+        # Feasibility: every model must own at least one target leaf.
+        self.feasible = all(bool(leaves) for leaves in models_target_leaves)
 
     def run(self) -> FlipOutcome:
         start = time.monotonic()
+        if not self.feasible:
+            return FlipOutcome(False, None, (), INF, 0, True, time.monotonic() - start)
         counter = itertools.count()
-        heap: list[_Entry] = [_Entry(self.suffix_min[0], next(counter), 0, 0)]
+        heap: list[_Entry] = [_Entry(0.0, next(counter), 0, 0)]
         # Canonical states: (model layer, frozen intersection) -> constraint
-        # registry index; best_g tracks the cheapest known reachability cost
-        # and allows reopening when the heuristic proves inconsistent.
+        # registry index. Uniform-cost search (Dijkstra): edge costs are
+        # *marginal* constraint costs, which shrink as intersections grow,
+        # so any positive heuristic over standalone leaf costs risks
+        # overestimating; g-ordering alone keeps the search exact.
         registry: dict[tuple[int, frozenset], int] = {(0, frozenset()): 0}
         best_g: dict[tuple[int, frozenset], float] = {(0, frozenset()): 0.0}
         solution: tuple[float, Constraint] | None = None
@@ -185,7 +183,7 @@ class _RobustFlipSearcher:
             choices = self.leaves[i]
             for choice in choices:
                 new_c = merge_constraints(merged, choice)
-                if new_c is None or self.suffix_min[i + 1] == INF:
+                if new_c is None:
                     continue
                 new_g = constraint_cost(new_c, self.x)
                 new_canon = (i + 1, frozenset(new_c.items()))
@@ -200,12 +198,7 @@ class _RobustFlipSearcher:
                 best_g[new_canon] = new_g
                 heapq.heappush(
                     heap,
-                    _Entry(
-                        new_g + self.suffix_min[i + 1],
-                        next(counter),
-                        i + 1,
-                        idx,
-                    ),
+                    _Entry(new_g, next(counter), i + 1, idx),
                 )
 
         elapsed = time.monotonic() - start
@@ -305,11 +298,7 @@ class _AggregateFlipSearcher:
             merged = self.constraints[ci]
             canon = (i, frozenset(merged.items()))
             g_here = constraint_cost(merged, self.x)
-            live = [
-                (g, agg)
-                for g, agg in frontier[canon]
-                if g <= g_here + 1e-15
-            ]
+            live = [(g, agg) for g, agg in frontier[canon] if g <= g_here + 1e-15]
             if not live:
                 continue
             # Highest aggregate among cheapest-known entries.
@@ -343,16 +332,13 @@ class _AggregateFlipSearcher:
                     (g, agg)
                     for g, agg in entries
                     if not (
-                        new_g <= g + 1e-15
-                        and agg_here + choice.contribution >= agg
+                        new_g <= g + 1e-15 and agg_here + choice.contribution >= agg
                     )
                 ]
                 entries.append((new_g, agg_here + choice.contribution))
                 idx = len(self.constraints)
                 self.constraints.append(new_c)
-                heapq.heappush(
-                    heap, _Entry(new_g, next(counter), i + 1, idx)
-                )
+                heapq.heappush(heap, _Entry(new_g, next(counter), i + 1, idx))
 
         elapsed = time.monotonic() - start
         if solution is not None:
