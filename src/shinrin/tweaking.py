@@ -25,7 +25,7 @@ from typing import Any
 
 import numpy as np
 
-from ._tweaking._adapters import SpotView, SpotsetView
+from ._tweaking._adapters import SpotsetView, SpotView
 from ._tweaking._core import (
     FlipOutcome,
     build_models_target_leaves,
@@ -78,7 +78,7 @@ class RashomonFlipSearch:
             self._view = SpotsetView(estimator)
         elif hasattr(estimator, "get_result"):
             self._view = SpotView(estimator)
-        elif hasattr(estimator, "estimators_"):
+        elif hasattr(estimator, "estimators_") or hasattr(estimator, "tree_"):
             from ._tweaking._sklearn_adapter import SklearnForestView
 
             self._view = SklearnForestView(estimator)
@@ -170,15 +170,11 @@ class RashomonFlipSearch:
             [(c, label == target_idx) for c, label in model_leaves]
             for model_leaves in self._view.leaves
         ]
-        target_leaves, predicts_target = build_models_target_leaves(
-            all_model_leaves, x
-        )
+        target_leaves, predicts_target = build_models_target_leaves(all_model_leaves, x)
 
         outcome: FlipOutcome
         if scope == "reference":
-            outcome = reference_minimal_flip(
-                target_leaves[0], x, predicts_target[0]
-            )
+            outcome = reference_minimal_flip(target_leaves[0], x, predicts_target[0])
         else:
             outcome = robust_minimal_flip(
                 target_leaves, x, max_nodes=max_nodes, time_limit=time_limit
@@ -186,16 +182,11 @@ class RashomonFlipSearch:
 
         flipped_after = 0
         verified = False
-        x_new = None
-        if outcome.success:
-            x_new = outcome.x_new
+        x_new = outcome.x_new
+        if outcome.success and x_new is not None:
             preds_after = self._view.predict_all(x_new.reshape(1, -1))[:, 0]
             flipped_after = int(np.sum(preds_after == target_idx))
-            required = (
-                preds_after.shape[0]
-                if scope == "rashomon"
-                else 1
-            )
+            required = preds_after.shape[0] if scope == "rashomon" else 1
             verified = flipped_after >= required
             if not verified:
                 raise RuntimeError(

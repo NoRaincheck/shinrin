@@ -11,7 +11,6 @@ import numpy as np
 import pytest
 
 from shinrin import SPOTClassifier, SPOTSETClassifier
-
 from shinrin.tweaking import RashomonFlipSearch, summarize_flip_results
 
 
@@ -20,9 +19,9 @@ def xor_spotset():
     rng = np.random.default_rng(11)
     X = rng.integers(0, 2, size=(60, 4)).astype(float)
     y = np.logical_xor(X[:, 0], X[:, 1]).astype(int)
-    clf = SPOTSETClassifier(
-        regularization=0.02, rashomon_bound_multiplier=0.35
-    ).fit(X, y)
+    clf = SPOTSETClassifier(regularization=0.02, rashomon_bound_multiplier=0.35).fit(
+        X, y
+    )
     return clf, X
 
 
@@ -32,9 +31,7 @@ def _brute_min_flips(trees, x, target_idx, max_size=4):
             xc = x.copy()
             for f in combo:
                 xc[f] = 1.0 - xc[f]
-            if all(
-                t.predict(xc.reshape(1, -1))[0] == target_idx for t in trees
-            ):
+            if all(t.predict(xc.reshape(1, -1))[0] == target_idx for t in trees):
                 return size, combo
     return None, None
 
@@ -58,6 +55,7 @@ def test_spotset_rashomon_scope_matches_brute_force(xor_spotset):
         assert res.l1_distance == pytest.approx(expected)
         assert res.verified
         assert res.optimal
+        assert res.x_new is not None
         # every tree genuinely predicts the target after the tweak
         for t in trees:
             assert t.predict(res.x_new.reshape(1, -1))[0] == res.target
@@ -139,7 +137,10 @@ def _tree_min_flip_independent(tree, x, target_idx):
         if tree.children_left[node] == -1:
             if int(np.argmax(tree.value[node])) != target_idx:
                 continue
-            best = min(best, sum(max(0.0, lo - x[f], x[f] - hi) for f, (lo, hi) in path.items()))
+            best = min(
+                best,
+                sum(max(0.0, lo - x[f], x[f] - hi) for f, (lo, hi) in path.items()),
+            )
             continue
         f, t = int(tree.feature[node]), float(tree.threshold[node])
         plo, phi = path.get(f, (-np.inf, np.inf))
@@ -187,9 +188,9 @@ def test_sklearn_forest_rashomon_scope(small_forest_data):
     from sklearn.ensemble import RandomForestClassifier
 
     X, y = small_forest_data
-    forest = RandomForestClassifier(
-        n_estimators=8, max_depth=3, random_state=0
-    ).fit(X, y)
+    forest = RandomForestClassifier(n_estimators=8, max_depth=3, random_state=0).fit(
+        X, y
+    )
     search = RashomonFlipSearch(forest)
 
     reference = search.search(X[:20], scope="reference")
@@ -197,13 +198,12 @@ def test_sklearn_forest_rashomon_scope(small_forest_data):
 
     robust = search.search(X[:20], scope="rashomon", max_nodes=200_000)
     solved = [r for r in robust if r.success]
-    # whatever the split between solved/infeasible, robust >= reference holds,
-    # every solved tweak flips all 8 trees (verified internally), and the
-    # decorrelated forest is markedly harder than the Rashomon set
+    assert solved, "expected at least one solvable all-trees tweak"
     for ref_res, rob_res in zip(reference, robust):
         if ref_res.success and rob_res.success:
             assert rob_res.l1_distance >= ref_res.l1_distance - 1e-12
         if rob_res.success:
             assert rob_res.verified
+            assert rob_res.x_new is not None
             preds = forest.predict(rob_res.x_new.reshape(1, -1))[0]
             assert preds == rob_res.target
