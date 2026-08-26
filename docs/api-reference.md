@@ -89,6 +89,14 @@ See [SPOTSET Rashomon Sets](models/spotset.md)
 
 See [Minimal-Flip Feature Tweaking](features/minimal-flip-tweaking.md)
 
+## Categorical Features
+
+- `TargetEncoder()` — CatBoost-style target encoder with partition recovery APIs `members()` / `threshold_for_partition()` (`shinrin.TargetEncoder`)
+- `to_categorical_tree(model, encoder)` — Recover categorical splits as membership sets; returns a `CategoricalTree` (or list per forest estimator) (`shinrin.categorical`)
+- `CategoricalTree` — Tree representation with raw-input `apply()`, `to_text()` rendering, and `to_encoded_thresholds()` round-trip (`shinrin.categorical`)
+
+See [Categorical Features & Target Encoding](features/target-encoding.md)
+
 ## ONNX Export
 
 - `to_onnx()` — Convert model to ONNX format (`shinrin.onnx`)

@@ -92,6 +92,52 @@ predictions = session.run(None, {input_name: X_test})[0]
 | `*QuantileRegressor` trees & forests | ✅ Supported (quantile baked in at export) |
 | `CorelsClassifier`, `SPOTClassifier`, `OrdtClassifier`, `SkopeRules` | ✅ Supported |
 
+## Categorical features & `BRANCH_MEMBER` (opset 5)
+
+When categorical columns are handled by training on target-encoded values
+(see [`TargetEncoder`](target-encoding.md)), the default export has a
+drawback: encoded-threshold splits only make sense together with the
+encoder, so the deployed graph must ship the encoder too.
+
+Passing the fitted encoder via `encoder=` switches to an `ai.onnx.ml`
+opset-5 `TreeEnsemble` where every categorical split becomes a
+`BRANCH_MEMBER` node testing **raw category-code membership**
+(`x_color in {0, 2}` instead of `x_color_enc <= 0.37`). The graph then
+consumes your original input feature convention — numeric columns and raw
+integer category codes — with no encoder at inference time:
+
+```python
+import numpy as np
+import shinrin
+
+X_raw = ...  # column 0 holds integer category codes
+enc = shinrin.TargetEncoder(categorical_features=[0]).fit(X_raw, y)
+model = shinrin.MondrianForestRegressor(n_estimators=20).fit(
+    enc.transform(X_raw), y
+)
+
+onnx_model = shinrin.to_onnx(model, X=X_raw, encoder=enc)
+shinrin.save_onnx(model, "model.onnx", X=X_raw, encoder=enc)
+```
+
+Notes:
+
+- Only prefixes of the encoding-sorted categories are representable as a
+  single encoded threshold, so recovery is exact for any model trained on
+  encoded data.
+- Unseen categories: at inference the ONNX graph routes codes that were
+  absent during training through the false branches of membership tests.
+  Native predict would encode them to the prior; if exact parity on
+  unseen categories matters, re-fit with those categories present.
+- Mondrian models with `path_smoothing=True`: smoothing cannot be
+  represented in a tree ensemble, so `encoder=` exports the hard tree
+  structure and emits a `UserWarning`. Pass `approximate=False` to build
+  the exact smoothing graph (without member splits) instead.
+- Quantile models do not support `encoder=`.
+
+The exported model carries a `shinrin_treeensemble_export="member-v5"`
+metadata property.
+
 ## Importing models with `from_model()`
 
 The reverse direction is supported too: convert a fitted scikit-learn

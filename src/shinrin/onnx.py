@@ -352,6 +352,8 @@ def to_onnx(
     name="ShinrinModel",
     target_opset=None,
     quantile=None,
+    encoder=None,
+    approximate=None,
 ):
     """Convert a fitted shinrin model to ONNX format.
 
@@ -374,6 +376,17 @@ def to_onnx(
     quantile : int, optional
         For quantile models: quantile (0-100) baked into the exported graph.
         Required for quantile estimators, ignored elsewhere.
+    encoder : fitted TargetEncoder, optional
+        Target encoder used to encode categorical columns before training.
+        When provided, tree/forest models are exported as an ``ai.onnx.ml``
+        opset-5 ``TreeEnsemble`` whose categorical splits are ``BRANCH_MEMBER``
+        nodes over raw category codes — the graph consumes the original
+        (pre-encoding) input convention instead of encoded values.
+    approximate : bool, optional
+        Mondrian models only: force the plain tree-ensemble encoding
+        (``True``) or the exact smoothing graph (``False``). With
+        ``encoder``, ``approximate=False`` keeps the exact smoothing graph
+        instead of the member encoding.
 
     Returns
     -------
@@ -438,12 +451,24 @@ def to_onnx(
                 class_names=class_names,
                 name=name,
                 target_opset=target_opset,
+                encoder=encoder,
+                approximate=approximate,
             )
     except ImportError:  # pragma: no cover - sklearn missing
         pass
 
     from shinrin._skgarden.quantile.ensemble import BaseForestQuantileRegressor
     from shinrin._skgarden.quantile.tree import BaseTreeQuantileRegressor
+
+    if (
+        isinstance(estimator, (BaseTreeQuantileRegressor, BaseForestQuantileRegressor))
+        and encoder is not None
+    ):
+        raise ValueError(
+            "encoder is not supported for quantile models: their exact "
+            "weighted-percentile graphs have no categorical split "
+            "representation"
+        )
 
     if isinstance(estimator, BaseTreeQuantileRegressor):
         from shinrin._quantile_onnx import quantile_tree_to_onnx
@@ -524,6 +549,18 @@ def to_onnx(
     except ImportError:  # pragma: no cover - pandas missing
         pass
 
+    if encoder is not None:
+        from shinrin._treeensemble5_onnx import treeensemble_member_to_onnx
+
+        return treeensemble_member_to_onnx(
+            estimator,
+            encoder,
+            feature_names=feature_names,
+            class_names=class_names,
+            name=name,
+            target_opset=target_opset,
+        )
+
     model = _generic_to_onnx(estimator, feature_names, name, target_opset)
     props = {
         "shinrin_version": "0.2.0",
@@ -535,7 +572,9 @@ def to_onnx(
     return model
 
 
-def save_onnx(estimator, path, X=None, feature_names=None, class_names=None):
+def save_onnx(
+    estimator, path, X=None, feature_names=None, class_names=None, encoder=None
+):
     """Save a fitted shinrin model to an ONNX file.
 
     Parameters
@@ -550,12 +589,15 @@ def save_onnx(estimator, path, X=None, feature_names=None, class_names=None):
         Feature names.
     class_names : list of str, optional
         Class names for classification.
+    encoder : fitted TargetEncoder, optional
+        See :func:`to_onnx`: enables ``BRANCH_MEMBER`` categorical export.
     """
     model = to_onnx(
         estimator,
         X=X,
         feature_names=feature_names,
         class_names=class_names,
+        encoder=encoder,
     )
     with open(path, "wb") as f:
         f.write(model.SerializeToString())
