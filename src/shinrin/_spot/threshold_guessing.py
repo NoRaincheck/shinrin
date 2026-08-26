@@ -4,43 +4,77 @@ from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.utils import check_X_y
 from sklearn.ensemble import GradientBoostingClassifier
 from sklearn.utils.validation import check_array, check_is_fitted
-    
+
+from shinrin._categorical import resolve_categorical_mask
+
+# Smoothing strength of the m-estimate shrinkage applied to per-category
+# target statistics (matches TargetStatisticsEncoder's default).
+_CAT_SMOOTHING = 1.0
+
+# Identity tuples describing every candidate binarization axis:
+#   ("numeric",    j, thresh)  -> X[:, j] <= thresh
+#   ("cat_target", j, s)       -> smoothed target statistic of X[:, j] <= s
+#   ("cat_onehot", j, value)   -> X[:, j] == value
+
+
 class ThresholdGuessBinarizer(TransformerMixin, BaseEstimator):
     f"""
-    Encode numerical features as a one-hot numeric array. 
+    Encode numerical features as a one-hot numeric array.
     The encoding is based on the thresholds found by a Gradient Boosting Classifier.
+
+    Integer-coded categorical columns (detected automatically or given
+    explicitly) are handled with gradient-boosting-friendly encodings before
+    threshold guessing: ``"target"`` replaces each category by its smoothed
+    target statistic so that GBDT splits on that axis correspond to
+    partitions of categories by target rate, while ``"onehot"`` emits one
+    indicator column per observed category value.
 
     For more information on the method used please refer to the following paper:
     "Fast Sparse Decision Tree Optimization via Reference Ensembles"
     https://doi.org/10.1609/aaai.v36i9.21194
-    
+
     Parameteres
     ----------
     learning_rate : float, default=0.1
         The chosen learning rate for the Gradient Boosting Classifier.
-        For more information please refer to the documentation of the Gradient Boosting Classifier 
+        For more information please refer to the documentation of the Gradient Boosting Classifier
         (https://scikit-learn.org/stable/modules/generated/sklearn.ensemble.GradientBoostingClassifier.html)
 
     n_estimators : int, default=100
         The number of estimators for the Gradient Boosting Classifier.
-        For more information please refer to the documentation of the Gradient Boosting Classifier 
+        For more information please refer to the documentation of the Gradient Boosting Classifier
         (https://scikit-learn.org/stable/modules/generated/sklearn.ensemble.GradientBoostingClassifier.html)
 
     max_depth : int, default=3
         The maximum depth of the trees for the Gradient Boosting Classifier.
-        For more information please refer to the documentation of the Gradient Boosting Classifier 
+        For more information please refer to the documentation of the Gradient Boosting Classifier
         (https://scikit-learn.org/stable/modules/generated/sklearn.ensemble.GradientBoostingClassifier.html)
 
     random_state : int, default=0
         The random state for the Gradient Boosting Classifier.
-        For more information please refer to the documentation of the Gradient Boosting Classifier 
+        For more information please refer to the documentation of the Gradient Boosting Classifier
         (https://scikit-learn.org/stable/modules/generated/sklearn.ensemble.GradientBoostingClassifier.html)
 
     column_elimination : bool, default=True
         Whether to perform column elimination or not. If True, the algorithm will
         iteratively remove the least important feature until the score of the model
         decreases. This is done to reduce the number of features in the final model.
-    
+
+    categorical_features : "auto", None, bool or array-like, optional (default="auto")
+        Which columns to treat as categorical. ``"auto"`` detects purely
+        integral columns with at most ``max_categories`` unique values;
+        a boolean mask or integer index array selects columns explicitly;
+        ``None`` disables categorical handling.
+
+    max_categories : int, default=32
+        Cardinality cap used by the ``"auto"`` detection heuristic.
+
+    categorical_encoding : {"target", "onehot"}, default="target"
+        How detected categorical columns are encoded before threshold
+        guessing. ``"target"`` uses smoothed per-category target statistics
+        (CatBoost-style; one axis per column); ``"onehot"`` uses one
+        indicator column per observed value (XGBoost-style).
+
     Attributes
     ----------
     n_features_in_ : int
@@ -55,8 +89,10 @@ class ThresholdGuessBinarizer(TransformerMixin, BaseEstimator):
         names are a list of strings of the form `x0`, `x1`, ..., `x(n_features_in_-1)`.
 
     thresholds_ : list of tuples
-        The thresholds found by the Gradient Boosting Classifier. Each tuple is of the form `(j, thresh)`
-        where `j` is the index of the feature and `thresh` is the threshold found for that feature.
+        The surviving binarization axes. Each tuple encodes a guessed
+        threshold on one candidate axis: ``("numeric", j, thresh)``,
+        ``("cat_target", j, stat_thresh)`` or ``("cat_onehot", j,
+        value, thresh)``.
 
     Examples
     --------
@@ -97,28 +133,33 @@ class ThresholdGuessBinarizer(TransformerMixin, BaseEstimator):
         n_estimators: int = 100,
         max_depth: int = 3,
         random_state: int = 0,
-        column_elimination: bool = True
-
+        column_elimination: bool = True,
+        categorical_features="auto",
+        max_categories: int = 32,
+        categorical_encoding: str = "target",
     ):
         self.learning_rate = learning_rate
         self.n_estimators = n_estimators
         self.max_depth = max_depth
         self.random_state = random_state
         self.column_elimination = column_elimination
-        
+        self.categorical_features = categorical_features
+        self.max_categories = max_categories
+        self.categorical_encoding = categorical_encoding
+
     def fit(self, X, y, columns=None):
         """
         Fit ThresholdGuessBinarizer to X, y.
 
-        If the user would like to produce a transformed dataset with legible 
-        feature names, then `X` should be a pandas DataFrame with named 
+        If the user would like to produce a transformed dataset with legible
+        feature names, then `X` should be a pandas DataFrame with named
         columns, or provde the `columns` parameter.
 
         Parameters
         ----------
         X : array-like of shape (n_samples, n_features)
             The data to fit.
-        
+
         y : array-like of shape (n_samples,)
             The target variable used to fit the internal Gradient Boosting Classifier.
 
@@ -128,10 +169,11 @@ class ThresholdGuessBinarizer(TransformerMixin, BaseEstimator):
 
         Returns
         -------
-        self : object 
+        self : object
             Fitted encoder.
         """
-        # Store the column names. columns check has to be deone before check_array because it converts X to a numpy array
+        # Store the column names. columns check has to be done before
+        # check_array because it converts X to a numpy array
         self.feature_names_in_ = columns
         if hasattr(X, 'columns'):
             self.feature_names_in_ = X.columns
@@ -147,27 +189,32 @@ class ThresholdGuessBinarizer(TransformerMixin, BaseEstimator):
         # Store the number of features
         self.n_features_in_ = m
 
+        mask = resolve_categorical_mask(X, self.categorical_features,
+                                        self.max_categories)
+        self.categorical_mask_ = mask
+        W, w_identities = self.__build_candidate_matrix(X, y, mask)
+
         # Extract the thresholds from the model
         clf = GradientBoostingClassifier(loss='log_loss',
-                                                learning_rate=self.learning_rate,
-                                                n_estimators=self.n_estimators,
-                                                max_depth=self.max_depth,
-                                                random_state=self.random_state)
-        clf.fit(X, y)
+                                         learning_rate=self.learning_rate,
+                                         n_estimators=self.n_estimators,
+                                         max_depth=self.max_depth,
+                                         random_state=self.random_state)
+        clf.fit(W, y)
         thresholds = []
         estimators = clf.estimators_
-        for j in range(self.n_features_in_):
-            thresholds_j = []
+        for w in range(W.shape[1]):
+            thresholds_w = []
             for k in range(len(estimators)):
-                thresholds_j.append(self.__threshold(estimators[k, 0], j))
-            thresholds_j = np.unique(np.concatenate(thresholds_j))
-            for thresh in thresholds_j:
-                thresholds.append((j, thresh))
+                thresholds_w.append(self.__threshold(estimators[k, 0], w))
+            thresholds_w = np.unique(np.concatenate(thresholds_w))
+            for thresh in thresholds_w:
+                thresholds.append(w_identities[w] + (float(thresh),))
 
         # Perform Dataset thresholding based on found thresholds
         X_thr = np.zeros((X.shape[0], len(thresholds)))
-        for i, (j, thresh) in enumerate(thresholds):
-            X_thr[:, i] = X[:, j] <= thresh
+        for i, identity in enumerate(thresholds):
+            X_thr[:, i] = self.__identity_column(X, identity)
         X_thr = X_thr.astype(float)
 
         # Refit the model on the thresholded data
@@ -181,16 +228,112 @@ class ThresholdGuessBinarizer(TransformerMixin, BaseEstimator):
         # Return the transformer
         return self
 
+    def __build_candidate_matrix(self, X, y, mask):
+        """Assemble the candidate matrix W passed to the guesser.
+
+        Numeric columns keep their raw values; categorical columns are
+        encoded according to ``categorical_encoding``. Returns ``(W,
+        identities)`` where ``identities[w]`` maps W-column ``w`` back to
+        its original feature and encoding kind (the guessed threshold is
+        appended later).
+        """
+        d = self.n_features_in_
+        if mask is None:
+            identities = [("numeric", j) for j in range(d)]
+            return X.copy(), identities
+
+        if self.categorical_encoding not in ("target", "onehot"):
+            raise ValueError(
+                "categorical_encoding must be 'target' or 'onehot', "
+                f"got {self.categorical_encoding!r}"
+            )
+
+        num_idx = np.flatnonzero(~mask)
+        cat_idx = np.flatnonzero(mask)
+
+        identities = [("numeric", j) for j in num_idx]
+        blocks = [X[:, num_idx]] if num_idx.size else []
+
+        if self.categorical_encoding == "target":
+            # One axis per categorical column: the smoothed per-category
+            # mean of the target. Splits on this axis partition categories
+            # by target rate.
+            y_float = np.asarray(y, dtype=np.float64).ravel()
+            prior = float(y_float.mean())
+            self.prior_ = prior
+            self.cat_stats_ = []
+            stats_block = np.zeros((X.shape[0], cat_idx.size))
+            for pos, j in enumerate(cat_idx):
+                column = X[:, j].astype(np.float64)
+                values, inverse, counts = np.unique(
+                    column, return_inverse=True, return_counts=True)
+                sums = np.bincount(inverse, weights=y_float,
+                                   minlength=values.size)
+                stats = (sums + _CAT_SMOOTHING * prior) / (
+                    counts + _CAT_SMOOTHING)
+                mapping = dict(zip(values.tolist(), stats.tolist()))
+                self.cat_stats_.append(mapping)
+                stats_block[:, pos] = [
+                    mapping.get(v, prior) for v in column.tolist()]
+            blocks.append(stats_block)
+            identities += [("cat_target", int(j)) for j in cat_idx]
+        else:
+            # One indicator column per observed category value.
+            self.cat_values_ = []
+            onehot_blocks = []
+            for j in cat_idx:
+                values = np.unique(X[:, j])
+                self.cat_values_.append(values.tolist())
+                for v in values:
+                    onehot_blocks.append((X[:, j] == v).astype(float))
+                    identities.append(("cat_onehot", int(j), float(v)))
+            if onehot_blocks:
+                blocks.append(np.column_stack(onehot_blocks))
+
+        return np.column_stack(blocks), identities
+
+    def __identity_column(self, X, identity):
+        """Compute the binary column for one binarization identity.
+
+        Every identity encodes ``W[:, w] <= thresh`` on its candidate
+        axis: raw values for numeric columns, frozen target statistics
+        for categorical columns, or 0/1 indicators in one-hot mode.
+        """
+        kind = identity[0]
+        if kind == "numeric":
+            _, j, thresh = identity
+            return X[:, j] <= thresh
+        if kind == "cat_target":
+            _, j, s = identity
+            pos = int(np.searchsorted(np.flatnonzero(
+                self.categorical_mask_), j))
+            stats = self.cat_stats_[pos]
+            column = X[:, j].astype(np.float64)
+            encoded = np.array(
+                [stats.get(v, self.prior_) for v in column.tolist()])
+            return encoded <= s
+        if kind == "cat_onehot":
+            _, j, value, thresh = identity
+            return (X[:, j] == value) <= thresh
+        raise ValueError(f"Unknown threshold identity {identity!r}")
+
     def get_feature_names_out(self, *args, **params):
         """
-        Generates the names of the transformed features. This is necessary to 
+        Generates the names of the transformed features. This is necessary to
         provide the `set_output` api that enables SciKit-Learn Transformers to
         return DataFrames (with named columns) instead of ndarrays.
         """
         check_is_fitted(self, ['n_features_in_', 'feature_names_in_', 'thresholds_', 'n_features_out_'])
-        return [f'{self.feature_names_in_[j]} <= {thresh}' for j, thresh in self.thresholds_]
+        return [self._identity_name(identity) for identity in self.thresholds_]
 
-    
+    def _identity_name(self, identity):
+        kind = identity[0]
+        name = self.feature_names_in_[identity[1]]
+        if kind == "numeric":
+            return f'{name} <= {identity[2]}'
+        if kind == "cat_target":
+            return f'{name} statistic <= {identity[2]}'
+        return f'{name} == {identity[2]}'
 
     def transform(self, X):
         """
@@ -208,7 +351,7 @@ class ThresholdGuessBinarizer(TransformerMixin, BaseEstimator):
         """
         # Check is fit had ben called
         check_is_fitted(self, ['n_features_in_', 'feature_names_in_', 'thresholds_', 'n_features_out_'])
-        
+
         # Input validation
         X = check_array(X, accept_sparse=False)
 
@@ -217,8 +360,11 @@ class ThresholdGuessBinarizer(TransformerMixin, BaseEstimator):
         if X.shape[1] != self.n_features_in_:
             raise ValueError(f"X has {X.shape[1]} features, but ThresholdBinarizer is expecting {self.n_features_in_} features as input")
 
-        return np.concatenate([np.atleast_2d(X[:, j] <= thresh).T for j, thresh in self.thresholds_], axis=1).astype(float)
-    
+        return np.concatenate(
+            [np.atleast_2d(self.__identity_column(X, identity)).T
+             for identity in self.thresholds_],
+            axis=1).astype(float)
+
     def __threshold(self, estimator, feature):
         """
         Returns the threshold of the estimator for the given feature if it exists.
@@ -226,7 +372,7 @@ class ThresholdGuessBinarizer(TransformerMixin, BaseEstimator):
         f = estimator.tree_.feature
         t = estimator.tree_.threshold
         return t[f==feature]
-    
+
     def __column_elimination(self, X, y, thresholds, clf):
         """
         Iteratively removes the least important feature until the score of the model
@@ -234,7 +380,7 @@ class ThresholdGuessBinarizer(TransformerMixin, BaseEstimator):
         """
         # Check is fit had ben called
         check_is_fitted(self, ['n_features_in_', 'feature_names_in_'])
-        
+
         # Fit the model on the thresholded data
         clf.fit(X, y)
         base_score = clf.score(X, y)
@@ -256,36 +402,35 @@ class ThresholdGuessBinarizer(TransformerMixin, BaseEstimator):
             # Update the current score
             curr_score = clf.score(X, y)
             i += 1
-        
+
         # Add the last removed feature back
         if last_removed is not None:
             thresholds.append(last_removed[1])
-        
+
         return thresholds
-    
+
     def feature_map(self):
         """
-        Extracts the mapping of original features to the transformed features. This can be passed to 
+        Extracts the mapping of original features to the transformed features. This can be passed to
         the SPOTClassifier to generate N-ary trees.
-        
+
         Returns
         -------
         ret : dict
             A dictionary where the keys are the original feature indices and the values are the indices
             of the transformed features that correspond to the original feature.
         """
-        
+
         # Check if fit had been called
         check_is_fitted(self, ['feature_names_in_', 'n_features_in_', 'thresholds_', 'n_features_out_'])
-        
+
         # Create the feature map
         ret = {}
-        for i, (j, _) in enumerate(self.thresholds_):
+        for i, identity in enumerate(self.thresholds_):
+            j = identity[1]
             if j not in ret:
                 ret[j] = [i]
             else:
-                ret[j].append(i)        
-                
-        return ret
-        
+                ret[j].append(i)
 
+        return ret

@@ -283,6 +283,16 @@ def mondrian_to_onnx(
         raise ImportError(
             "onnx is required for ONNX export. Install it with: pip install onnx"
         )
+    _cat_encoder = getattr(estimator, "_cat_encoder_", None)
+    if _cat_encoder is not None and getattr(_cat_encoder, "active_", False):
+        warnings.warn(
+            "This estimator has categorical_features active: the exported "
+            "ONNX graph operates in the internally ENCODED feature space. "
+            "Feed it X transformed via estimator.transform_categoricals(X) "
+            "(or disable categorical handling before fitting).",
+            UserWarning,
+            stacklevel=2,
+        )
     trees = _collect_trees(estimator)
     smoothing = bool(getattr(estimator, "path_smoothing", True))
 

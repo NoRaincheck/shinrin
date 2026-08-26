@@ -36,6 +36,7 @@ from shinrin._compat.sklearn_utils_validation import check_array
 from shinrin._compat.sklearn_utils_validation import check_is_fitted
 from shinrin._compat.sklearn_utils_validation import check_X_y
 from shinrin._compat.sklearn_exceptions import NotFittedError
+from shinrin._categorical import TargetStatisticsEncoder, resolve_categorical_mask
 
 from ._criterion import Criterion
 from ._splitter import Splitter
@@ -82,7 +83,9 @@ class BaseDecisionTree(ABC, BaseEstimator):
                  min_samples_split,
                  random_state,
                  class_weight=None,
-                 path_smoothing=False):
+                 path_smoothing=False,
+                 categorical_features=None,
+                 max_categories=32):
         self.criterion = criterion
         self.splitter = splitter
         self.max_depth = max_depth
@@ -90,6 +93,8 @@ class BaseDecisionTree(ABC, BaseEstimator):
         self.random_state = random_state
         self.class_weight = class_weight
         self.path_smoothing = path_smoothing
+        self.categorical_features = categorical_features
+        self.max_categories = max_categories
 
     def fit(self, X, y, sample_weight=None, check_input=True,
             X_idx_sorted=None):
@@ -188,6 +193,13 @@ class BaseDecisionTree(ABC, BaseEstimator):
             else:
                 sample_weight = expanded_class_weight
 
+        # Automatically detect + target-encode integer-coded categorical
+        # columns before growing the tree (no-op unless anything is found).
+        encoder = self._fit_categorical_encoder(X, y[:, 0])
+        self._cat_encoder_ = encoder if encoder is not None and encoder.active_ else None
+        if self._cat_encoder_ is not None:
+            X = self._cat_encoder_.transform(X)
+
         # Build tree
         criterion = self.criterion
         if not isinstance(criterion, Criterion):
@@ -212,6 +224,40 @@ class BaseDecisionTree(ABC, BaseEstimator):
 
         return self
 
+    def _fit_categorical_encoder(self, X, y_stats):
+        """Resolve the categorical mask and fit the target-statistic encoder.
+
+        Returns ``None`` when categorical handling is disabled, no column
+        qualifies, or the tree was converted from another model (in which
+        case splits live in the original feature space and must not be
+        reinterpreted).
+        """
+        if getattr(self, "_onnx_converted", False):
+            self.categorical_features_ = None
+            return None
+        mask = resolve_categorical_mask(
+            X, self.categorical_features, self.max_categories)
+        self.categorical_features_ = mask
+        if mask is None or not mask.any():
+            return None
+        return TargetStatisticsEncoder().fit(X, y_stats, mask)
+
+    def transform_categoricals(self, X):
+        """Encode integer-coded categorical columns of ``X`` for this model.
+
+        Applies the fitted CatBoost-style target-statistic mapping to the
+        columns selected by ``categorical_features`` during ``fit``. Columns
+        without categorical handling pass through unchanged. Values unseen
+        at fit time map to the global prior.
+
+        Useful when a downstream consumer (e.g. ONNX export) operates in
+        the model's internal encoded space.
+        """
+        encoder = getattr(self, "_cat_encoder_", None)
+        if encoder is None:
+            return np.asarray(X, dtype=np.float32)
+        return encoder.transform(X)
+
     def _validate_X_predict(self, X, check_input):
         """Validate X whenever one tries to predict, apply, predict_proba"""
         if self.tree_ is None:
@@ -231,6 +277,10 @@ class BaseDecisionTree(ABC, BaseEstimator):
                              "match the input. Model n_features is %s and "
                              "input n_features is %s "
                              % (self.n_features_, n_features))
+
+        encoder = getattr(self, "_cat_encoder_", None)
+        if encoder is not None:
+            X = encoder.transform(X)
 
         return X
 
@@ -686,6 +736,21 @@ class BaseMondrianTree(BaseDecisionTree):
         ``predict`` / ``predict_proba``; SHAP contributions and anomaly
         scores always use the Mondrian node weights regardless of this
         setting.
+
+    categorical_features : "auto", None, bool or array-like, optional (default="auto")
+        Automatic categorical-feature awareness. Columns whose values are
+        purely integral with at most ``max_categories`` unique values are
+        treated as categorical and replaced by CatBoost-style smoothed
+        target statistics before growing the tree. This makes split-point
+        geometry depend on target structure rather than arbitrary integer
+        codes.
+
+        - ``"auto"``: apply the detection heuristic (default).
+        - boolean mask / integer indices: explicit column selection.
+        - ``None`` / ``False``: disable; every column is treated numerically.
+
+    max_categories : int, optional (default=32)
+        Cardinality cap used by the ``"auto"`` heuristic.
     """
     def partial_fit(self, X, y, classes=None):
         """
@@ -760,6 +825,14 @@ class BaseMondrianTree(BaseDecisionTree):
             self.n_classes_ = np.array(n_classes, dtype=np.intp)
             self.n_outputs_ = 1
             self.tree_ = Tree(self.n_features_, self.n_classes_, self.n_outputs_)
+            # Fit the categorical encoder once on the first batch; later
+            # batches map through the frozen statistics.
+            encoder = self._fit_categorical_encoder(X, y[:, 0])
+            self._cat_encoder_ = (
+                encoder if encoder is not None and encoder.active_ else None)
+
+        if getattr(self, "_cat_encoder_", None) is not None:
+            X = self._cat_encoder_.transform(X)
 
         builder = PartialFitTreeBuilder(
             self.min_samples_split, max_depth, random_state)
@@ -799,14 +872,18 @@ class MondrianTreeRegressor(BaseMondrianTree, RegressorMixin):
                  max_depth=None,
                  min_samples_split=2,
                  random_state=None,
-                 path_smoothing=False):
+                 path_smoothing=False,
+                 categorical_features="auto",
+                 max_categories=32):
         super(MondrianTreeRegressor, self).__init__(
             criterion="mse",
             splitter="mondrian",
             max_depth=max_depth,
             min_samples_split=min_samples_split,
             random_state=random_state,
-            path_smoothing=path_smoothing)
+            path_smoothing=path_smoothing,
+            categorical_features=categorical_features,
+            max_categories=max_categories)
 
     @classmethod
     def from_model(cls, model, X, y):
@@ -891,14 +968,18 @@ class MondrianTreeClassifier(BaseMondrianTree, ClassifierMixin):
                  max_depth=None,
                  min_samples_split=2,
                  random_state=None,
-                 path_smoothing=False):
+                 path_smoothing=False,
+                 categorical_features="auto",
+                 max_categories=32):
         super(MondrianTreeClassifier, self).__init__(
             criterion="classification",
             splitter="mondrian",
             max_depth=max_depth,
             min_samples_split=min_samples_split,
             random_state=random_state,
-            path_smoothing=path_smoothing)
+            path_smoothing=path_smoothing,
+            categorical_features=categorical_features,
+            max_categories=max_categories)
 
     @classmethod
     def from_model(cls, model, X, y):

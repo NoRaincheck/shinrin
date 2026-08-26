@@ -103,13 +103,13 @@ def test_partial_fit_toy_data1():
     #              (d=0, f=1.17251138)
     #                [2]   [0]
     X = np.array(X)
-    mtr = MondrianTreeRegressor(random_state=1)
+    mtr = MondrianTreeRegressor(random_state=1, categorical_features=None)
     y_reg = [2, 1, 3, 4]
     mtr.partial_fit(X, y_reg)
     tree_reg = mtr.tree_
 
     y_clf = [0, 1, 2, 0]
-    mtc = MondrianTreeClassifier(random_state=1)
+    mtc = MondrianTreeClassifier(random_state=1, categorical_features=None)
     mtc.partial_fit(X, y_clf)
     tree_clf = mtc.tree_
 
@@ -151,7 +151,7 @@ def test_partial_fit_toy_data2():
     #       [1] [0]    [3]  [2]
 
     y_reg = [2, 1, 3, 4]
-    mtr = MondrianTreeRegressor(random_state=1)
+    mtr = MondrianTreeRegressor(random_state=1, categorical_features=None)
     mtr.partial_fit(X, y_reg)
     tree = mtr.tree_
     l, r = check_and_return_children(
@@ -166,7 +166,7 @@ def test_partial_fit_toy_data2():
     check_and_return_children(tree, rr, y_reg[2], 0.0)
 
     y_clf = [0, 1, 1, 2]
-    mtc = MondrianTreeClassifier(random_state=1)
+    mtc = MondrianTreeClassifier(random_state=1, categorical_features=None)
     mtc.partial_fit(X, y_clf)
     tree = mtc.tree_
     l, r = check_and_return_children(tree, tree.root, [[1, 2, 1]])
@@ -189,10 +189,13 @@ def test_mondrian_tree_n_node_samples():
 def check_partial_fit_equivalence(size_batch, est, random_state, X, y, is_clf=False):
     start_ptr = list(range(0, 100, size_batch))
     end_ptr = start_ptr[1:] + [100]
+    # Mirror the reference estimator's categorical setting so the online
+    # and batch paths encode (or don't encode) identically.
+    cat_kw = {"categorical_features": est.categorical_features}
     if not is_clf:
-        p_est = MondrianTreeRegressor(random_state=random_state)
+        p_est = MondrianTreeRegressor(random_state=random_state, **cat_kw)
     else:
-        p_est = MondrianTreeClassifier(random_state=random_state)
+        p_est = MondrianTreeClassifier(random_state=random_state, **cat_kw)
     for start, end in zip(start_ptr, end_ptr):
         p_est.partial_fit(X[start:end], y[start:end])
     assert_array_equal(p_est.tree_.n_node_samples, est.tree_.n_node_samples)
@@ -275,18 +278,18 @@ def check_online_fit(clf, X, y, batch_size, is_clf=True):
 
 
 def test_partial_fit_n_samples_1000():
-    mtc = MondrianTreeClassifier(random_state=0)
+    mtc = MondrianTreeClassifier(random_state=0, categorical_features=None)
     X, y = load_digits(return_X_y=True)
     check_online_fit(mtc, X, y, 20)
 
-    mtc = MondrianTreeClassifier(random_state=0)
+    mtc = MondrianTreeClassifier(random_state=0, categorical_features=None)
     check_online_fit(mtc, X, y, 100)
 
     X, y = make_regression(random_state=0, n_samples=10000)
-    mtr = MondrianTreeRegressor(random_state=0)
+    mtr = MondrianTreeRegressor(random_state=0, categorical_features=None)
     check_online_fit(mtr, X, y, 100, is_clf=False)
 
-    mtr = MondrianTreeRegressor(random_state=0)
+    mtr = MondrianTreeRegressor(random_state=0, categorical_features=None)
     check_online_fit(mtr, X, y, 20, is_clf=False)
 
 
